@@ -5,3 +5,10 @@
 datasets/*
 paper_output*
 *.zip
+# Node / TypeScript runtime
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Test scratch
+.vitest/

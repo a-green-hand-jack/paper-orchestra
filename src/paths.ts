@@ -1,0 +1,71 @@
+import { join } from "node:path";
+
+/**
+ * Workspace layout. Issue #1 fixes these names, so they live in one place and
+ * every module derives from here rather than re-joining string literals.
+ *
+ *   <workspace>/
+ *   |-- .brain/{input,raw,manuscript,tmp}
+ *   |-- source/     imported materials, read-only, digested
+ *   |-- template/   selected LaTeX template, read-only, digested
+ *   |-- .opencode/  agents, commands, opencode.json
+ *   `-- .po-run/{run.json,session.json,checkpoints/,logs/}
+ */
+export const BRAIN_DIR = ".brain";
+export const SOURCE_DIR = "source";
+export const TEMPLATE_DIR = "template";
+export const OPENCODE_DIR = ".opencode";
+export const RUN_DIR = ".po-run";
+
+/** Directories excluded from input walks and digests. */
+export const INTERNAL_DIRS: readonly string[] = [
+  ".git",
+  BRAIN_DIR,
+  OPENCODE_DIR,
+  RUN_DIR,
+  "node_modules",
+];
+
+export function paths(workspace: string) {
+  const brain = join(workspace, BRAIN_DIR);
+  const run = join(workspace, RUN_DIR);
+  return {
+    workspace,
+    /** Normalized inputs the agent reads (e.g. a PDF converted to markdown). */
+    brainInput: join(brain, "input"),
+    /** Stage artifacts: outline.json, references.bib, citation_map.json. */
+    brainRaw: join(brain, "raw"),
+    /** The manuscript under construction, plus figures/. */
+    brainManuscript: join(brain, "manuscript"),
+    /** Scratch space: generated figure scripts, PDF page renders. */
+    brainTmp: join(brain, "tmp"),
+    source: join(workspace, SOURCE_DIR),
+    template: join(workspace, TEMPLATE_DIR),
+    opencode: join(workspace, OPENCODE_DIR),
+    runDir: run,
+    runState: join(run, "run.json"),
+    sessionState: join(run, "session.json"),
+    checkpoints: join(run, "checkpoints"),
+    logs: join(run, "logs"),
+  };
+}
+
+export type Paths = ReturnType<typeof paths>;
+
+/** Stage artifact paths, relative to the workspace root. */
+export const ARTIFACTS = {
+  outline: join(BRAIN_DIR, "raw", "outline.json"),
+  outlineV1: join(BRAIN_DIR, "raw", "outline_v1.json"),
+  references: join(BRAIN_DIR, "raw", "references.bib"),
+  citationMap: join(BRAIN_DIR, "raw", "citation_map.json"),
+  candidates: join(BRAIN_DIR, "raw", "candidates.json"),
+  updatedTemplate: join(BRAIN_DIR, "raw", "updated_template.tex"),
+  plottingResults: join(BRAIN_DIR, "raw", "plotting_results.json"),
+  /** Controller-written LaTeX build report, read by the latex_assembly check. */
+  buildReport: join(BRAIN_DIR, "raw", "build.json"),
+  figuresDir: join(BRAIN_DIR, "manuscript", "figures"),
+  figuresInfo: join(BRAIN_DIR, "manuscript", "figures", "info.json"),
+  rawDraft: join(BRAIN_DIR, "manuscript", "raw_draft.tex"),
+  finalTex: join(BRAIN_DIR, "manuscript", "final_paper.tex"),
+  finalPdf: join(BRAIN_DIR, "manuscript", "final_paper.pdf"),
+} as const;
