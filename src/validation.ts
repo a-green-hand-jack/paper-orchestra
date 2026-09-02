@@ -119,15 +119,19 @@ function outlineCoverage(workspace: string): Check {
   if (outline.section_plan.length === 0) {
     return fail(name, "expected section_plan to contain at least one section, found none");
   }
-  const empty = outline.section_plan.filter((s) => s.subsections.length === 0);
-  if (empty.length > 0) {
-    return fail(
-      name,
-      `expected every section to have at least one subsection; these have none: ${empty
-        .map((s) => s.section_title)
-        .join(", ")}`,
-    );
-  }
+  // Subsection COUNT is deliberately not checked.
+  //
+  // The prompt states the structural preference itself ("If Subsection X.1 is
+  // created, X.2 is mandatory... Omit subsections entirely if a section does
+  // not require division"), and nothing downstream depends on it: the
+  // literature stage's search-task collection and the section writer both
+  // iterate whatever subsections exist, so zero, one or five all work.
+  //
+  // An earlier version required at least one subsection per section. That both
+  // contradicted the prompt and cost a real remediation round on a live run,
+  // pushing the model to invent subsections for Abstract and Conclusion. A
+  // floor that fails a run should protect something; this one only enforced
+  // taste.
   const ids = outline.plotting_plan.map((p) => p.figure_id);
   const duplicates = ids.filter((id, at) => ids.indexOf(id) !== at);
   if (duplicates.length > 0) {

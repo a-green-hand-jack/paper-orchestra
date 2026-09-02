@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, Option } from "commander";
 import { checkpoint, checkpointHistory } from "./checkpoints.js";
+import { approveRun, runController } from "./controller.js";
 import { statusCommand } from "./commands/status.js";
 import { currentYearMonth, prepareWorkspace } from "./commands/prepare.js";
 import { runDoctor } from "./doctor.js";
@@ -10,7 +11,7 @@ import { compactStamp } from "./timestamp.js";
 import { PAPER_ORCHESTRA_VERSION } from "./version.js";
 import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
-import { isStageId, STAGES } from "./stages.js";
+import { isStageId, STAGES, type StageId } from "./stages.js";
 
 function fail(message: string, code = 1): never {
   throw new UserFacingError(message, code);
@@ -59,9 +60,16 @@ program
       .default("online"),
   )
   .option("--timeout-multiplier <n>", "scale every stage timeout", "1")
+  .option(
+    "--until <stage>",
+    "stop after this stage, locking a shorter plan (outline, literature, plotting, section_writing, refinement)",
+  )
   .option("--prepare-only", "create and lock the workspace, then stop", false)
   .action(async (rawMaterials: string, options: Record<string, unknown>) => {
     const workspace = (options.output as string | undefined) ?? `./po-run-${compactStamp()}`;
+    if (options.until && !isStageId(options.until as string)) {
+      fail(`unknown --until stage "${options.until}"; expected one of ${STAGES.join(", ")}`);
+    }
     const multiplier = Number(options.timeoutMultiplier);
     if (!Number.isFinite(multiplier) || multiplier <= 0) {
       fail(`--timeout-multiplier must be a positive number, got "${options.timeoutMultiplier}"`);
@@ -81,12 +89,14 @@ program
       defaultModel: options.model ? parseModelRef(options.model as string) : null,
       stageModels: parseStageModels(options.stageModel as string[]),
       timeoutMultiplier: multiplier,
+      until: (options.until as StageId | undefined) ?? null,
     });
 
     const { state } = result;
     process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
     process.stdout.write(`  branch    ${state.run_branch}\n`);
     process.stdout.write(`  venue     ${state.scope.venue}\n`);
+    process.stdout.write(`  plan      ${state.scope.plan.join(" -> ")}\n`);
     process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
     process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);
     process.stdout.write(`  template  ${state.template_digest.slice(0, 12)}\n`);
@@ -105,11 +115,8 @@ program
 
     if (options.prepareOnly) return;
 
-    fail(
-      "the writing controller is not wired up yet (rollout step 2). " +
-        `The workspace is prepared and locked at ${workspace}; ` +
-        "re-run with --prepare-only to suppress this message.",
-    );
+    process.stdout.write("\n");
+    await runController({ workspace, headless: Boolean(options.headless) });
   });
 
 program
@@ -168,10 +175,8 @@ program
       process.stdout.write(`${state.run_id} is already complete\n`);
       return;
     }
-    fail(
-      `locks verified; ${state.run_id} would resume at "${next}". ` +
-        "The writing controller is not wired up yet (rollout step 2).",
-    );
+    process.stdout.write(`resuming ${state.run_id} at "${next}"\n`);
+    await runController({ workspace, headless: state.headless });
   });
 
 program
@@ -208,6 +213,17 @@ program
         `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
       );
     }
+  });
+
+program
+  .command("approve")
+  .description("Release a collaborative run waiting at a gate")
+  .argument("[workspace]", "run workspace", ".")
+  .action(async (workspace: string) => {
+    const state = approveRun(workspace);
+    process.stdout.write(
+      `approved ${state.run_id}; the controller will continue at "${state.current_stage ?? "?"}"\n`,
+    );
   });
 
 program

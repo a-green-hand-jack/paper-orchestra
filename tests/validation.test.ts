@@ -25,7 +25,13 @@ const GOOD_OUTLINE = {
     related_work_strategy: { overview: "o", subsections: [{ subsection_title: "SAM variants" }] },
   },
   section_plan: [
-    { section_title: "Introduction", subsections: [{ subsection_title: "Motivation" }] },
+    {
+      section_title: "Introduction",
+      subsections: [{ subsection_title: "Motivation" }, { subsection_title: "Contributions" }],
+    },
+    // Abstract legitimately needs no subsections; the prompt says to omit them
+    // when a section does not require division.
+    { section_title: "Abstract", subsections: [] },
   ],
 };
 
@@ -86,14 +92,37 @@ describe("outline stage", () => {
     expect(failures(validateStage(workspace, "outline", scope()))).toContain("outline_coverage");
   });
 
-  it("rejects a section with no subsections and names it", async () => {
+  it("accepts a section that legitimately needs no subsections", async () => {
+    // Regression: outline_coverage used to require at least one subsection,
+    // contradicting the prompt's "omit subsections entirely if a section does
+    // not require division" and burning a remediation round to make the model
+    // subdivide an Abstract.
     const { workspace } = await prepared();
     json(workspace, ARTIFACTS.outline, {
       ...GOOD_OUTLINE,
-      section_plan: [{ section_title: "Method", subsections: [] }],
+      section_plan: [{ section_title: "Conclusion", subsections: [] }],
     });
-    const detail = validators.outlineCoverage(workspace).detail;
-    expect(detail).toContain("Method");
+    expect(validators.outlineCoverage(workspace).passed).toBe(true);
+  });
+
+  it("does not gate on subsection count in either direction", async () => {
+    // Regression, twice over. It first required >=1 subsection, contradicting
+    // the prompt and costing a live remediation round that made the model
+    // subdivide an Abstract. It was then briefly changed to reject a lone
+    // subsection, which both real runs also failed. Nothing downstream depends
+    // on the count, so it is the prompt's business, not a floor.
+    const { workspace } = await prepared();
+    for (const subsections of [
+      [],
+      [{ subsection_title: "Only one" }],
+      [{ subsection_title: "A" }, { subsection_title: "B" }],
+    ]) {
+      json(workspace, ARTIFACTS.outline, {
+        ...GOOD_OUTLINE,
+        section_plan: [{ section_title: "Method", subsections }],
+      });
+      expect(validators.outlineCoverage(workspace).passed).toBe(true);
+    }
   });
 
   it("rejects duplicate figure ids because they collide as filenames", async () => {
@@ -114,7 +143,10 @@ describe("outline stage", () => {
       section_plan: [
         {
           section_title: "Introduction",
-          subsections: [{ subsection_title: "Motivation", citation_candidates: ["smith2024sam"] }],
+          subsections: [
+            { subsection_title: "Motivation", citation_candidates: ["smith2024sam"] },
+            { subsection_title: "Contributions", citation_candidates: ["jones2023avs"] },
+          ],
         },
       ],
     });

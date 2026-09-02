@@ -8,7 +8,7 @@ import { ensureDir } from "../files.js";
 import { importDirectory, prepareBrainInput } from "../input.js";
 import { formatModelRef } from "../model.js";
 import { paths } from "../paths.js";
-import { STAGES } from "../stages.js";
+import { STAGES, type StageId } from "../stages.js";
 import { ScopeSchema, type ModelRef, type RunState, type Scope } from "../state/schema.js";
 import {
   computeLockDigests,
@@ -31,6 +31,12 @@ export interface PrepareOptions {
   readonly defaultModel: ModelRef | null;
   readonly stageModels: Record<string, ModelRef>;
   readonly timeoutMultiplier: number;
+  /**
+   * Truncate the locked plan after this stage. Lets the pipeline be adopted
+   * one stage at a time, and keeps a partial run an explicit, locked decision
+   * rather than an interrupted full run.
+   */
+  readonly until?: StageId | null;
 }
 
 export interface PrepareResult {
@@ -45,6 +51,14 @@ function newRunId(): string {
 }
 
 /** Current UTC year-month, the default literature cutoff. */
+/** The plan, optionally truncated after `until`. */
+export function planFor(until: StageId | null): StageId[] {
+  if (!until) return [...STAGES];
+  const at = STAGES.indexOf(until);
+  if (at < 0) throw new Error(`unknown stage "${until}"`);
+  return STAGES.slice(0, at + 1) as StageId[];
+}
+
 export function currentYearMonth(): string {
   return new Date().toISOString().slice(0, 7);
 }
@@ -89,7 +103,7 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
   const template = importDirectory(resolve(options.templateDir), p.template);
 
   const scope: Scope = ScopeSchema.parse({
-    plan: [...STAGES],
+    plan: planFor(options.until ?? null),
     use_plotting: options.usePlotting,
     research_cutoff: options.researchCutoff,
     idea_filename: options.ideaFilename,
