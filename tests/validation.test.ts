@@ -382,6 +382,66 @@ describe("figure coverage", () => {
   });
 });
 
+describe("figure_render", () => {
+  function bytes(n: number): string {
+    return "x".repeat(n);
+  }
+
+  it("rejects a rendered file that is really an empty canvas", async () => {
+    // The defect it exists for: plt.close() before savefig writes a valid,
+    // tiny file that exists, satisfies figure_coverage, and prints blank.
+    const { workspace } = await prepared();
+    put(workspace, "figures/blank.pdf".replace("figures/", ".brain/manuscript/figures/"), bytes(40));
+    json(workspace, ARTIFACTS.plottingResults, [
+      { figure_id: "f1", image_path: "figures/blank.pdf" },
+    ]);
+
+    const check = validators.figureRender(workspace, scope({ use_plotting: true }));
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("empty canvas");
+  });
+
+  it("passes a figure with real content", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ".brain/manuscript/figures/real.pdf", bytes(9000));
+    json(workspace, ARTIFACTS.plottingResults, [
+      { figure_id: "f1", image_path: "figures/real.pdf" },
+    ]);
+
+    expect(validators.figureRender(workspace, scope({ use_plotting: true })).passed).toBe(true);
+  });
+
+  it("fails when the recorded path names no file at all", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.plottingResults, [
+      { figure_id: "f1", image_path: "figures/ghost.pdf" },
+    ]);
+
+    const check = validators.figureRender(workspace, scope({ use_plotting: true }));
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("does not exist");
+  });
+
+  it("leaves the unrendered case to figure_coverage rather than double-reporting", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.plottingResults, [{ figure_id: "f1" }]);
+    expect(validators.figureRender(workspace, scope({ use_plotting: true })).passed).toBe(true);
+  });
+
+  it("is inert when plotting is off, since supplied figures are the author's", async () => {
+    const { workspace } = await prepared();
+    expect(validators.figureRender(workspace, scope({ use_plotting: false })).passed).toBe(true);
+  });
+
+  it("is wired into the plotting stage when generation is on", async () => {
+    const { workspace } = await prepared();
+    const names = validateStage(workspace, "plotting", scope({ use_plotting: true })).map(
+      (c) => c.name,
+    );
+    expect(names).toContain("figure_render");
+  });
+});
+
 describe("template compatibility", () => {
   it("fails when the manuscript changes the document class", async () => {
     const { workspace } = await prepared();

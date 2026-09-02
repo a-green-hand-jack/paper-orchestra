@@ -17,7 +17,8 @@ import {
   includedGraphics,
   unresolvedMarkers,
 } from "./latex.js";
-import { ARTIFACTS, paths } from "./paths.js";
+import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
+import { MIN_FIGURE_BYTES } from "./figures.js";
 import type { StageId } from "./stages.js";
 import type { Check, Scope } from "./state/schema.js";
 
@@ -242,6 +243,62 @@ function citationFloorCheck(workspace: string, manuscriptRel: string, scope: Sco
     );
   }
   return pass(name, `${cited} distinct sources cited (floor ${floor} of ${available} available)`);
+}
+
+/**
+ * Every generated figure is a real, non-trivial image on disk.
+ *
+ * `figure_coverage` checks that a planned figure has SOME image_path recorded;
+ * this checks the file that path names is actually a figure. The failure it
+ * exists for is a matplotlib script that runs cleanly, saves, and produces an
+ * empty canvas -- which happens whenever the model calls `plt.close()` or
+ * `plt.clf()` before saving. That file exists, satisfies coverage, and prints
+ * as a blank rectangle in the manuscript.
+ *
+ * Replaces the Python's critic loop, which ran up to 3 rounds terminated by
+ * the model emitting the literal string "No changes needed."
+ * (`plotting_agent.py:139`) -- making the model's own text the completion
+ * signal, which is exactly what the controller contract refuses.
+ */
+function figureRender(workspace: string, scope: Scope): Check {
+  const name = "figure_render";
+  if (!scope.use_plotting) {
+    return pass(name, "plotting is off; supplied figures are used as-is");
+  }
+
+  const parsed = parseArtifact(
+    workspace,
+    ARTIFACTS.plottingResults,
+    PlottingResultsSchema,
+    name,
+  );
+  if (!parsed.ok) return parsed.check;
+
+  const problems: string[] = [];
+  for (const result of parsed.value) {
+    if (!result.image_path) continue; // figure_coverage owns the missing case
+    const abs = join(workspace, BRAIN_DIR, "manuscript", result.image_path);
+    if (!existsSync(abs)) {
+      problems.push(`${result.figure_id}: ${result.image_path} does not exist`);
+      continue;
+    }
+    const bytes = statSync(abs).size;
+    if (bytes < MIN_FIGURE_BYTES) {
+      problems.push(
+        `${result.figure_id}: ${result.image_path} is only ${bytes} bytes, so it is an ` +
+          "empty canvas rather than a figure",
+      );
+    }
+  }
+
+  if (problems.length > 0) {
+    return fail(
+      name,
+      `expected every generated figure to be a real image; ${problems.join("; ")}. ` +
+        "Plot the data before saving, and do not call plt.close() or plt.clf() first.",
+    );
+  }
+  return pass(name, `${parsed.value.length} generated figure(s) render to real images`);
 }
 
 /** No two bibliography entries may describe the same paper. */
@@ -538,6 +595,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         schemaValid(workspace, ARTIFACTS.plottingResults, PlottingResultsSchema),
         artifactExists(workspace, ARTIFACTS.figuresInfo, 2),
         schemaValid(workspace, ARTIFACTS.figuresInfo, FigureInfoSchema),
+        figureRender(workspace, scope),
         figureCoverage(workspace, scope, null),
       ];
 
@@ -587,6 +645,7 @@ export const validators = {
   literatureDedup,
   bibliographyProvenance,
   figureCoverage,
+  figureRender,
   templateCompatibility,
   noUnresolvedMarkers,
 };

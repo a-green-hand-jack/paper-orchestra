@@ -50,7 +50,12 @@ const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
   // references.bib and citation_map.json are written by the controller before
   // this stage runs, so the model is asked only for the synthesis artifacts.
   literature: [ARTIFACTS.outlineV1, ARTIFACTS.updatedTemplate],
-  plotting: [ARTIFACTS.plottingResults, ARTIFACTS.figuresInfo],
+  // Nothing: the plotting stage returns a script in the chat, and the
+  // CONTROLLER executes it and writes both artifacts. A model that wrote
+  // plotting_results.json itself would be recording figures it only claims to
+  // have rendered, which is the whole failure mode these artifacts exist to
+  // rule out.
+  plotting: [],
   section_writing: [ARTIFACTS.rawDraft],
   refinement: [ARTIFACTS.finalTex],
 };
@@ -104,6 +109,36 @@ export function buildStagePrompt(
   const body = substitute(loadCommand(workspace, stage), placeholdersFor(stage, scope, extra));
   const outputs = STAGE_OUTPUTS[stage];
   const inputs = stageInputs(stage, scope);
+
+  // Plotting is the one stage whose product is a REPLY, not a file: the model
+  // returns a script, the controller runs it and writes the artifacts. The
+  // generic contract below says the opposite ("write files, do not print into
+  // the conversation"), which would be precisely wrong here.
+  if (stage === "plotting") {
+    return [
+      body,
+      "",
+      "---",
+      "",
+      "## Workspace contract",
+      "",
+      `You are working inside a paper-orchestra run workspace. Stage: \`${stage}\`.`,
+      "",
+      "Read only these paths:",
+      ...inputs.map((path) => `- \`${path}\``),
+      "",
+      "Rules:",
+      "- Return the script IN YOUR REPLY, in one ```python fenced block. Do not write",
+      "  it to a file: the controller executes what you return and writes every",
+      "  artifact itself, from what actually rendered.",
+      "- After the fenced block, give the figure's caption on a line beginning",
+      "  `Caption:`. Plain text, no markdown, no `Figure N:` prefix -- LaTeX numbers",
+      "  figures itself.",
+      "- `source/` and `template/` are read-only inputs. Never modify them.",
+      "- The script runs with no network in its own directory. Embed the data as",
+      "  literals; read nothing and fetch nothing.",
+    ].join("\n");
+  }
 
   return [
     body,

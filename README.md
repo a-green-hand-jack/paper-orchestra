@@ -3,89 +3,133 @@
 <div align="center"><sup>1</sup>Google Cloud AI Research</div>
 <br><br>
 
-PaperOrchestra is a multi-agent framework for automated AI research paper writing. It flexibly transforms unconstrained pre-writing materials (ideas and experimental logs) into submission-ready LaTeX manuscripts, including comprehensive literature synthesis and generated visuals, such as plots and conceptual diagrams.
+PaperOrchestra turns unconstrained pre-writing materials — an idea and an
+experimental log — into a submission-ready LaTeX manuscript, with literature
+synthesis, generated figures, and a compiled PDF.
 
-Acting like an orchestrated team of specialized agents, it handles outline generation, literature review, section writing, content refinement, and plotting to close the gap between raw research materials and submission ready papers.
+**This fork is a rewrite.** The original Python/Conda multi-agent pipeline has
+been replaced by a standalone OpenCode-native agent in TypeScript. The writing
+capability is PaperOrchestra's; the runtime is not. See
+[MIGRATION.md](MIGRATION.md) for the module-by-module map and the reasoning.
 
 <div align="center">
   <img src="assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
 </div>
 
-## Key Features
+## What is different from upstream
 
-- **Multi-Agent Pipeline**: Orchestrates specialized agents (Outline, Literature Review, Section Writing, Content Refinement, Plotting) for end-to-end paper generation.
-- **Comprehensive Literature Synthesis**: Automatically searches, prioritizes, and integrates relevant literature into the manuscript.
-- **Visuals Generation**: Generates plots and supports the inclusion of conceptual diagrams.
-- **LaTeX Automation**: Produces submission-ready LaTeX manuscripts adhering to target conference templates.
+- **Model-agnostic.** Every model call goes through an OpenCode session, so the
+  provider is a flag. Upstream required Vertex or `GEMINI_API_KEY`.
+- **Validators decide when a stage is done**, never the model's own prose. A
+  stage completes because artifacts exist and pass schema and content checks.
+- **Mechanical work belongs to the controller.** LaTeX builds, literature
+  retrieval, figure-script execution and PDF rendering run outside the session,
+  cost zero model tokens, and cannot be faked by a textual claim. The agent has
+  `bash`, `webfetch` and `websearch` denied.
+- **Resumable.** Stage-level state, digest-locked inputs, and a git checkpoint
+  per stage. Upstream restarted from the outline on any exception.
 
-## Installation
+## Requirements
 
-1.  **Environment Setup**: The project relies on a Conda environment named `paper_orchestra`. You can set up a similar environment with Python 3.11 and install the required dependencies.
-    ```bash
-    conda create -n paper_orchestra python=3.11
-    conda activate paper_orchestra
-    pip install -r requirements.txt
-    ```
+- Node.js ≥ 20 and [OpenCode](https://opencode.ai) on `PATH`, authenticated
+  with at least one provider (`opencode auth login`).
+- A LaTeX toolchain: `pdflatex`, `bibtex`, plus `pdftotext` and `pdftoppm`.
+- `python3` with `matplotlib`, only for `--use-plotting`.
+- The [`bohr`](https://www.bohrium.com) CLI, logged in, for literature
+  retrieval. Each search costs about 0.05 CNY.
 
-2.  **Environment Variables**: Create a `.env` file in the root of the project and add your API keys:
-    ```env
-    # Add keys if you have them, otherwise leave them empty
-    # You need to specify related keys if you want to use the model
-    # For example, if you want to use Gemini models, you need to specify either VERTEX_AI_PROJECT and VERTEX_AI_LOCATION, or GEMINI_API_KEY
-    # If you want to use OpenAI models, you need to specify OPENAI_API_KEY
-    
-    SEMANTIC_SCHOLAR_API_KEY=your_semantic_scholar_api_key
-    OPENAI_API_KEY=your_openai_api_key
-    VERTEX_AI_PROJECT=your_vertex_ai_project
-    VERTEX_AI_LOCATION=your_vertex_ai_location
-    GEMINI_API_KEY=your_gemini_api_key
+```bash
+npm install && npm run build
+node dist/cli.js doctor      # reports exactly what is missing
+```
 
-    # if you want to run demo and send emails to yourself at the end, set these 2 fields as well
-    SMTP_EMAIL=your_email
-    SMTP_PASSWORD=your_password
-    ```
-
-## Dataset
-
-The dataset used for paper generation is **not included** in this code repository. It will be released separately at a later date.
-Once available, you should download the dataset and place it under the `datasets/` directory.
+`doctor` separates hard requirements from capability probes, so an absent
+`matplotlib` is reported as a warning rather than a failure.
 
 ## Usage
 
-You can run the paper generation pipeline using the provided bash script or directly via the Python CLI.
-
-### Using the Bash Script
 ```bash
-./paper_writing_cli.sh
+paper-orchestra write ./raw-materials \
+  --template templates/cvpr2025 \
+  --output ./my-paper \
+  --model openai/gpt-5.6-terra \
+  --research-cutoff 2024-11 \
+  --allow-lkm-spend
 ```
 
-### Using the Python CLI directly
+The raw-materials directory needs an idea document and an experimental log
+(`--idea-filename`, `--experimental-log-filename`), plus optionally a
+`figures/` directory of supplied images. A worked example is in `examples/`.
+
+Retrieval costs real money, so `--allow-lkm-spend` is required before any
+search runs; without it the run stops and tells you what it would have spent.
+
+### Frequently used flags
+
+| Flag | Effect |
+|---|---|
+| `--use-plotting` | Generate figures from data instead of only using supplied ones |
+| `--mode collaborative` | Pause for approval after outline, literature, drafting and refinement |
+| `--headless` | Do not attach the OpenCode TUI |
+| `--stage-model <stage>=<provider/model>` | Override the model for one stage; repeatable |
+| `--target-citations <n>` | How many distinct sources to cite, capped by how many relevant ones retrieval found |
+| `--max-lkm-calls <n>` | Ceiling on paid retrieval calls |
+| `--until <stage>` | Stop after a stage, locking a shorter plan |
+
+### Other commands
+
 ```bash
-python paper_writing_cli.py \
-  --raw_materials_dir /path_to_your_raw_materials/ \
-  --latex_template_dir /path_to_your_latex_template/ \
-  --output_dir /path_to_your_output_folder/ \
-  --use_plotting true
+paper-orchestra status <run> [--json]     # per-stage state, tokens, cost
+paper-orchestra validate <run> [--json]   # re-run every check; exit 2 on failure
+paper-orchestra approve <run>             # release a collaborative gate
+paper-orchestra resume <run>              # continue from the first incomplete stage
+paper-orchestra doctor
 ```
 
-### Key Arguments
-*   `--raw_materials_dir`: (Required) Directory containing the raw materials (e.g., idea and experimental log).
-*   `--latex_template_dir`: (Required) Directory containing the LaTeX template (e.g., `templates/cvpr2025`).
-*   `--output_dir`: Directory to output the generated paper. If not specified, an automatic folder with a timestamp is created.
-*   `--use_plotting`: Enable the plotting agent workflow to generate figures from code (Default: `False`).
-*   `--writer_model_name`: LLM for writer and literature agents.
-*   `--reflection_model_name`: LLM for reflection agents.
+## The pipeline
 
-### Interactive Demo
+| # | Stage | Produces |
+|---|---|---|
+| 1 | `outline` | `outline.json` — section plan, citation hints, figure plan |
+| 2 | `literature` | `references.bib`, `citation_map.json`, `candidates.json` |
+| 3 | `plotting` | `figures/*`, `plotting_results.json` |
+| 4 | `section_writing` | `raw_draft.tex` |
+| 5 | `refinement` | `final_paper.tex`, `final_paper.pdf` |
 
-We provide an interactive Streamlit demo for the paper generation pipeline. For instructions on how to run and use it, please refer to the [README.md](frontend/README.md) in the `frontend` directory.
+Retrieval (stage 2) is controller-owned: candidates come from Bohrium LKM, are
+enriched from Crossref and DataCite, scored for relevance against the paper's
+own topic, and written to disk before the model sees them. The model can only
+cite what retrieval found, which is what makes a fabricated reference
+impossible rather than merely discouraged.
 
-## Project Structure
+Figures (stage 3) are matplotlib scripts the model writes and the **controller**
+executes in a scoped directory with no network. Conceptual diagrams need an
+image-generation endpoint that OpenCode does not expose, so they must be
+supplied under `source/figures/`.
 
-*   `autoraters/`: Contains scripts for automated evaluation.
-*   `methods/`: Core logic for agents and pipeline execution.
-*   `templates/`: LaTeX templates for target conferences, you can add your own template by creating a new subfolder under this directory.
-*   `utils/`: Utility functions for API calls, PDF handling, etc.
+## Workspace layout
+
+```
+<workspace>/
+├── .brain/{input,raw,manuscript,tmp}   # artifacts, drafts, figures
+├── source/                            # imported materials, read-only, digested
+├── template/                          # LaTeX template, read-only, digested
+├── .opencode/                         # per-run agent config and prompts
+└── .po-run/{run.json,session.json,checkpoints/,logs/}
+```
+
+`source/` and `template/` are hashed at import and re-checked on resume, so a
+resume cannot silently change what is being written. Credentials are refused at
+import: `.env*`, key files and token-shaped filenames never enter the workspace.
+
+## Project structure
+
+- `src/` — the agent: controller, stages, validators, retrieval, LaTeX and
+  figure execution
+- `assets/commands/` — the stage prompts, hand-edited and authoritative
+- `templates/` — conference LaTeX templates; add one as a new subdirectory
+- `examples/` — a worked CVPR sample
+- `tests/` — unit and integration tests (`npm test`)
 
 ## Citation
 
