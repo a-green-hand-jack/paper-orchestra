@@ -503,6 +503,7 @@ async function buildIfManuscriptStage(
     pages: result.pages,
     errors: result.errors,
     unresolved_citation_marks: result.unresolvedCitationMarks,
+    overfull_boxes: result.overfullBoxes,
     built_at: new Date().toISOString(),
   });
 
@@ -513,6 +514,9 @@ async function buildIfManuscriptStage(
       `   compiled ${sourceRel} -> ${result.pages ?? "?"} page(s)` +
         (result.unresolvedCitationMarks > 0
           ? `, ${result.unresolvedCitationMarks} unresolved citation mark(s)`
+          : "") +
+        (result.overfullBoxes[0] && result.overfullBoxes[0].points >= 10
+          ? `, ${Math.round(result.overfullBoxes[0].points)}pt column overflow`
           : ""),
     );
   } else {

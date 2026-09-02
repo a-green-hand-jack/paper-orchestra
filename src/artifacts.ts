@@ -190,6 +190,10 @@ export const BuildReportSchema = z
      * package emits which warning, so it catches a silently empty bibliography.
      */
     unresolved_citation_marks: z.number().int().nonnegative().default(0),
+    /** Content overflowing its column, worst first. */
+    overfull_boxes: z
+      .array(z.object({ points: z.number(), lines: z.string() }))
+      .default([]),
     built_at: z.string().min(1),
   })
   .passthrough();

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   compileLatex,
   extractLatexErrors,
+  extractOverfullBoxes,
   pdfPageCount,
   renderPdfPages,
   stageBuildDir,
@@ -332,5 +333,43 @@ describe("diagnostics come from the final pass", () => {
     );
     const result = await compileLatex({ cwd: dir, jobName: "manuscript" });
     expect(result.errors.join(" ")).toContain("sec:ghost");
+  });
+});
+
+describe("extractOverfullBoxes", () => {
+  it("reads the width and source lines TeX reports", () => {
+    const log = "Overfull \\hbox (40.97647pt too wide) in paragraph at lines 108--116";
+    expect(extractOverfullBoxes(log)).toEqual([{ points: 40.97647, lines: "108--116" }]);
+  });
+
+  it("orders worst first, so the report leads with the real damage", () => {
+    const log = [
+      "Overfull \\hbox (3.1pt too wide) in paragraph at lines 10--12",
+      "Overfull \\hbox (40.9pt too wide) in paragraph at lines 108--116",
+    ].join("\n");
+    expect(extractOverfullBoxes(log).map((b) => b.points)).toEqual([40.9, 3.1]);
+  });
+
+  it("finds nothing in a clean log", () => {
+    expect(extractOverfullBoxes("This is pdfTeX\nOutput written on x.pdf")).toEqual([]);
+  });
+
+  it("detects a genuinely too-wide table end to end", async () => {
+    const dir = scratchDir("po-tex-");
+    writeFileSync(
+      join(dir, "manuscript.tex"),
+      [
+        "\\documentclass[twocolumn]{article}",
+        "\\begin{document}",
+        "\\begin{table}[t]\\begin{tabular}{@{}llllllllll@{}}",
+        Array.from({ length: 10 }, () => "AVeryWideHeaderCell").join(" & ") + " \\\\",
+        "\\end{tabular}\\end{table}",
+        "Body text.",
+        "\\end{document}",
+      ].join("\n"),
+    );
+    const result = await compileLatex({ cwd: dir, jobName: "manuscript" });
+    expect(result.overfullBoxes.length).toBeGreaterThan(0);
+    expect(result.overfullBoxes[0]?.points).toBeGreaterThan(10);
   });
 });

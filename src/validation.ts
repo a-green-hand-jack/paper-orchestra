@@ -29,6 +29,14 @@ import type { Check, Scope } from "./state/schema.js";
  * prompt — so every detail is phrased as the expectation it wants met. The
  * check message IS the repair instruction.
  */
+/**
+ * Column overflow a reader would notice, in TeX points (~3.5mm).
+ *
+ * TeX reports anything above \hfuzz (0.1pt), and a few points of overflow is
+ * both extremely common and invisible, so flagging every one would be noise.
+ */
+const COLUMN_OVERFLOW_PT = 10;
+
 function pass(name: string, detail: string): Check {
   return { name, passed: true, detail };
 }
@@ -395,6 +403,26 @@ function latexAssembly(workspace: string): Check {
       `expected every citation to resolve at compile time; these do not: ` +
         `${undefinedCitations.slice(0, 6).join(" | ")}. Cite a key that exists in ` +
         `references.bib.`,
+    );
+  }
+
+  // Content wider than its column is what produces visible layout damage: a
+  // table 41pt too wide for a CVPR column spilled across the gutter and landed
+  // on top of the References heading on a real run. Small overfulls are endemic
+  // in real papers and invisible in print, so only a spill a reader would
+  // actually see is a defect -- a floor that fails a run should protect
+  // something.
+  const spills = report.overfull_boxes.filter((box) => box.points >= COLUMN_OVERFLOW_PT);
+  if (spills.length > 0) {
+    const worst = spills[0] as { points: number; lines: string };
+    return fail(
+      name,
+      `expected all content to fit its column, but ${spills.length} block(s) overflow; ` +
+        `the worst is ${Math.round(worst.points)}pt too wide at line(s) ${worst.lines}. ` +
+        `In a two-column layout an overflowing table or figure prints on top of the ` +
+        `neighbouring column. Either span both columns with the starred float ` +
+        `environment (table*/figure*), or reduce the content: fewer columns, ` +
+        `abbreviated headers, or a smaller font via \\small or \\resizebox.`,
     );
   }
 

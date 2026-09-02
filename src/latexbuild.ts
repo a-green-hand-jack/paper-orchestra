@@ -41,6 +41,8 @@ export interface BuildResult {
   readonly errors: string[];
   /** Unresolved `[?]` groups in the rendered text. */
   readonly unresolvedCitationMarks: number;
+  /** Content that overflows its column, worst first. */
+  readonly overfullBoxes: OverfullBox[];
   readonly log: string;
 }
 
@@ -121,6 +123,37 @@ export function extractLatexErrors(log: string): string[] {
     }
   }
   return [...new Set(errors)].slice(0, 25);
+}
+
+export interface OverfullBox {
+  /** How far the content exceeds its column, in TeX points. */
+  readonly points: number;
+  /** Source line range, as TeX reports it. */
+  readonly lines: string;
+}
+
+/**
+ * Content wider than the column it sits in.
+ *
+ * TeX reports these as `Overfull \hbox (Xpt too wide)`, and they are the
+ * mechanism behind visible layout damage: a table 41pt too wide for a CVPR
+ * column spills across the gutter and lands on top of the neighbouring
+ * column's text -- on a real run, on top of the References heading.
+ *
+ * Small overfulls are endemic in real papers and invisible in print, so callers
+ * threshold rather than treating every one as a defect.
+ */
+export function extractOverfullBoxes(log: string): OverfullBox[] {
+  const boxes: OverfullBox[] = [];
+  for (const line of unwrapLog(log)) {
+    const match = /^Overfull \\hbox \(([\d.]+)pt too wide\).*?(?:at lines?|in paragraph at lines) ([\d-]+)/.exec(
+      line.trim(),
+    );
+    if (match?.[1]) {
+      boxes.push({ points: Number(match[1]), lines: match[2] ?? "unknown" });
+    }
+  }
+  return boxes.sort((a, b) => b.points - a.points);
 }
 
 /**
@@ -226,6 +259,7 @@ export async function compileLatex(options: BuildOptions): Promise<BuildResult> 
     pages: produced ? await pdfPageCount(pdf) : null,
     errors: extractLatexErrors(diagnostic),
     unresolvedCitationMarks: produced ? await countUnresolvedCitationMarks(pdf) : 0,
+    overfullBoxes: extractOverfullBoxes(diagnostic),
     log: fullLog,
   };
 }

@@ -469,3 +469,51 @@ describe("latex_assembly", () => {
     expect(validators.latexAssembly(workspace).passed).toBe(false);
   });
 });
+
+describe("column overflow", () => {
+  function reportWith(boxes: Array<{ points: number; lines: string }>) {
+    return {
+      ok: true,
+      source: ARTIFACTS.finalTex,
+      pdf: ARTIFACTS.finalPdf,
+      pages: 3,
+      errors: [],
+      unresolved_citation_marks: 0,
+      overfull_boxes: boxes,
+      built_at: "2026-09-02T00:00:00.000Z",
+    };
+  }
+
+  it("fails a table that overflows its column", async () => {
+    // On a real run a table 41pt too wide for a CVPR column printed on top of
+    // the References heading.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, reportWith([{ points: 40.97, lines: "108--116" }]));
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("41pt");
+    expect(check.detail).toContain("108--116");
+  });
+
+  it("names both real remedies rather than just complaining", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, reportWith([{ points: 40.97, lines: "108--116" }]));
+    const detail = validators.latexAssembly(workspace).detail;
+    expect(detail).toMatch(/table\*/);
+    expect(detail).toMatch(/resizebox|smaller font/);
+  });
+
+  it("ignores overflow too small for a reader to see", async () => {
+    // A few points is endemic in real papers and invisible in print; failing a
+    // run over it would be noise.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, reportWith([{ points: 3.1, lines: "10--12" }]));
+    expect(validators.latexAssembly(workspace).passed).toBe(true);
+  });
+
+  it("passes a build with no overflow at all", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, reportWith([]));
+    expect(validators.latexAssembly(workspace).passed).toBe(true);
+  });
+});
