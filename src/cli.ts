@@ -12,6 +12,7 @@ import { PAPER_ORCHESTRA_VERSION } from "./version.js";
 import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
+import { bundledVenues, resolveTemplate } from "./venues.js";
 
 function fail(message: string, code = 1): never {
   throw new UserFacingError(message, code);
@@ -30,8 +31,14 @@ program
 program
   .command("write")
   .description("Create a workspace and run the writing pipeline")
-  .argument("<raw-materials>", "directory holding the idea and experimental log")
-  .requiredOption("--template <dir>", "LaTeX template directory, e.g. templates/cvpr2025")
+  // Optional, defaulting to the working directory: the intended workflow is to
+  // cd into the materials and run `paper-orchestra write`.
+  .argument("[raw-materials]", "directory holding the idea and experimental log", ".")
+  .option(
+    "--template <venue|dir>",
+    "conference venue (cvpr2025, iclr2025) or a path to your own template directory",
+    "cvpr2025",
+  )
   .option("-o, --output <dir>", "workspace directory (default: ./po-run-<timestamp>)")
   .addOption(
     new Option("--mode <mode>", "gate behaviour").choices(["autonomous", "collaborative"]).default(
@@ -89,7 +96,7 @@ program
     const result = await prepareWorkspace({
       workspace,
       rawMaterials,
-      templateDir: options.template as string,
+      templateDir: resolveTemplate(options.template as string),
       mode: options.mode as "autonomous" | "collaborative",
       headless: Boolean(options.headless),
       usePlotting: Boolean(options.usePlotting),

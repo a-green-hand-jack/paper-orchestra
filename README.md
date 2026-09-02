@@ -18,6 +18,12 @@ capability is PaperOrchestra's; the runtime is not. See
 
 ## What is different from upstream
 
+"Upstream" here means the original
+[google-research/paper-orchestra](https://github.com/google-research/paper-orchestra)
+— the Python/Conda multi-agent pipeline this repository was forked from, and
+whose paper is cited below. The writing capability is theirs. What changed is
+the runtime and the guarantees around it.
+
 - **Model-agnostic.** Every model call goes through an OpenCode session, so the
   provider is a flag. Upstream required Vertex or `GEMINI_API_KEY`.
 - **Validators decide when a stage is done**, never the model's own prose. A
@@ -29,62 +35,185 @@ capability is PaperOrchestra's; the runtime is not. See
 - **Resumable.** Stage-level state, digest-locked inputs, and a git checkpoint
   per stage. Upstream restarted from the outline on any exception.
 
-## Requirements
-
-- Node.js ≥ 20 and [OpenCode](https://opencode.ai) on `PATH`, authenticated
-  with at least one provider (`opencode auth login`).
-- A LaTeX toolchain: `pdflatex`, `bibtex`, plus `pdftotext` and `pdftoppm`.
-- `python3` with `matplotlib`, only for `--use-plotting`.
-- The [`bohr`](https://www.bohrium.com) CLI, logged in, for literature
-  retrieval. Each search costs about 0.05 CNY.
+## Install
 
 ```bash
-npm install && npm run build
-node dist/cli.js doctor      # reports exactly what is missing
+curl -fsSL https://raw.githubusercontent.com/a-green-hand-jack/paper-orchestra/main/scripts/install.sh | bash
 ```
 
-`doctor` separates hard requirements from capability probes, so an absent
+This builds and links `paper-orchestra` globally. Re-run it to upgrade. From a
+clone, `./scripts/install.sh` does the same thing from your working copy.
+
+Then check what the machine is missing:
+
+```bash
+paper-orchestra doctor
+```
+
+It separates hard requirements from optional capabilities, so an absent
 `matplotlib` is reported as a warning rather than a failure.
+
+| Needed for | What |
+|---|---|
+| Everything | Node.js >= 20; [OpenCode](https://opencode.ai) on `PATH`, authenticated (`opencode auth login`) |
+| Building the PDF | `pdflatex`, `bibtex`, `pdftotext`, `pdftoppm` |
+| Literature retrieval | the [`bohr`](https://www.bohrium.com) CLI, logged in — about 0.05 CNY per search |
+| `--use-plotting` | `python3` with `matplotlib` |
 
 ## Usage
 
-```bash
-paper-orchestra write ./raw-materials \
-  --template templates/cvpr2025 \
-  --output ./my-paper \
-  --model openai/gpt-5.6-terra \
-  --research-cutoff 2024-11 \
-  --allow-lkm-spend
+Put your materials in a directory:
+
+```
+my-paper/
+├── idea_sparse.md          # the idea, problem statement, contributions
+├── experimental_log.md     # experimental record, including result tables
+└── figures/                # optional: figures you already have
 ```
 
-The raw-materials directory needs an idea document and an experimental log
-(`--idea-filename`, `--experimental-log-filename`), plus optionally a
-`figures/` directory of supplied images. A worked example is in `examples/`.
+Then run it from there:
 
-Retrieval costs real money, so `--allow-lkm-spend` is required before any
-search runs; without it the run stops and tells you what it would have spent.
+```bash
+cd my-paper/
+paper-orchestra write --allow-lkm-spend
+```
 
-### Frequently used flags
+That is the whole flow. It defaults to the current directory, the CVPR 2025
+template, and OpenCode's own default model, and writes the finished PDF into a
+timestamped workspace.
+
+`--allow-lkm-spend` is required because literature retrieval costs real money.
+Without it the run stops before searching and tells you what it would have
+spent — roughly 2 CNY for a full paper.
+
+A worked example lives in `examples/`.
+
+### Common variations
+
+```bash
+# a specific model, and figures generated from your data
+paper-orchestra write --model openai/gpt-5.6-terra --use-plotting --allow-lkm-spend
+
+# a different venue, and a fixed literature cutoff
+paper-orchestra write --template iclr2025 --research-cutoff 2024-11 --allow-lkm-spend
+
+# pause for your approval after outline, literature, drafting and refinement
+paper-orchestra write --mode collaborative --allow-lkm-spend
+
+# your own LaTeX template
+paper-orchestra write --template ./my-template --allow-lkm-spend
+```
 
 | Flag | Effect |
 |---|---|
-| `--use-plotting` | Generate figures from data instead of only using supplied ones |
-| `--mode collaborative` | Pause for approval after outline, literature, drafting and refinement |
+| `--template <venue\|dir>` | `cvpr2025`, `iclr2025`, or a path to your own (default: `cvpr2025`) |
+| `--model <provider/model>` | e.g. `openai/gpt-5.6-terra`; omit for OpenCode's default |
+| `--stage-model <stage>=<model>` | Override one stage's model; repeatable |
+| `--use-plotting` | Generate figures from your data, not just place supplied ones |
+| `--mode collaborative` | Pause for approval at four gates |
 | `--headless` | Do not attach the OpenCode TUI |
-| `--stage-model <stage>=<provider/model>` | Override the model for one stage; repeatable |
-| `--target-citations <n>` | How many distinct sources to cite, capped by how many relevant ones retrieval found |
-| `--max-lkm-calls <n>` | Ceiling on paid retrieval calls |
+| `--target-citations <n>` | How many distinct sources to cite, capped by how many relevant ones retrieval found (default: 20) |
+| `--max-lkm-calls <n>` | Ceiling on paid retrieval calls (default: 40) |
+| `--research-cutoff <yyyy-mm>` | Treat nothing published after this as prior work |
 | `--until <stage>` | Stop after a stage, locking a shorter plan |
+| `-o, --output <dir>` | Workspace directory (default: `./po-run-<timestamp>`) |
 
 ### Other commands
 
 ```bash
-paper-orchestra status <run> [--json]     # per-stage state, tokens, cost
-paper-orchestra validate <run> [--json]   # re-run every check; exit 2 on failure
-paper-orchestra approve <run>             # release a collaborative gate
-paper-orchestra resume <run>              # continue from the first incomplete stage
+paper-orchestra status [dir]      # per-stage state, tokens, cost
+paper-orchestra validate [dir]    # re-run every check without calling a model
+paper-orchestra resume [dir]      # continue from the first unfinished stage
+paper-orchestra approve [dir]     # release a collaborative gate
+paper-orchestra history [dir]     # the checkpoint timeline
 paper-orchestra doctor
 ```
+
+### Where the output lands
+
+```
+<workspace>/.brain/manuscript/final_paper.pdf     the paper
+<workspace>/.brain/manuscript/figures/            every figure used
+<workspace>/.brain/raw/references.bib             the bibliography
+<workspace>/.brain/raw/candidates.json            every retrieved source, auditable
+```
+
+## Features
+
+### Validators, not self-assessment
+
+A stage completes because its artifacts exist and pass checks — never because
+the model said it was done. Eleven validators run per stage:
+
+| Validator | Catches |
+|---|---|
+| `schema_valid` | An artifact that does not match its schema |
+| `outline_coverage` | An empty section plan, or a figure with no usable id |
+| `citation_integrity` | A `\cite` key that resolves to nothing |
+| `citation_floor` | A manuscript that cites far fewer sources than were found |
+| `bibliography_provenance` | A bibliography entry with no retrieval record behind it |
+| `literature_dedup` | Two entries describing the same paper |
+| `figure_coverage` | A planned figure that never rendered, or one never placed |
+| `figure_render` | A "rendered" figure that is really an empty canvas |
+| `latex_assembly` | A build failure, unresolved `[?]` marks, content overflowing its column |
+| `template_compatibility` | A manuscript that changed the venue's document class |
+| `no_unresolved_markers` | Leftover placeholders or TODO markers |
+
+A failed check's message is written as the repair instruction and is handed
+back to the model verbatim.
+
+### The model cannot fabricate
+
+The agent runs with `bash`, `webfetch` and `websearch` denied. Everything
+mechanical belongs to the controller, costs zero model tokens, and cannot be
+faked by a claim in a transcript:
+
+- **Literature retrieval** — candidates come from Bohrium LKM, are enriched
+  from Crossref and DataCite, scored for relevance against the paper's own
+  topic, and written to disk *before* the model sees them. The model can only
+  cite what retrieval actually found.
+- **Figure rendering** — the model writes a matplotlib script; the controller
+  executes it in a scoped directory with no network. A figure exists because a
+  process produced pixels.
+- **LaTeX builds** — four-pass `pdflatex`/`bibtex`, diagnosed from the final log.
+- **PDF page rendering** for visual review.
+
+### Literature quality
+
+Retrieval is scored for relevance and the off-domain tail is dropped — LKM
+indexes claims across all of science, so an unfiltered search for a
+vision paper returns work in agriculture and gastroenterology. A second axis
+keeps a foundational paper the outline explicitly asked for even when its
+abstract shares little vocabulary with your topic.
+
+Every entry carries its provider, provider id, relevance score, and the queries
+that found it, so a bibliography can be audited after the fact.
+
+### Resumable and reproducible
+
+- Stage-level state in `.po-run/run.json`, and a git checkpoint per stage with
+  machine-readable trailers.
+- `source/` and `template/` are hashed at import and re-checked on resume, so a
+  resume cannot silently change what is being written.
+- Per-stage token and cost telemetry.
+- Each stage runs in its own session, which bounds transcript growth.
+
+### Safe by default
+
+Credentials are refused at import: `.env*`, `.npmrc`, `.netrc`, key files and
+token-shaped filenames never enter the workspace or a checkpoint. Generated
+figure scripts run in a separate process with no network, in their own
+directory.
+
+### Model-agnostic
+
+Every call goes through an OpenCode session, so the provider is a flag and can
+differ per stage. Figures are generated as *code*, not as images, so figure
+generation is model-agnostic too — any model that writes Python can do it.
+
+The one thing this rules out is conceptual **diagrams**, which need an
+image-generation endpoint OpenCode does not expose. Supply those yourself under
+`figures/`; the pipeline places them and notes the ones it skipped.
 
 ## The pipeline
 
