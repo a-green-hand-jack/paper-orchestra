@@ -1,0 +1,355 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { ARTIFACTS } from "../src/paths.js";
+import type { Scope } from "../src/state/schema.js";
+import { validateStage, validators } from "../src/validation.js";
+import { prepared } from "./fixtures.js";
+
+function put(workspace: string, rel: string, content: string): void {
+  const abs = join(workspace, rel);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, content);
+}
+
+function json(workspace: string, rel: string, value: unknown): void {
+  put(workspace, rel, JSON.stringify(value, null, 2));
+}
+
+const GOOD_OUTLINE = {
+  plotting_plan: [
+    { figure_id: "overview", title: "Overview", plot_type: "diagram", aspect_ratio: "16:9" },
+  ],
+  intro_related_work_plan: {
+    introduction_strategy: { hook_hypothesis: "h", search_directions: ["sam temporal"] },
+    related_work_strategy: { overview: "o", subsections: [{ subsection_title: "SAM variants" }] },
+  },
+  section_plan: [
+    { section_title: "Introduction", subsections: [{ subsection_title: "Motivation" }] },
+  ],
+};
+
+function scope(overrides: Partial<Scope> = {}): Scope {
+  return {
+    plan: ["outline", "literature", "plotting", "section_writing", "refinement"],
+    use_plotting: false,
+    research_cutoff: "2026-01",
+    idea_filename: "idea_sparse.md",
+    experimental_log_filename: "experimental_log.md",
+    venue: "cvpr2025",
+    network_policy: "online",
+    ...overrides,
+  };
+}
+
+function failures(checks: ReturnType<typeof validateStage>): string[] {
+  return checks.filter((c) => !c.passed).map((c) => c.name);
+}
+
+describe("outline stage", () => {
+  it("fails when the artifact is missing, naming what to write", async () => {
+    const { workspace } = await prepared();
+    const checks = validateStage(workspace, "outline", scope());
+    const first = checks.find((c) => !c.passed);
+    expect(first?.detail).toMatch(/expected .*outline\.json to exist/);
+  });
+
+  it("passes a well-formed outline", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, GOOD_OUTLINE);
+    expect(failures(validateStage(workspace, "outline", scope()))).toEqual([]);
+  });
+
+  it("rejects malformed JSON with a parse message rather than a crash", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.outline, "{not json at all, padded to clear the size floor,,,}");
+    const checks = validateStage(workspace, "outline", scope());
+    expect(failures(checks)).toContain(`schema_valid:${ARTIFACTS.outline}`);
+    const parseCheck = checks.find((c) => c.name === `schema_valid:${ARTIFACTS.outline}`);
+    expect(parseCheck?.detail).toMatch(/does not parse/);
+  });
+
+  it("rejects an empty figure_id, which the Python uses as a filename", async () => {
+    // plotting_agent.py:258 does figure_id.replace(...), which throws on null.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, {
+      ...GOOD_OUTLINE,
+      plotting_plan: [{ figure_id: "" }],
+    });
+    const checks = validateStage(workspace, "outline", scope());
+    expect(failures(checks)).toContain(`schema_valid:${ARTIFACTS.outline}`);
+  });
+
+  it("rejects an empty section plan", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, { ...GOOD_OUTLINE, section_plan: [] });
+    expect(failures(validateStage(workspace, "outline", scope()))).toContain("outline_coverage");
+  });
+
+  it("rejects a section with no subsections and names it", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, {
+      ...GOOD_OUTLINE,
+      section_plan: [{ section_title: "Method", subsections: [] }],
+    });
+    const detail = validators.outlineCoverage(workspace).detail;
+    expect(detail).toContain("Method");
+  });
+
+  it("rejects duplicate figure ids because they collide as filenames", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, {
+      ...GOOD_OUTLINE,
+      plotting_plan: [{ figure_id: "fig1" }, { figure_id: "fig1" }],
+    });
+    expect(validators.outlineCoverage(workspace).detail).toMatch(/duplicated: fig1/);
+  });
+
+  it("accepts an outline that already carries citation_candidates", async () => {
+    // The literature stage rewrites the outline, deleting citation_hints and
+    // adding citation_candidates. Both shapes must parse.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, {
+      ...GOOD_OUTLINE,
+      section_plan: [
+        {
+          section_title: "Introduction",
+          subsections: [{ subsection_title: "Motivation", citation_candidates: ["smith2024sam"] }],
+        },
+      ],
+    });
+    expect(failures(validateStage(workspace, "outline", scope()))).toEqual([]);
+  });
+});
+
+describe("citation integrity", () => {
+  it("fails a manuscript that cites a key absent from the bibliography", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.references, "@article{real2024a, title={Real}}\n");
+    put(workspace, ARTIFACTS.rawDraft, "Prose \\cite{invented2024x}.");
+    const check = validators.citationIntegrity(workspace, ARTIFACTS.rawDraft);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("invented2024x");
+  });
+
+  it("tells the model not to fix it by editing the bibliography", async () => {
+    // The remediation prompt is this detail verbatim; paper-run's eval showed
+    // an agent satisfying a checker by editing its supplied inputs.
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.references, "@article{real2024a, title={Real}}\n");
+    put(workspace, ARTIFACTS.rawDraft, "Prose \\cite{invented2024x}.");
+    expect(validators.citationIntegrity(workspace, ARTIFACTS.rawDraft).detail).toMatch(
+      /do not add entries to the bibliography by hand/,
+    );
+  });
+
+  it("fails a manuscript that cites nothing at all", async () => {
+    // The exact failure that produced citation F1 0.000 in paper-run's eval:
+    // "no invented citations" satisfied by citing nothing.
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.references, "@article{real2024a, title={Real}}\n");
+    put(workspace, ARTIFACTS.rawDraft, "Prose with no citations whatsoever.");
+    const check = validators.citationIntegrity(workspace, ARTIFACTS.rawDraft);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/at least one reference/);
+    expect(check.detail).toMatch(/holds 1 entries/);
+  });
+
+  it("passes when every cited key resolves", async () => {
+    const { workspace } = await prepared();
+    put(
+      workspace,
+      ARTIFACTS.references,
+      "@article{a2024x, title={A}}\n@inproceedings{b2023y, title={B}}\n",
+    );
+    put(workspace, ARTIFACTS.rawDraft, "As shown \\citep{a2024x, b2023y}.");
+    expect(validators.citationIntegrity(workspace, ARTIFACTS.rawDraft).passed).toBe(true);
+  });
+});
+
+describe("literature dedup and provenance", () => {
+  it("fails when two keys describe the same paper", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, {
+      smith2024sam: { citation_key: "smith2024sam", title: "Segment Anything!" },
+      smith2024samb: { citation_key: "smith2024samb", title: "segment anything" },
+    });
+    const check = validators.literatureDedup(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("smith2024sam/smith2024samb");
+  });
+
+  it("passes distinct references", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, {
+      a2024x: { citation_key: "a2024x", title: "Alpha" },
+      b2023y: { citation_key: "b2023y", title: "Beta" },
+    });
+    expect(validators.literatureDedup(workspace).passed).toBe(true);
+  });
+
+  it("fails a bibliography entry with no retrieval record", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.references, "@article{ghost2024z, title={Ghost}}\n");
+    json(workspace, ARTIFACTS.candidates, []);
+    const check = validators.bibliographyProvenance(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("ghost2024z");
+  });
+
+  it("passes when every entry traces to a provider", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.references, "@article{a2024x, title={Alpha}}\n");
+    json(workspace, ARTIFACTS.candidates, [
+      {
+        citation_key: "a2024x",
+        title: "Alpha",
+        provider: "semantic_scholar",
+        provider_id: "abc123",
+        retrieved_at: "2026-09-02T00:00:00.000Z",
+      },
+    ]);
+    expect(validators.bibliographyProvenance(workspace).passed).toBe(true);
+  });
+});
+
+describe("figure coverage", () => {
+  it("fails when info.json names a figure that never rendered", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    const check = validators.figureCoverage(workspace, scope(), null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("overview.png");
+  });
+
+  it("fails when a rendered figure is never included by the manuscript", async () => {
+    const { workspace } = await prepared();
+    put(workspace, join(ARTIFACTS.figuresDir, "overview.png"), "png");
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    put(workspace, ARTIFACTS.rawDraft, "No figures included here.");
+    const check = validators.figureCoverage(workspace, scope(), ARTIFACTS.rawDraft);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/never \\includegraphics/);
+  });
+
+  it("passes when the manuscript includes the figure, extension aside", async () => {
+    const { workspace } = await prepared();
+    put(workspace, join(ARTIFACTS.figuresDir, "overview.png"), "png");
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    put(workspace, ARTIFACTS.rawDraft, "\\includegraphics[width=1cm]{figures/overview}");
+    expect(validators.figureCoverage(workspace, scope(), ARTIFACTS.rawDraft).passed).toBe(true);
+  });
+
+  it("requires plotting_results when plotting is enabled", async () => {
+    const { workspace } = await prepared();
+    put(workspace, join(ARTIFACTS.figuresDir, "overview.png"), "png");
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    const check = validators.figureCoverage(workspace, scope({ use_plotting: true }), null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/plotting_results\.json/);
+  });
+
+  it("fails a planned figure that produced no image", async () => {
+    const { workspace } = await prepared();
+    put(workspace, join(ARTIFACTS.figuresDir, "overview.png"), "png");
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    json(workspace, ARTIFACTS.plottingResults, [{ figure_id: "missing_one" }]);
+    const check = validators.figureCoverage(workspace, scope({ use_plotting: true }), null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("missing_one");
+  });
+});
+
+describe("template compatibility", () => {
+  it("fails when the manuscript changes the document class", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.rawDraft, "\\documentclass{book}\n");
+    const check = validators.templateCompatibility(workspace, ARTIFACTS.rawDraft);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("book");
+  });
+
+  it("passes when the class matches the template", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.rawDraft, "\\documentclass[10pt,twocolumn,letterpaper]{article}\n");
+    expect(validators.templateCompatibility(workspace, ARTIFACTS.rawDraft).passed).toBe(true);
+  });
+});
+
+describe("unresolved markers", () => {
+  it("fails a final manuscript with a TODO deferral", async () => {
+    const { workspace } = await prepared();
+    put(
+      workspace,
+      ARTIFACTS.finalTex,
+      "\\section{Related Work}\n% TODO(paper-orchestra): add discussion once sources are verified\n",
+    );
+    const check = validators.noUnresolvedMarkers(workspace, ARTIFACTS.finalTex);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("TODO(paper-orchestra)");
+  });
+
+  it("passes a finished manuscript", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.finalTex, "\\section{Intro}\nReal prose \\cite{a2024x}.\n");
+    expect(validators.noUnresolvedMarkers(workspace, ARTIFACTS.finalTex).passed).toBe(true);
+  });
+});
+
+describe("stage wiring", () => {
+  it("short-circuits plotting cleanly when it is disabled", async () => {
+    const { workspace } = await prepared();
+    put(workspace, join(ARTIFACTS.figuresDir, "overview.png"), "png");
+    json(workspace, ARTIFACTS.figuresInfo, [{ name: "overview.png", caption: "c" }]);
+    const checks = validateStage(workspace, "plotting", scope({ use_plotting: false }));
+    expect(checks.map((c) => c.name)).toContain("plotting_disabled");
+    expect(failures(checks)).toEqual([]);
+  });
+
+  it("returns checks for every stage without throwing on an empty workspace", async () => {
+    const { workspace } = await prepared();
+    for (const stage of ["outline", "literature", "plotting", "section_writing", "refinement"] as const) {
+      const checks = validateStage(workspace, stage, scope({ use_plotting: true }));
+      expect(checks.length).toBeGreaterThan(0);
+      // Validators report, never throw: that is what lets `validate` print a
+      // full table instead of dying on the first missing file.
+      expect(checks.every((c) => typeof c.detail === "string" && c.detail.length > 0)).toBe(true);
+    }
+  });
+});
+
+describe("validators never throw", () => {
+  // Regression: outlineCoverage, literatureDedup, bibliographyProvenance and
+  // figureCoverage all called JSON.parse unguarded, so malformed model output
+  // aborted the whole validation pass instead of producing a failed check.
+  const GARBAGE = "{not json at all,,,}";
+
+  it.each([
+    ["outline", ARTIFACTS.outline],
+    ["literature", ARTIFACTS.citationMap],
+    ["literature", ARTIFACTS.candidates],
+    ["plotting", ARTIFACTS.plottingResults],
+    ["plotting", ARTIFACTS.figuresInfo],
+  ] as const)("reports rather than throws when %s reads malformed %s", async (stage, rel) => {
+    const { workspace } = await prepared();
+    put(workspace, rel, GARBAGE);
+    put(workspace, ARTIFACTS.references, "@article{a2024x, title={A}}\n");
+    let checks: ReturnType<typeof validateStage> = [];
+    expect(() => {
+      checks = validateStage(workspace, stage, scope({ use_plotting: true }));
+    }).not.toThrow();
+    const failed = checks.filter((c) => !c.passed);
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.some((c) => /does not parse/.test(c.detail))).toBe(true);
+  });
+
+  it("still reports a schema violation as data, not an exception", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.outline, { section_plan: [{ subsections: [] }] });
+    let checks: ReturnType<typeof validateStage> = [];
+    expect(() => {
+      checks = validateStage(workspace, "outline", scope());
+    }).not.toThrow();
+    expect(checks.some((c) => !c.passed && /match its schema/.test(c.detail))).toBe(true);
+  });
+});

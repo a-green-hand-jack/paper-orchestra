@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+import { Command, Option } from "commander";
+import { checkpoint, checkpointHistory } from "./checkpoints.js";
+import { statusCommand } from "./commands/status.js";
+import { currentYearMonth, prepareWorkspace } from "./commands/prepare.js";
+import { runDoctor } from "./doctor.js";
+import { UserFacingError, ValidationFailedError } from "./errors.js";
+import { formatModelRef, parseModelRef, parseStageModels } from "./model.js";
+import { compactStamp } from "./timestamp.js";
+import { PAPER_ORCHESTRA_VERSION } from "./version.js";
+import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
+import { validateRun, validateStage } from "./validation.js";
+import { isStageId, STAGES } from "./stages.js";
+
+function fail(message: string, code = 1): never {
+  throw new UserFacingError(message, code);
+}
+
+const program = new Command();
+
+program
+  .name("paper-orchestra")
+  .description(
+    "Turn raw research materials into a submission-ready LaTeX manuscript, " +
+      "driving OpenCode as the agent runtime.",
+  )
+  .version(PAPER_ORCHESTRA_VERSION);
+
+program
+  .command("write")
+  .description("Create a workspace and run the writing pipeline")
+  .argument("<raw-materials>", "directory holding the idea and experimental log")
+  .requiredOption("--template <dir>", "LaTeX template directory, e.g. templates/cvpr2025")
+  .option("-o, --output <dir>", "workspace directory (default: ./po-run-<timestamp>)")
+  .addOption(
+    new Option("--mode <mode>", "gate behaviour").choices(["autonomous", "collaborative"]).default(
+      "autonomous",
+    ),
+  )
+  .option("--headless", "run without attaching the OpenCode TUI", false)
+  .option("--use-plotting", "generate figures instead of using supplied ones", false)
+  .option("--model <ref>", "provider/model[:variant]; omit to use OpenCode's default")
+  .option(
+    "--stage-model <entry>",
+    "per-stage override, e.g. literature=openai/gpt-5-mini (repeatable)",
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[],
+  )
+  .option("--research-cutoff <yyyy-mm>", "literature cutoff (default: current month)")
+  .option("--idea-filename <name>", "idea document within raw materials", "idea_sparse.md")
+  .option(
+    "--experimental-log-filename <name>",
+    "experimental log within raw materials",
+    "experimental_log.md",
+  )
+  .addOption(
+    new Option("--network-policy <policy>", "whether stages may reach the network")
+      .choices(["online", "offline"])
+      .default("online"),
+  )
+  .option("--timeout-multiplier <n>", "scale every stage timeout", "1")
+  .option("--prepare-only", "create and lock the workspace, then stop", false)
+  .action(async (rawMaterials: string, options: Record<string, unknown>) => {
+    const workspace = (options.output as string | undefined) ?? `./po-run-${compactStamp()}`;
+    const multiplier = Number(options.timeoutMultiplier);
+    if (!Number.isFinite(multiplier) || multiplier <= 0) {
+      fail(`--timeout-multiplier must be a positive number, got "${options.timeoutMultiplier}"`);
+    }
+
+    const result = await prepareWorkspace({
+      workspace,
+      rawMaterials,
+      templateDir: options.template as string,
+      mode: options.mode as "autonomous" | "collaborative",
+      headless: Boolean(options.headless),
+      usePlotting: Boolean(options.usePlotting),
+      researchCutoff: (options.researchCutoff as string | undefined) ?? currentYearMonth(),
+      ideaFilename: options.ideaFilename as string,
+      experimentalLogFilename: options.experimentalLogFilename as string,
+      networkPolicy: options.networkPolicy as "online" | "offline",
+      defaultModel: options.model ? parseModelRef(options.model as string) : null,
+      stageModels: parseStageModels(options.stageModel as string[]),
+      timeoutMultiplier: multiplier,
+    });
+
+    const { state } = result;
+    process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
+    process.stdout.write(`  branch    ${state.run_branch}\n`);
+    process.stdout.write(`  venue     ${state.scope.venue}\n`);
+    process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
+    process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);
+    process.stdout.write(`  template  ${state.template_digest.slice(0, 12)}\n`);
+    process.stdout.write(`  brain     ${result.brainInputs.length} normalized input(s)\n`);
+    process.stdout.write(`  ckpt      ${result.checkpointSha.slice(0, 12)}\n`);
+
+    if (result.skipped.length > 0) {
+      process.stdout.write(`  skipped   ${result.skipped.length} file(s) during import:\n`);
+      for (const entry of result.skipped.slice(0, 10)) {
+        process.stdout.write(`              ${entry}\n`);
+      }
+      if (result.skipped.length > 10) {
+        process.stdout.write(`              ... and ${result.skipped.length - 10} more\n`);
+      }
+    }
+
+    if (options.prepareOnly) return;
+
+    fail(
+      "the writing controller is not wired up yet (rollout step 2). " +
+        `The workspace is prepared and locked at ${workspace}; ` +
+        "re-run with --prepare-only to suppress this message.",
+    );
+  });
+
+program
+  .command("status")
+  .description("Show stage progress for a run")
+  .argument("[workspace]", "run workspace", ".")
+  .option("--json", "machine-readable output", false)
+  .action(async (workspace: string, options: { json: boolean }) => {
+    await statusCommand(workspace, options.json);
+  });
+
+program
+  .command("checkpoint")
+  .description("Take a manual checkpoint of the current workspace state")
+  .argument("[workspace]", "run workspace", ".")
+  .action(async (workspace: string) => {
+    const state = readRunState(workspace);
+    const sha = await checkpoint({
+      workspace,
+      runId: state.run_id,
+      stage: state.current_stage ?? "manual",
+      status: "manual",
+      mode: state.mode,
+      model: formatModelRef(state.default_model),
+    });
+    process.stdout.write(`checkpoint ${sha.slice(0, 12)}\n`);
+  });
+
+program
+  .command("history")
+  .description("List the checkpoint timeline")
+  .argument("[workspace]", "run workspace", ".")
+  .action(async (workspace: string) => {
+    const records = await checkpointHistory(workspace);
+    if (records.length === 0) {
+      process.stdout.write("no checkpoints\n");
+      return;
+    }
+    for (const record of records) {
+      process.stdout.write(
+        `${record.sha.slice(0, 12)}  ${(record.stage ?? "?").padEnd(16)} ` +
+          `${(record.status ?? "?").padEnd(12)} ${record.validation ?? ""}\n`,
+      );
+    }
+  });
+
+program
+  .command("resume")
+  .description("Continue a run from its first unfinished stage")
+  .argument("[workspace]", "run workspace", ".")
+  .action(async (workspace: string) => {
+    const state = readRunState(workspace);
+    verifyLocks(workspace, state);
+    const next = resumeStage(state);
+    if (!next) {
+      process.stdout.write(`${state.run_id} is already complete\n`);
+      return;
+    }
+    fail(
+      `locks verified; ${state.run_id} would resume at "${next}". ` +
+        "The writing controller is not wired up yet (rollout step 2).",
+    );
+  });
+
+program
+  .command("validate")
+  .description("Run artifact validators against a workspace without prompting a model")
+  .argument("[workspace]", "run workspace", ".")
+  .option("--stage <stage>", `validate one stage only (${STAGES.join(", ")})`)
+  .option("--json", "machine-readable output", false)
+  .action(async (workspace: string, options: { stage?: string; json: boolean }) => {
+    const state = readRunState(workspace);
+    if (options.stage && !isStageId(options.stage)) {
+      fail(`unknown stage "${options.stage}"; expected one of ${STAGES.join(", ")}`);
+    }
+    const checks = options.stage
+      ? validateStage(workspace, options.stage as (typeof STAGES)[number], state.scope)
+      : validateRun(workspace, state.scope.plan, state.scope);
+
+    const failed = checks.filter((check) => !check.passed);
+
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify({ checks, failed: failed.length }, null, 2)}\n`);
+    } else {
+      for (const check of checks) {
+        process.stdout.write(`${check.passed ? "pass" : "FAIL"}  ${check.name}\n`);
+        if (!check.passed) process.stdout.write(`      ${check.detail}\n`);
+      }
+      process.stdout.write(`\n${checks.length - failed.length}/${checks.length} passed\n`);
+    }
+
+    if (failed.length > 0) {
+      // Exit 2 rather than 1 so a script can distinguish "validation failed"
+      // from "the command could not run".
+      throw new ValidationFailedError(
+        `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
+      );
+    }
+  });
+
+program
+  .command("doctor")
+  .description("Check the environment a run depends on")
+  .action(async () => {
+    const { checks, probes, ok } = await runDoctor();
+    for (const check of checks) {
+      process.stdout.write(`${check.passed ? "ok  " : "FAIL"}  ${check.name}: ${check.detail}\n`);
+    }
+    for (const probe of probes) {
+      process.stdout.write(
+        `${probe.satisfied ? "ok  " : "warn"}  ${probe.name}: ${probe.detail}\n`,
+      );
+    }
+    if (!ok) fail("environment is missing a hard requirement (see FAIL lines above)");
+  });
+
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync(process.argv);
+  } catch (error) {
+    if (error instanceof UserFacingError) {
+      process.stderr.write(`paper-orchestra: ${error.message}\n`);
+      process.exit(error.exitCode);
+    }
+    throw error;
+  }
+}
+
+await main();
