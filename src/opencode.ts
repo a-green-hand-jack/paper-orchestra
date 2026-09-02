@@ -36,8 +36,19 @@ async function unwrap<T>(
  * Port 0 lets the OS choose, so concurrent runs never collide, and the server
  * lives only as long as this process.
  */
-export async function startRuntime(directory: string): Promise<Runtime> {
-  const server = await createOpencodeServer({ hostname: "127.0.0.1", port: 0 });
+export async function startRuntime(
+  directory: string,
+  config?: Record<string, unknown>,
+): Promise<Runtime> {
+  // The config is passed to the server rather than left to file discovery:
+  // OpenCode resolves project config from its own working directory, so a
+  // workspace `opencode.json` is not picked up and its permissions never take
+  // effect.
+  const server = await createOpencodeServer({
+    hostname: "127.0.0.1",
+    port: 0,
+    ...(config ? { config: config as never } : {}),
+  });
   const client = createOpencodeClient({ baseUrl: server.url, directory });
   return {
     client,
@@ -303,4 +314,58 @@ export async function lastAssistantText(
     return "";
   }
   return "";
+}
+
+export interface PermissionAsk {
+  readonly permissionId: string;
+  readonly sessionId: string;
+  readonly action: string;
+  readonly resources: string[];
+}
+
+/**
+ * Watch for permission requests and report the first one.
+ *
+ * A headless run has nobody to answer a prompt, so the session simply stays
+ * busy until the stage budget expires. That is a 30-minute wait to learn
+ * something the server knew in the first second, and the resulting "did not go
+ * idle" error names the wrong cause. This turns it into an immediate, accurate
+ * failure.
+ *
+ * Returns a stop function; the promise resolves with the first ask seen, or
+ * never resolves if none occurs.
+ */
+export function watchPermissionAsks(runtime: Runtime): {
+  first: Promise<PermissionAsk>;
+  stop: () => void;
+} {
+  let stopped = false;
+  let resolveFirst: (ask: PermissionAsk) => void = () => {};
+  const first = new Promise<PermissionAsk>((resolve) => {
+    resolveFirst = resolve;
+  });
+
+  void (async () => {
+    try {
+      const events = await runtime.client.event.subscribe();
+      for await (const event of events.stream as AsyncIterable<{
+        type?: string;
+        data?: { id?: string; sessionID?: string; action?: string; resources?: string[] };
+      }>) {
+        if (stopped) return;
+        if (event.type !== "permission.asked" && event.type !== "permission.v2.asked") continue;
+        resolveFirst({
+          permissionId: event.data?.id ?? "unknown",
+          sessionId: event.data?.sessionID ?? "unknown",
+          action: event.data?.action ?? "unknown",
+          resources: event.data?.resources ?? [],
+        });
+        return;
+      }
+    } catch {
+      // A dropped stream must not fail a run; the budget remains the backstop.
+    }
+  })();
+
+  return { first, stop: () => { stopped = true; } };
 }

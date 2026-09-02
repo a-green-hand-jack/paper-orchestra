@@ -61,6 +61,8 @@ export const ARTIFACTS = {
   candidates: join(BRAIN_DIR, "raw", "candidates.json"),
   updatedTemplate: join(BRAIN_DIR, "raw", "updated_template.tex"),
   plottingResults: join(BRAIN_DIR, "raw", "plotting_results.json"),
+  /** Controller-written LaTeX build report, read by the latex_assembly check. */
+  buildReport: join(BRAIN_DIR, "raw", "build.json"),
   figuresDir: join(BRAIN_DIR, "manuscript", "figures"),
   figuresInfo: join(BRAIN_DIR, "manuscript", "figures", "info.json"),
   rawDraft: join(BRAIN_DIR, "manuscript", "raw_draft.tex"),

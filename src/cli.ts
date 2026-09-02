@@ -64,6 +64,12 @@ program
     "--until <stage>",
     "stop after this stage, locking a shorter plan (outline, literature, plotting, section_writing, refinement)",
   )
+  .option(
+    "--allow-lkm-spend",
+    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call)",
+    false,
+  )
+  .option("--max-lkm-calls <n>", "ceiling on literature retrieval calls", "40")
   .option("--prepare-only", "create and lock the workspace, then stop", false)
   .action(async (rawMaterials: string, options: Record<string, unknown>) => {
     const workspace = (options.output as string | undefined) ?? `./po-run-${compactStamp()}`;
@@ -90,6 +96,7 @@ program
       stageModels: parseStageModels(options.stageModel as string[]),
       timeoutMultiplier: multiplier,
       until: (options.until as StageId | undefined) ?? null,
+      maxLkmCalls: Number(options.maxLkmCalls),
     });
 
     const { state } = result;
@@ -116,7 +123,11 @@ program
     if (options.prepareOnly) return;
 
     process.stdout.write("\n");
-    await runController({ workspace, headless: Boolean(options.headless) });
+    await runController({
+      workspace,
+      headless: Boolean(options.headless),
+      allowLkmSpend: Boolean(options.allowLkmSpend),
+    });
   });
 
 program
@@ -167,7 +178,12 @@ program
   .command("resume")
   .description("Continue a run from its first unfinished stage")
   .argument("[workspace]", "run workspace", ".")
-  .action(async (workspace: string) => {
+  .option(
+    "--allow-lkm-spend",
+    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call)",
+    false,
+  )
+  .action(async (workspace: string, options: { allowLkmSpend: boolean }) => {
     const state = readRunState(workspace);
     verifyLocks(workspace, state);
     const next = resumeStage(state);
@@ -176,7 +192,11 @@ program
       return;
     }
     process.stdout.write(`resuming ${state.run_id} at "${next}"\n`);
-    await runController({ workspace, headless: state.headless });
+    await runController({
+      workspace,
+      headless: state.headless,
+      allowLkmSpend: Boolean(options.allowLkmSpend),
+    });
   });
 
 program

@@ -53,6 +53,7 @@ export function prepareOptions(overrides: Partial<PrepareOptions> = {}): Prepare
     defaultModel: null,
     stageModels: {},
     timeoutMultiplier: 1,
+    maxLkmCalls: 40,
     ...overrides,
   };
 }

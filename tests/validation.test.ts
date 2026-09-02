@@ -385,3 +385,87 @@ describe("validators never throw", () => {
     expect(checks.some((c) => !c.passed && /match its schema/.test(c.detail))).toBe(true);
   });
 });
+
+describe("latex_assembly", () => {
+  it("fails when the controller has not compiled anything", async () => {
+    const { workspace } = await prepared();
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/no build report/);
+  });
+
+  it("turns LaTeX errors into the repair instruction", async () => {
+    // In the Python a compile failure merely `continue`s the reflection loop,
+    // so a paper that never produced a PDF could still end a run as success.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, {
+      ok: false,
+      source: ARTIFACTS.finalTex,
+      pdf: null,
+      pages: null,
+      errors: ["! Undefined control sequence. l.12 \\badmacro"],
+      built_at: "2026-09-02T00:00:00.000Z",
+    });
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("badmacro");
+  });
+
+  it("fails a build that compiled but rendered citations as [?]", async () => {
+    // The authoritative signal, because it inspects what a reader sees rather
+    // than which package logged what. A real run passed every log-based check
+    // while rendering [?] for all 84 citations.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, {
+      ok: true,
+      source: ARTIFACTS.finalTex,
+      pdf: ARTIFACTS.finalPdf,
+      pages: 8,
+      errors: [],
+      unresolved_citation_marks: 14,
+      built_at: "2026-09-02T00:00:00.000Z",
+    });
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("14");
+    expect(check.detail).toMatch(/not\s+\nsubmission-ready|not submission-ready/);
+  });
+
+  it("fails when bibtex could not find a key in any database", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, {
+      ok: true,
+      source: ARTIFACTS.finalTex,
+      pdf: ARTIFACTS.finalPdf,
+      pages: 8,
+      errors: ["Warning--I didn't find a database entry for \"ghost2024z\""],
+      unresolved_citation_marks: 0,
+      built_at: "2026-09-02T00:00:00.000Z",
+    });
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("ghost2024z");
+  });
+
+  it("passes a clean build and reports the page count", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.buildReport, {
+      ok: true,
+      source: ARTIFACTS.finalTex,
+      pdf: ARTIFACTS.finalPdf,
+      pages: 8,
+      errors: [],
+      built_at: "2026-09-02T00:00:00.000Z",
+    });
+    const check = validators.latexAssembly(workspace);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toContain("8 page");
+  });
+
+  it("reports a malformed build report rather than throwing", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.buildReport, "{not json,,,}");
+    expect(() => validators.latexAssembly(workspace)).not.toThrow();
+    expect(validators.latexAssembly(workspace).passed).toBe(false);
+  });
+});

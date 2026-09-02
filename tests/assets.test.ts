@@ -83,3 +83,32 @@ describe("approveRun", () => {
     expect(() => approveRun("/tmp/definitely-not-a-po-workspace")).toThrow(/no such workspace/);
   });
 });
+
+describe("supplied figures path", () => {
+  it("publishes supplied figures and synthesizes captions without a model call", async () => {
+    // The Python makes the user hand-write figures/info.json in the
+    // non-plotting path, so a missing caption file surfaces as a confusing
+    // downstream failure instead of being filled in here.
+    const { workspace } = await prepared();
+    const { validateStage } = await import("../src/validation.js");
+    const { readRunState } = await import("../src/state/store.js");
+    const { runSuppliedFiguresForTest } = await import("../src/controller.js");
+
+    const published = runSuppliedFiguresForTest(workspace);
+    expect(published).toBe(1);
+
+    const state = readRunState(workspace);
+    const checks = validateStage(workspace, "plotting", state.scope);
+    expect(checks.filter((c) => !c.passed)).toEqual([]);
+  });
+
+  it("falls back to the filename stem as a caption", async () => {
+    const { workspace } = await prepared();
+    const { runSuppliedFiguresForTest } = await import("../src/controller.js");
+    runSuppliedFiguresForTest(workspace);
+    const info = JSON.parse(
+      readFileSync(join(workspace, ".brain", "manuscript", "figures", "info.json"), "utf8"),
+    );
+    expect(info[0].caption).toBe("overview");
+  });
+});

@@ -116,13 +116,20 @@ export const CandidateSchema = z
   .object({
     citation_key: z.string().min(1),
     title: z.string().min(1),
-    provider: z.enum(["semantic_scholar", "arxiv"]),
+    /**
+     * Which retrieval backend produced this record. `bohrium_lkm` is what is
+     * implemented; the others are reserved so adding a backend does not need a
+     * schema migration.
+     */
+    provider: z.enum(["bohrium_lkm", "semantic_scholar", "arxiv"]),
+    /** The provider's own identifier, so a record can be re-fetched and audited. */
     provider_id: z.string().min(1),
     retrieved_at: z.string().min(1),
     authors: z.array(z.string()).default([]),
     venue: z.string().default(""),
     year: z.union([z.number().int(), z.string()]).nullable().default(null),
     abstract: z.string().default(""),
+    doi: z.string().default(""),
   })
   .passthrough();
 export const CandidatesSchema = z.array(CandidateSchema);
@@ -163,3 +170,27 @@ export const FigureInfoSchema = z.array(
     .passthrough(),
 );
 export type FigureInfo = z.infer<typeof FigureInfoSchema>;
+
+/**
+ * The controller's LaTeX build report.
+ *
+ * Written by the controller, never by the agent, which is what lets
+ * `latex_assembly` be a fact rather than a claim: the agent has no `bash` and
+ * cannot run pdflatex at all.
+ */
+export const BuildReportSchema = z
+  .object({
+    ok: z.boolean(),
+    source: z.string().min(1),
+    pdf: z.string().nullable().default(null),
+    pages: z.number().int().nullable().default(null),
+    errors: z.array(z.string()).default([]),
+    /**
+     * Unresolved `[?]` groups in the RENDERED text. Independent of which
+     * package emits which warning, so it catches a silently empty bibliography.
+     */
+    unresolved_citation_marks: z.number().int().nonnegative().default(0),
+    built_at: z.string().min(1),
+  })
+  .passthrough();
+export type BuildReport = z.infer<typeof BuildReportSchema>;

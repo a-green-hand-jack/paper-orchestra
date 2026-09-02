@@ -47,7 +47,9 @@ export function loadCommand(workspace: string, stage: StageId): string {
 /** Files a stage must produce, phrased for the prompt. */
 const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
   outline: [ARTIFACTS.outline],
-  literature: [ARTIFACTS.references, ARTIFACTS.citationMap, ARTIFACTS.outlineV1],
+  // references.bib and citation_map.json are written by the controller before
+  // this stage runs, so the model is asked only for the synthesis artifacts.
+  literature: [ARTIFACTS.outlineV1, ARTIFACTS.updatedTemplate],
   plotting: [ARTIFACTS.plottingResults, ARTIFACTS.figuresInfo],
   section_writing: [ARTIFACTS.rawDraft],
   refinement: [ARTIFACTS.finalTex],
@@ -63,7 +65,13 @@ function stageInputs(stage: StageId, scope: Scope): string[] {
     case "outline":
       return [...source, "template/template.tex", "template/guidelines.md"];
     case "literature":
-      return [ARTIFACTS.outline, ...source, "template/template.tex"];
+      return [
+        ARTIFACTS.outline,
+        ARTIFACTS.citationMap,
+        ARTIFACTS.references,
+        ...source,
+        "template/template.tex",
+      ];
     case "plotting":
       return [ARTIFACTS.outline, ...source];
     case "section_writing":

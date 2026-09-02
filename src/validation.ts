@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { z } from "zod";
 import {
+  BuildReportSchema,
   CandidatesSchema,
   CitationMapSchema,
   FigureInfoSchema,
@@ -343,6 +344,63 @@ function workspaceVenue(workspace: string): string {
   return basename(workspace);
 }
 
+/**
+ * The manuscript must compile.
+ *
+ * In the Python a compile failure merely `continue`s the reflection loop
+ * (content_refinement_agent.py:322-324), so a paper that never produced a PDF
+ * could still end a run reported as success. Here the controller compiles and
+ * records the result, and the extracted LaTeX errors become the remediation
+ * instruction verbatim.
+ */
+function latexAssembly(workspace: string): Check {
+  const name = "latex_assembly";
+  if (!existsSync(join(workspace, ARTIFACTS.buildReport))) {
+    return fail(
+      name,
+      "expected the controller to have compiled the manuscript; no build report was found",
+    );
+  }
+  const parsed = parseArtifact(workspace, ARTIFACTS.buildReport, BuildReportSchema, name);
+  if (!parsed.ok) return parsed.check;
+  const report = parsed.value;
+
+  if (!report.ok) {
+    const shown = report.errors.slice(0, 8);
+    return fail(
+      name,
+      `expected ${report.source} to compile with pdflatex; it did not. Fix these LaTeX ` +
+        `errors: ${shown.join(" | ")}${report.errors.length > shown.length ? " ..." : ""}`,
+    );
+  }
+
+  // Checked before the log, because it does not depend on knowing which
+  // package emits which warning. A manuscript whose citations resolved contains
+  // no `[?]` groups in its rendered text.
+  if (report.unresolved_citation_marks > 0) {
+    return fail(
+      name,
+      `expected the compiled PDF to render every citation, but ${report.unresolved_citation_marks} ` +
+        `appear as "[?]". The bibliography did not resolve, so the manuscript is not ` +
+        `submission-ready even though it compiled.`,
+    );
+  }
+
+  const undefinedCitations = report.errors.filter((line) =>
+    /didn't find a database entry/.test(line),
+  );
+  if (undefinedCitations.length > 0) {
+    return fail(
+      name,
+      `expected every citation to resolve at compile time; these do not: ` +
+        `${undefinedCitations.slice(0, 6).join(" | ")}. Cite a key that exists in ` +
+        `references.bib.`,
+    );
+  }
+
+  return pass(name, `${report.source} compiled to ${report.pages ?? "?"} page(s)`);
+}
+
 /** A finished manuscript must contain no placeholders or deferral markers. */
 function noUnresolvedMarkers(workspace: string, manuscriptRel: string): Check {
   const name = "no_unresolved_markers";
@@ -379,6 +437,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         artifactExists(workspace, ARTIFACTS.references, 16),
         artifactExists(workspace, ARTIFACTS.citationMap, 2),
         artifactExists(workspace, ARTIFACTS.outlineV1, 32),
+        artifactExists(workspace, ARTIFACTS.updatedTemplate, 256),
         schemaValid(workspace, ARTIFACTS.citationMap, CitationMapSchema),
         schemaValid(workspace, ARTIFACTS.outlineV1, OutlineSchema),
         literatureDedup(workspace),
@@ -409,12 +468,17 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         citationIntegrity(workspace, ARTIFACTS.rawDraft),
         figureCoverage(workspace, scope, ARTIFACTS.rawDraft),
         templateCompatibility(workspace, ARTIFACTS.rawDraft),
+        // Compile here rather than only at refinement: a draft that cannot
+        // build is far cheaper to fix now than after a refinement pass has
+        // rewritten it.
+        latexAssembly(workspace),
       ];
 
     case "refinement":
       return [
         artifactExists(workspace, ARTIFACTS.finalTex, 512),
         artifactExists(workspace, ARTIFACTS.finalPdf, 1024),
+        latexAssembly(workspace),
         citationIntegrity(workspace, ARTIFACTS.finalTex),
         figureCoverage(workspace, scope, ARTIFACTS.finalTex),
         templateCompatibility(workspace, ARTIFACTS.finalTex),
@@ -433,6 +497,7 @@ export function validateRun(
 }
 
 export const validators = {
+  latexAssembly,
   artifactExists,
   schemaValid,
   outlineCoverage,

@@ -37,6 +37,7 @@ export interface PrepareOptions {
    * rather than an interrupted full run.
    */
   readonly until?: StageId | null;
+  readonly maxLkmCalls: number;
 }
 
 export interface PrepareResult {
@@ -110,6 +111,7 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     experimental_log_filename: options.experimentalLogFilename,
     venue: basename(resolve(options.templateDir)),
     network_policy: options.networkPolicy,
+    max_lkm_calls: options.maxLkmCalls,
   });
 
   const digests = computeLockDigests(workspace);

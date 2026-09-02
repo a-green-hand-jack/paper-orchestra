@@ -79,6 +79,12 @@ export const ScopeSchema = z.object({
   experimental_log_filename: z.string().min(1),
   venue: z.string().min(1),
   network_policy: z.enum(["online", "offline"]),
+  /**
+   * Hard ceiling on literature retrieval calls. Locked into scope because it
+   * changes which sources the manuscript could possibly cite, and each call
+   * costs real money.
+   */
+  max_lkm_calls: z.number().int().nonnegative().default(40),
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 

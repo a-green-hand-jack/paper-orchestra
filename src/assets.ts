@@ -5,6 +5,7 @@ import { ensureDir, writeJsonAtomic } from "./files.js";
 import { paths } from "./paths.js";
 import { COMMANDS, STAGES } from "./stages.js";
 import type { RunState } from "./state/schema.js";
+import { permissionsFor } from "./permissions.js";
 
 /**
  * Locate the packaged `assets/` directory.
@@ -21,36 +22,6 @@ function assetRoot(): string {
     if (existsSync(join(candidate, "commands"))) return candidate;
   }
   throw new Error(`cannot locate packaged assets/ from ${here}`);
-}
-
-/**
- * Permissions for the run.
- *
- * Default-deny. The agent writes artifacts and reads inputs; everything
- * mechanical -- LaTeX compilation, figure scripts, literature retrieval -- is
- * the controller's job, so `bash` and the network tools stay denied. That is
- * what makes a stage's completion a fact about the filesystem rather than a
- * claim in a transcript.
- *
- * Note the schema has no `write` or `patch` key: `edit` covers both.
- */
-function permissions(mode: RunState["mode"]): Record<string, unknown> {
-  return {
-    read: "allow",
-    glob: "allow",
-    grep: "allow",
-    list: "allow",
-    edit: "allow",
-    bash: "deny",
-    webfetch: "deny",
-    websearch: "deny",
-    external_directory: "deny",
-    // A question in autonomous mode would hang a headless run with nobody to
-    // answer it; collaborative runs pause at gates instead, which is where a
-    // human is actually expected.
-    question: mode === "collaborative" ? "allow" : "deny",
-    todowrite: "allow",
-  };
 }
 
 /**
@@ -75,9 +46,12 @@ export function installRuntimeAssets(workspace: string, state: RunState): string
     installed.push(join(".opencode", "commands", file));
   }
 
+  // Written for inspection, for the native TUI, and so a checkpoint records
+  // the posture a run used. The authoritative copy is handed to the server
+  // directly, because file discovery does not find this path.
   const config: Record<string, unknown> = {
     $schema: "https://opencode.ai/config.json",
-    permission: permissions(state.mode),
+    permission: permissionsFor(state.mode),
   };
   if (state.default_model) {
     config.model = `${state.default_model.providerID}/${state.default_model.modelID}`;
