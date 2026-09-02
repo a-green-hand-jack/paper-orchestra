@@ -40,6 +40,7 @@ import { ARTIFACTS } from "./paths.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireRunLock } from "./state/lock.js";
+import { plottingAvailable, renderFigure } from "./figures.js";
 
 export interface ControllerOptions {
   readonly workspace: string;
@@ -176,10 +177,15 @@ async function runStage(
 
   say(options, "");
 
+  // Plotting with generation ON runs a per-figure loop rather than the single
+  // prompt every other stage uses, so it has its own path.
+  if (stage === "plotting" && state.scope.use_plotting) {
+    return runPlottingGeneration(runtime, options, sessions, signal, state);
+  }
+
   // Plotting with generation disabled needs no model at all: the figures are
   // supplied, so the controller just publishes them and lets the validators
-  // confirm. Prompting a session here would spend tokens to do nothing, and
-  // there is no plotting command markdown to prompt it with.
+  // confirm. Prompting a session here would spend tokens to do nothing.
   if (stage === "plotting" && !state.scope.use_plotting) {
     say(options, `>> ${TITLES[stage]} (${stage})  supplied figures, no model call`);
     const published = publishSuppliedFigures(workspace);
@@ -550,6 +556,244 @@ async function buildIfManuscriptStage(
  * `source/figures/`, falling back to the filename as the caption so the section
  * writer always has something to place.
  */
+/**
+ * Plotting with generation enabled.
+ *
+ * Structured as a per-figure loop rather than one prompt, because each figure
+ * has its own success criterion -- a process produced pixels -- and its own
+ * repair. One prompt asking for five scripts would make one bad script poison
+ * four good ones, and would give the remediation nothing specific to fix.
+ *
+ * The division of labour is the same one the rest of the pipeline uses: the
+ * model writes the script and the caption, the CONTROLLER executes, collects,
+ * and writes both artifacts. `plotting_results.json` and `figures/info.json`
+ * therefore record what actually rendered, not what a model claimed rendered.
+ */
+async function runPlottingGeneration(
+  runtime: Runtime,
+  options: ControllerOptions,
+  sessions: Record<string, string>,
+  signal: AbortSignal,
+  initial: RunState,
+): Promise<RunState> {
+  const stage: StageId = "plotting";
+  const { workspace } = options;
+  const p = paths(workspace);
+  let state = initial;
+  const model = stageModel(state, stage);
+  const timeoutMs = Math.round(TIMEOUTS_MS[stage] * state.timeout_multiplier);
+
+  // Fail before spending a single token if this machine cannot render at all.
+  // The alternative is discovering it after N model calls, with N scripts that
+  // were never going to run.
+  const capability = await plottingAvailable();
+  if (!capability.ok) {
+    throw new UserFacingError(`cannot generate figures: ${capability.detail}`);
+  }
+
+  const parsed = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outline)));
+  if (!parsed.success) {
+    throw new UserFacingError(
+      `cannot generate figures: ${ARTIFACTS.outline} does not match its schema. ` +
+        "Re-run the outline stage.",
+    );
+  }
+
+  const planned = parsed.data.plotting_plan;
+  const plots = planned.filter((spec) => spec.plot_type === "plot");
+  const diagrams = planned.filter((spec) => spec.plot_type !== "plot");
+
+  say(
+    options,
+    `>> ${TITLES[stage]} (${stage})  model=${formatModelRef(model)}  ` +
+      `${plots.length} plot(s), ${capability.detail}`,
+  );
+
+  // Diagrams need an image-generation endpoint, which OpenCode does not expose:
+  // `Model.capabilities` declares an output.image modality, but no response
+  // Part carries generated binary. Say so once, clearly, rather than failing
+  // per figure -- `figure_coverage` excuses them, and supplied figures cover
+  // the case where the author already has the diagram.
+  if (diagrams.length > 0) {
+    say(
+      options,
+      `   skipping ${diagrams.length} diagram(s) (${diagrams
+        .map((spec) => spec.figure_id)
+        .join(", ")}): no image-generation endpoint; supply them under source/figures/`,
+    );
+  }
+
+  const sessionId = await createSession(runtime, { title: `paper-orchestra ${stage}` });
+  sessions[stage] = sessionId;
+  writeSessionState(workspace, { serverUrl: runtime.serverUrl, sessions });
+
+  state = updateStage(workspace, stage, (s) => ({
+    ...s,
+    status: "running",
+    attempts: s.attempts + 1,
+    remediations: 0,
+    started_at: new Date().toISOString(),
+    error: null,
+    session_id: sessionId,
+    model,
+  }));
+  updateRunState(workspace, (c) => ({ ...c, current_stage: stage, status: "running" }));
+
+  const before = await sessionUsage(runtime, sessionId);
+  const figuresDir = join(p.brainManuscript, "figures");
+  ensureDir(figuresDir);
+
+  // Supplied figures still publish: generation ADDS to what the author gave,
+  // it does not replace it. A run may legitimately supply a hand-drawn
+  // architecture diagram and generate its result plots.
+  const supplied = publishSuppliedFigures(workspace);
+  const info = FigureInfoSchema.parse(readJson(join(workspace, ARTIFACTS.figuresInfo)) ?? []);
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const spec of plots) {
+    const budget = REMEDIATION_ATTEMPTS[stage] + 1;
+    let rendered: Awaited<ReturnType<typeof renderFigure>> | null = null;
+    let caption = "";
+
+    for (let attempt = 0; attempt < budget; attempt += 1) {
+      const text =
+        attempt === 0
+          ? buildStagePrompt(workspace, stage, state.scope, {
+              figure_id: spec.figure_id,
+              title: spec.title,
+              objective: spec.objective,
+              aspect_ratio: spec.aspect_ratio,
+              data_source: spec.data_source,
+            })
+          : `The script for figure \`${spec.figure_id}\` did not produce a usable figure: ` +
+            `${rendered?.error ?? "unknown failure"}\n\nFix the cause and return the ` +
+            "complete corrected script in one ```python block, plus the caption as before.";
+
+      if (attempt > 0) {
+        say(options, `   ${spec.figure_id}: retrying (${rendered?.error ?? ""})`.slice(0, 150));
+        state = updateStage(workspace, stage, (s) => ({
+          ...s,
+          remediations: s.remediations + 1,
+        }));
+      }
+
+      await prompt(runtime, { sessionId, text, model });
+      await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+
+      const answer = await lastAssistantText(runtime, sessionId);
+      rendered = await renderFigure({
+        figureId: spec.figure_id,
+        code: answer,
+        workDir: join(p.brainTmp, "figures", spec.figure_id),
+      });
+      caption = extractCaption(answer) || spec.title || spec.objective;
+
+      if (rendered.ok) break;
+    }
+
+    if (rendered?.ok && rendered.imagePath) {
+      const target = join(figuresDir, basename(rendered.imagePath));
+      copyFileSync(rendered.imagePath, target);
+      info.push({ name: basename(target), caption });
+      say(options, `   ${spec.figure_id}: rendered ${basename(target)} (${rendered.bytes} bytes)`);
+      results.push({
+        figure_id: spec.figure_id,
+        title: spec.title,
+        task_name: "plot",
+        description: spec.objective,
+        caption,
+        aspect_ratio: spec.aspect_ratio,
+        critic_history: [],
+        image_path: join("figures", basename(target)),
+      });
+    } else {
+      say(options, `   ${spec.figure_id}: FAILED - ${rendered?.error ?? "unknown"}`);
+      results.push({
+        figure_id: spec.figure_id,
+        title: spec.title,
+        task_name: "plot",
+        description: spec.objective,
+        caption,
+        aspect_ratio: spec.aspect_ratio,
+        critic_history: [],
+      });
+    }
+  }
+
+  writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), results);
+  writeJsonAtomic(join(workspace, ARTIFACTS.figuresInfo), info);
+
+  const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
+  const checks = validateStage(workspace, stage, state.scope);
+  const failed = checks.filter((check) => !check.passed);
+  reportChecks(options, checks);
+
+  if (failed.length > 0) {
+    updateStage(workspace, stage, (s) => ({ ...s, status: "failed", usage }));
+    throw new UserFacingError(
+      `stage "${stage}" failed validation: ` +
+        failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+    );
+  }
+
+  const rendered = results.filter((r) => r.image_path).length;
+  const completed = updateStage(workspace, stage, (s) => ({
+    ...s,
+    status: "completed",
+    completed_at: new Date().toISOString(),
+    usage,
+    notes: `Generated ${rendered}/${plots.length} plot(s); published ${supplied} supplied figure(s).`,
+  }));
+  const sha = await checkpoint({
+    workspace,
+    runId: completed.run_id,
+    stage,
+    status: "completed",
+    mode: completed.mode,
+    checks,
+  });
+  say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
+  return resolveGate(options, stage, completed);
+}
+
+/**
+ * The caption from a plotting answer.
+ *
+ * The model returns a script in a fenced block plus a caption; taking the
+ * prose OUTSIDE the fence avoids matching a `# comment` that happens to
+ * mention a caption. Falls back to the figure title upstream, so a model that
+ * forgets the caption still yields a placed figure rather than a failed stage.
+ */
+export function extractCaption(answer: string): string {
+  const outsideFences = answer.replace(/```[\s\S]*?```/g, "\n");
+  // `**` around the label is optional and may sit on either side of the colon:
+  // models write `**Caption:**`, `**Caption**:` and `Caption:` about equally.
+  const labelled = /^\s*(?:##+\s*)?\*{0,2}caption\*{0,2}\s*:?\s*\*{0,2}\s*$/im.exec(
+    outsideFences,
+  );
+  if (labelled) {
+    const after = outsideFences.slice(labelled.index + labelled[0].length);
+    const line = after.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+    if (line) return stripCaptionLabel(line);
+  }
+  const inline = /^\s*(?:##+\s*)?\*{0,2}caption\*{0,2}\s*:\s*\*{0,2}\s*(.+)$/im.exec(
+    outsideFences,
+  );
+  if (inline?.[1]) return stripCaptionLabel(inline[1].trim());
+  return "";
+}
+
+function stripCaptionLabel(line: string): string {
+  return line
+    .replace(/^\*\*caption:?\*\*\s*/i, "")
+    .replace(/^caption:?\s*/i, "")
+    // The LaTeX template numbers figures itself; a baked-in "Figure 3:" would
+    // render as "Figure 1: Figure 3: ...".
+    .replace(/^figure\s*\d*\s*:?\s*/i, "")
+    .replace(/^[*_`]+|[*_`]+$/g, "")
+    .trim();
+}
+
 function publishSuppliedFigures(workspace: string): number {
   const p = paths(workspace);
   const sourceFigures = join(p.source, "figures");

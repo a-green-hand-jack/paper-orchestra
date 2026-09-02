@@ -59,10 +59,11 @@ describe("installRuntimeAssets", () => {
     expect(config).not.toHaveProperty("model");
   });
 
-  it("reports which stage commands are not yet ported", () => {
-    // plotting's prompts live in paper_banana_utils.py rather than
-    // methods/prompts/, so it is expected here until that stage lands.
-    expect(missingCommands()).toEqual(["plotting"]);
+  it("ships a command for every stage in the plan", () => {
+    // Was ["plotting"] while that stage had no prompt of its own. Now every
+    // stage has one, so an empty result is the assertion: a stage whose
+    // markdown is missing fails at prompt time, deep into a paid run.
+    expect(missingCommands()).toEqual([]);
   });
 });
 

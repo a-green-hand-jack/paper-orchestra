@@ -1,10 +1,14 @@
-*.pyc
 *.out
 .env
 *.log
 datasets/*
 paper_output*
 *.zip
+
+# Run outputs. A workspace may be created anywhere, including in the repo root.
+po-run-*/
+final_paper.pdf
+
 # Node / TypeScript runtime
 node_modules/
 dist/

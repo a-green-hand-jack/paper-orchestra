@@ -1,8 +1,9 @@
 <!--
-Ported from methods/prompts/literature_review_agent.py by scripts/port_prompts.py.
+Originally ported from methods/prompts/literature_review_agent.py, which has since been removed (see MIGRATION.md).
 
-Do not hand-edit the body. The Python reference plus this script's PATCHES table
-are together the source of truth; rerun the script to regenerate.
+THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
+There is no generator to rerun: scripts/port_prompts.py was removed with
+its inputs.
 
 Controller-substituted placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}
 -->
