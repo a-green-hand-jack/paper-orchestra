@@ -44,6 +44,8 @@ function scope(overrides: Partial<Scope> = {}): Scope {
     experimental_log_filename: "experimental_log.md",
     venue: "cvpr2025",
     network_policy: "online",
+    max_lkm_calls: 40,
+    target_citations: 20,
     ...overrides,
   };
 }
@@ -196,6 +198,94 @@ describe("citation integrity", () => {
     );
     put(workspace, ARTIFACTS.rawDraft, "As shown \\citep{a2024x, b2023y}.");
     expect(validators.citationIntegrity(workspace, ARTIFACTS.rawDraft).passed).toBe(true);
+  });
+});
+
+describe("citation floor", () => {
+  /** A citation map with `count` distinct vetted sources. */
+  function sources(count: number): Record<string, unknown> {
+    return Object.fromEntries(
+      Array.from({ length: count }, (_, at) => [
+        `Key${at}`,
+        { citation_key: `Key${at}`, title: `Paper ${at}` },
+      ]),
+    );
+  }
+
+  function cites(count: number): string {
+    return Array.from({ length: count }, (_, at) => `\\cite{Key${at}}`).join(" ");
+  }
+
+  it("fails a manuscript that cites far fewer sources than it was given", async () => {
+    // The measured defect: refinement discarded ~75% of the citations two runs
+    // running (84 to 20, 67 to 16) and nothing anywhere noticed.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.finalTex, cites(6));
+
+    const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("at least 20");
+    expect(check.detail).toContain("it cites 6");
+  });
+
+  it("caps the floor at what retrieval actually found", async () => {
+    // A run that legitimately found only eight relevant papers must not be
+    // failed for citing eight of eight.
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, sources(8));
+    put(workspace, ARTIFACTS.finalTex, cites(8));
+
+    expect(validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope()).passed).toBe(true);
+  });
+
+  it("counts distinct keys, so repeating one citation cannot satisfy the floor", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.finalTex, "\\cite{Key0} ".repeat(30));
+
+    const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("it cites 1");
+  });
+
+  it("tells the model not to pad, since the detail becomes the repair instruction", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.finalTex, cites(2));
+
+    const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
+    expect(check.detail).toContain("do not invent keys");
+    expect(check.detail).toContain("do not pad");
+  });
+
+  it("honours a run that deliberately targets fewer citations", async () => {
+    const { workspace } = await prepared();
+    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.finalTex, cites(6));
+
+    expect(
+      validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope({ target_citations: 5 }))
+        .passed,
+    ).toBe(true);
+  });
+
+  it("is enforced at drafting as well as refinement", async () => {
+    // A floor checked only at the end is discovered too late to repair cheaply.
+    const { workspace } = await prepared();
+    const names = validateStage(workspace, "section_writing", scope()).map((c) => c.name);
+    expect(names).toContain("citation_floor");
+    expect(validateStage(workspace, "refinement", scope()).map((c) => c.name)).toContain(
+      "citation_floor",
+    );
+  });
+
+  it("reports a missing citation map as data rather than throwing", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ARTIFACTS.finalTex, cites(3));
+    const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
+    expect(check.passed).toBe(false);
+    expect(check.name).toBe("citation_floor");
   });
 });
 

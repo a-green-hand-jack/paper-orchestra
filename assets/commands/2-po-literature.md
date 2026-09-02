@@ -1,9 +1,8 @@
 <!--
 Ported from methods/prompts/literature_review_agent.py by scripts/port_prompts.py.
 
-Do not hand-edit the body unless you also update the Python reference, which
-remains the behavioural source of truth for prompt content. Rerun the script
-to regenerate.
+Do not hand-edit the body. The Python reference plus this script's PATCHES table
+are together the source of truth; rerun the script to regenerate.
 
 Controller-substituted placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}
 -->
@@ -23,8 +22,18 @@ INPUTS:
 YOU MUST ONLY CITE THE GIVEN 'collected_papers', DO NOT cite new papers other than the given papers.
 
 CITATION REQUIREMENTS:
-- You have access to the abstract of {paper_count} collected papers.
-- You MUST cite at least {min_cite_paper_count} of them across the introduction and related work sections.
+- You have access to the abstract of {paper_count} collected papers. Every one has
+  been retrieved and screened for relevance to THIS paper's subject; they are ordered
+  with the most relevant first.
+- You MUST cite at least {min_cite_paper_count} distinct papers across the introduction
+  and related work sections.
+- Do NOT try to cite all of them. Prefer the smallest set that genuinely supports your
+  claims: a citation must back the specific sentence it is attached to. A paragraph
+  where every sentence carries three references is worse than one where the right
+  sentence carries one.
+- If a collected paper does not support any claim you are actually making, leave it
+  uncited. An unused entry in the bibliography costs nothing; an unsupported citation
+  costs the paper its credibility.
 - Introduction: Cite key statistics, foundational models (CLIP, etc.), and broad problem statements.
 - Related Work: Do deep comparative citations. Group distinct works (e.g., "Several methods [A, B, C]...").
 - Ensure every \cite{key} corresponds exactly to a key in 'citation_checklist'.

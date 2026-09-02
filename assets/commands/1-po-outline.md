@@ -1,9 +1,8 @@
 <!--
 Ported from methods/prompts/outline_agent.py by scripts/port_prompts.py.
 
-Do not hand-edit the body unless you also update the Python reference, which
-remains the behavioural source of truth for prompt content. Rerun the script
-to regenerate.
+Do not hand-edit the body. The Python reference plus this script's PATCHES table
+are together the source of truth; rerun the script to regenerate.
 
 Controller-substituted placeholders: {cutoff_date}
 -->

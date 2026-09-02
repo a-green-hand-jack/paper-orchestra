@@ -38,6 +38,7 @@ export interface PrepareOptions {
    */
   readonly until?: StageId | null;
   readonly maxLkmCalls: number;
+  readonly targetCitations: number;
 }
 
 export interface PrepareResult {
@@ -112,6 +113,7 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     venue: basename(resolve(options.templateDir)),
     network_policy: options.networkPolicy,
     max_lkm_calls: options.maxLkmCalls,
+    target_citations: options.targetCitations,
   });
 
   const digests = computeLockDigests(workspace);

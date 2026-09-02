@@ -208,6 +208,9 @@ describe("assignCitationKeys", () => {
       year: "2023",
       abstract: "a",
       doi: "10.48550/arxiv.2304.02643",
+      matched_queries: ["segment anything"],
+      relevance: 0,
+      anchor: null,
       ...over,
     };
   }

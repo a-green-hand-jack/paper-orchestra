@@ -70,6 +70,11 @@ program
     false,
   )
   .option("--max-lkm-calls <n>", "ceiling on literature retrieval calls", "40")
+  .option(
+    "--target-citations <n>",
+    "how many distinct sources the manuscript should cite, capped by how many relevant ones retrieval found",
+    "20",
+  )
   .option("--prepare-only", "create and lock the workspace, then stop", false)
   .action(async (rawMaterials: string, options: Record<string, unknown>) => {
     const workspace = (options.output as string | undefined) ?? `./po-run-${compactStamp()}`;
@@ -97,6 +102,7 @@ program
       timeoutMultiplier: multiplier,
       until: (options.until as StageId | undefined) ?? null,
       maxLkmCalls: Number(options.maxLkmCalls),
+      targetCitations: Number(options.targetCitations),
     });
 
     const { state } = result;

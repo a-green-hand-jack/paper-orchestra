@@ -85,6 +85,21 @@ export const ScopeSchema = z.object({
    * costs real money.
    */
   max_lkm_calls: z.number().int().nonnegative().default(40),
+  /**
+   * How many distinct sources the manuscript should cite.
+   *
+   * Replaces the Python's rule of citing 90% of whatever retrieval returned
+   * (`literature_review_agent.py:492`). That rule is only defensible when
+   * retrieval is precise: against LKM's general-science corpus it read as "put
+   * 90% of the off-topic hits into the paper", and two measured runs cited 84
+   * of 94 and 67 of 74 sources in ~2150 words -- roughly one citation per 25
+   * words, which is citation stuffing rather than academic prose.
+   *
+   * A target rather than a ratio, so the number a reader sees is a property of
+   * the paper and not of how large a retrieval budget the run happened to have.
+   * The effective floor is `min(target, sources actually available)`.
+   */
+  target_citations: z.number().int().nonnegative().default(20),
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 

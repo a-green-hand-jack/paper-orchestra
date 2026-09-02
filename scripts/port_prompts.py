@@ -66,12 +66,48 @@ SOURCES = {
     ),
 }
 
+# Deliberate divergences from the Python, applied after the brace collapse.
+#
+# name -> list of (exact text to find, replacement, why).
+#
+# A patch is not a rewrite: each one must match EXACTLY once, or the script
+# fails rather than silently producing a prompt nobody reviewed. This is the
+# mechanism for a prompt rule that paper-orchestra has outgrown, so the
+# generated file stays reproducible instead of being hand-edited and then
+# clobbered by the next run.
+PATCHES = {
+    "2-po-literature": [
+        (
+            """- You have access to the abstract of {paper_count} collected papers.
+- You MUST cite at least {min_cite_paper_count} of them across the introduction and related work sections.""",
+            """- You have access to the abstract of {paper_count} collected papers. Every one has
+  been retrieved and screened for relevance to THIS paper's subject; they are ordered
+  with the most relevant first.
+- You MUST cite at least {min_cite_paper_count} distinct papers across the introduction
+  and related work sections.
+- Do NOT try to cite all of them. Prefer the smallest set that genuinely supports your
+  claims: a citation must back the specific sentence it is attached to. A paragraph
+  where every sentence carries three references is worse than one where the right
+  sentence carries one.
+- If a collected paper does not support any claim you are actually making, leave it
+  uncited. An unused entry in the bibliography costs nothing; an unsupported citation
+  costs the paper its credibility.""",
+            "the Python cited 90% of whatever retrieval returned "
+            "(literature_review_agent.py:492-494), a rule that only holds when every hit "
+            "is on-topic. Against LKM's general-science corpus it forced the off-domain "
+            "tail into the manuscript, and two measured runs cited 84 of 94 and 67 of 74 "
+            "sources in ~2150 words -- one citation per 25 words. The floor is now a "
+            "target capped by availability, enforced by the `citation_floor` validator at "
+            "both drafting and refinement. See issue #3.",
+        ),
+    ],
+}
+
 HEADER = """<!--
 Ported from {source} by scripts/port_prompts.py.
 
-Do not hand-edit the body unless you also update the Python reference, which
-remains the behavioural source of truth for prompt content. Rerun the script
-to regenerate.
+Do not hand-edit the body. The Python reference plus this script's PATCHES table
+are together the source of truth; rerun the script to regenerate.
 
 Controller-substituted placeholders: {placeholders}
 -->
@@ -86,6 +122,17 @@ def main() -> int:
 
     for name, (source, prompt, placeholders) in SOURCES.items():
         body = prompt.replace("{{", "{").replace("}}", "}").strip()
+
+        # Apply the deliberate divergences. Each must match exactly once: a
+        # patch that silently stops matching would revert a considered change
+        # back to the Python's behaviour without anyone noticing.
+        for find, replace, _why in PATCHES.get(name, []):
+            if body.count(find) != 1:
+                failures.append(
+                    f"{name}: patch matched {body.count(find)} times, expected exactly 1"
+                )
+                continue
+            body = body.replace(find, replace)
 
         # Every declared placeholder must survive the collapse, or the
         # controller will substitute nothing and the model will see a raw

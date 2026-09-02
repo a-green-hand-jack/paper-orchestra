@@ -193,6 +193,57 @@ function citationIntegrity(workspace: string, manuscriptRel: string): Check {
   return pass(name, `${cited.length} cited keys, all defined in a ${defined.size}-entry bibliography`);
 }
 
+/**
+ * How many distinct sources the manuscript must cite.
+ *
+ * A target capped by availability, so a run whose retrieval legitimately found
+ * only eight relevant papers is not failed for citing eight. Exported because
+ * the controller substitutes the same number into the literature prompt: the
+ * instruction the writer receives and the rule that judges it must be one
+ * number, or the writer is being graded against something it was never told.
+ */
+export function citationFloor(available: number, scope: Scope): number {
+  return Math.min(available, scope.target_citations);
+}
+
+/**
+ * The manuscript must still cite what the literature stage went and found.
+ *
+ * Without this, the floor lives only in a prompt and only the drafting stage
+ * ever hears it. Measured across two complete runs, `section_writing` obeyed
+ * the instruction almost exactly (84 of 94, 67 of 74) and `refinement` then
+ * discarded roughly three quarters of the citations (to 20, to 16) with no
+ * check anywhere -- so the number a reader finally saw was whatever refinement
+ * happened to leave. `citation_integrity` does not catch this: a manuscript
+ * citing three of seventy-four sources passes it, because all three resolve.
+ *
+ * Checked at both drafting and refinement, since a floor enforced only at the
+ * end is a floor discovered too late to repair cheaply.
+ */
+function citationFloorCheck(workspace: string, manuscriptRel: string, scope: Scope): Check {
+  const name = "citation_floor";
+  const tex = readIfExists(join(workspace, manuscriptRel));
+  if (tex === null) return fail(name, `expected ${manuscriptRel} to exist`);
+
+  const parsed = parseArtifact(workspace, ARTIFACTS.citationMap, CitationMapSchema, name);
+  if (!parsed.ok) return parsed.check;
+
+  const available = Object.keys(parsed.value).length;
+  const floor = citationFloor(available, scope);
+  const cited = new Set(citedKeys(tex)).size;
+
+  if (cited < floor) {
+    return fail(
+      name,
+      `expected the manuscript to cite at least ${floor} distinct sources; it cites ` +
+        `${cited}. ${available} vetted sources are available in references.bib. Add ` +
+        `citations from the existing bibliography where they genuinely support a claim -- ` +
+        "do not invent keys, and do not pad a single sentence with unrelated references.",
+    );
+  }
+  return pass(name, `${cited} distinct sources cited (floor ${floor} of ${available} available)`);
+}
+
 /** No two bibliography entries may describe the same paper. */
 function literatureDedup(workspace: string): Check {
   const name = "literature_dedup";
@@ -494,6 +545,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
       return [
         artifactExists(workspace, ARTIFACTS.rawDraft, 512),
         citationIntegrity(workspace, ARTIFACTS.rawDraft),
+        citationFloorCheck(workspace, ARTIFACTS.rawDraft, scope),
         figureCoverage(workspace, scope, ARTIFACTS.rawDraft),
         templateCompatibility(workspace, ARTIFACTS.rawDraft),
         // Compile here rather than only at refinement: a draft that cannot
@@ -508,6 +560,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         artifactExists(workspace, ARTIFACTS.finalPdf, 1024),
         latexAssembly(workspace),
         citationIntegrity(workspace, ARTIFACTS.finalTex),
+        citationFloorCheck(workspace, ARTIFACTS.finalTex, scope),
         figureCoverage(workspace, scope, ARTIFACTS.finalTex),
         templateCompatibility(workspace, ARTIFACTS.finalTex),
         noUnresolvedMarkers(workspace, ARTIFACTS.finalTex),
@@ -530,6 +583,7 @@ export const validators = {
   schemaValid,
   outlineCoverage,
   citationIntegrity,
+  citationFloorCheck,
   literatureDedup,
   bibliographyProvenance,
   figureCoverage,

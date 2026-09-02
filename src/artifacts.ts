@@ -130,6 +130,25 @@ export const CandidateSchema = z
     year: z.union([z.number().int(), z.string()]).nullable().default(null),
     abstract: z.string().default(""),
     doi: z.string().default(""),
+    /**
+     * TF-IDF cosine against the paper's own topic profile (`src/relevance.ts`),
+     * recorded so a bibliography can be audited for relevance after the fact
+     * and not only for provenance.
+     */
+    relevance: z.number().min(0).max(1).default(0),
+    /**
+     * The outline citation hint this record answers, if any. A record with an
+     * anchor was kept because the manuscript structurally needs it, which is
+     * how `Segment Anything` and `PVT v2` survive a topical-similarity gate
+     * their abstracts would otherwise fail.
+     */
+    anchor: z.string().nullable().default(null),
+    /**
+     * Which retrieval queries returned this record. Query-level provenance is
+     * what makes retrieval precision measurable per query rather than only in
+     * aggregate.
+     */
+    matched_queries: z.array(z.string()).default([]),
   })
   .passthrough();
 export const CandidatesSchema = z.array(CandidateSchema);

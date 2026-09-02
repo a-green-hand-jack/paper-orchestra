@@ -25,7 +25,7 @@ import {
   verifyLocks,
   writeSessionState,
 } from "./state/store.js";
-import { validateStage } from "./validation.js";
+import { citationFloor, validateStage } from "./validation.js";
 import { OutlineSchema } from "./artifacts.js";
 import { readJson, writeJsonAtomic } from "./files.js";
 import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from "./literature.js";
@@ -250,13 +250,15 @@ async function runStage(
 
   const extra: Record<string, string> = {};
   if (stage === "literature") {
-    const retrieved = await retrieveForLiterature(options, state);
-    // The literature prompt states how many sources are available and how many
-    // must be cited. The Python sets the floor at 90% of what was retrieved
-    // (literature_review_agent.py:492), which is what stops a writer from
-    // citing three papers out of forty.
-    extra.paper_count = String(retrieved);
-    extra.min_cite_paper_count = String(Math.floor(retrieved * 0.9));
+    const relevant = await retrieveForLiterature(options, state);
+    // The floor is a target capped by availability, NOT a fraction of the
+    // retrieval volume. The Python cited 90% of whatever came back
+    // (literature_review_agent.py:492), which is only defensible when every
+    // hit is on-topic; against a general-science corpus it forced the
+    // off-domain tail into the manuscript. `citation_floor` enforces the same
+    // number at the END of the pipeline, so refinement cannot quietly undo it.
+    extra.paper_count = String(relevant);
+    extra.min_cite_paper_count = String(citationFloor(relevant, state.scope));
   }
 
   const before = await sessionUsage(runtime, sessionId);
@@ -443,6 +445,7 @@ async function retrieveForLiterature(
     queries,
     cutoff: state.scope.research_cutoff,
     maxCalls: budget,
+    outline: parsed.data,
     onProgress: (line) => say(options, line),
   });
 
@@ -452,16 +455,29 @@ async function retrieveForLiterature(
 
   say(
     options,
-    `   retrieved ${result.candidates.length} source(s) in ${result.callsMade} call(s) ` +
+    `   retained ${result.candidates.length} source(s) from ${result.callsMade} call(s) ` +
       `(~${(result.callsMade * LKM_CALL_PRICE_CNY).toFixed(2)} CNY); dropped ` +
       `${result.dropped.anachronistic} after cutoff, ${result.dropped.noAbstract} without ` +
-      `abstract, ${result.dropped.duplicate} duplicate`,
+      `abstract, ${result.dropped.duplicate} duplicate, ${result.dropped.irrelevant} off-topic`,
   );
+
+  // Name the queries that returned nothing usable. Each one cost money, and
+  // per-query yield is the only evidence that distinguishes a badly phrased
+  // query from a genuinely thin corpus.
+  const barren = result.perQuery.filter((entry) => entry.admitted === 0);
+  if (barren.length > 0) {
+    say(
+      options,
+      `   ${barren.length} query(ies) yielded no relevant source: ` +
+        barren.map((entry) => `"${entry.query.slice(0, 40)}"`).join(", "),
+    );
+  }
 
   if (result.candidates.length === 0) {
     throw new UserFacingError(
-      "literature retrieval produced no usable sources, so the manuscript could only " +
-        "cite nothing. Check `bohr auth whoami`, or widen the research cutoff.",
+      "literature retrieval produced no source relevant to this paper, so the manuscript " +
+        "could only cite nothing. Check `bohr auth whoami`, widen the research cutoff, or " +
+        "revisit the outline's citation hints -- relevance is scored against the outline.",
     );
   }
   return result.candidates.length;

@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import { UserFacingError } from "./errors.js";
-import type { Candidate } from "./artifacts.js";
+import type { Candidate, Outline } from "./artifacts.js";
+import { gateByRelevance } from "./relevance.js";
 
 /**
  * Literature retrieval over Bohrium LKM (Literature Knowledge Mining).
@@ -369,6 +370,10 @@ export interface MutableCandidate {
   year: string | null;
   abstract: string;
   doi: string;
+  /** Every query that returned this record; see `CandidateSchema.matched_queries`. */
+  matched_queries: string[];
+  relevance: number;
+  anchor: string | null;
 }
 
 export interface RetrievalOptions {
@@ -380,12 +385,34 @@ export interface RetrievalOptions {
   readonly onProgress?: (line: string) => void;
   /** Enrich via Crossref by DOI. On by default; disable only for tests. */
   readonly enrich?: boolean;
+  /**
+   * The outline, used to score relevance. Omitting it skips the gate, which
+   * only tests should do -- LKM's corpus spans all of science and an ungated
+   * set carries medical and agricultural papers into the bibliography.
+   */
+  readonly outline?: Outline;
+  /** Admission threshold as a fraction of the best score. See RELEVANCE_FRACTION. */
+  readonly relevanceFraction?: number;
 }
 
 export interface RetrievalResult {
   readonly candidates: Candidate[];
   readonly callsMade: number;
-  readonly dropped: { anachronistic: number; noAbstract: number; duplicate: number };
+  readonly dropped: {
+    anachronistic: number;
+    noAbstract: number;
+    duplicate: number;
+    /** Retrieved and real, but not about this paper's subject. */
+    irrelevant: number;
+  };
+  /** Kept only because they answer an outline citation hint. */
+  readonly anchorRescued: number;
+  /**
+   * Per-query yield: how many admitted candidates each query contributed.
+   * A query with a yield of zero spent money for nothing, which is the signal
+   * needed to tune query construction rather than guess at it.
+   */
+  readonly perQuery: Array<{ query: string; retrieved: number; admitted: number }>;
 }
 
 /**
@@ -400,12 +427,14 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
   const topK = options.topK ?? 10;
   const scopes = options.scopes ?? "abstract,conclusion";
   const byTitle = new Map<string, MutableCandidate>();
-  const dropped = { anachronistic: 0, noAbstract: 0, duplicate: 0 };
+  const dropped = { anachronistic: 0, noAbstract: 0, duplicate: 0, irrelevant: 0 };
+  const retrievedPerQuery = new Map<string, number>();
   let callsMade = 0;
 
   for (const query of options.queries) {
     if (callsMade >= options.maxCalls) break;
     callsMade += 1;
+    retrievedPerQuery.set(query, 0);
     options.onProgress?.(
       `   lkm ${callsMade}/${Math.min(options.queries.length, options.maxCalls)}: ` +
         `${query.slice(0, 68)}`,
@@ -416,8 +445,14 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
       if (!title) continue;
 
       const normalized = normalizeTitle(title);
-      if (byTitle.has(normalized)) {
+      const seen = byTitle.get(normalized);
+      if (seen) {
         dropped.duplicate += 1;
+        // Still record the query. Two queries converging on one paper is
+        // evidence that paper is central, and per-query yield would otherwise
+        // under-count whichever query happened to run second.
+        if (!seen.matched_queries.includes(query)) seen.matched_queries.push(query);
+        retrievedPerQuery.set(query, (retrievedPerQuery.get(query) ?? 0) + 1);
         continue;
       }
 
@@ -435,6 +470,7 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
         continue;
       }
 
+      retrievedPerQuery.set(query, (retrievedPerQuery.get(query) ?? 0) + 1);
       byTitle.set(normalized, {
         title,
         provider: "bohrium_lkm",
@@ -445,11 +481,36 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
         year: paperYear(paper),
         abstract: abstract.slice(0, 1500),
         doi: paper.doi ?? "",
+        matched_queries: [query],
+        relevance: 0,
+        anchor: null,
       });
     }
   }
 
-  const records = [...byTitle.values()];
+  let records = [...byTitle.values()];
+  let anchorRescued = 0;
+
+  // Gate BEFORE enrichment. Relevance is scored from the title, venue and
+  // abstract, which LKM already supplied, so nothing is gained by resolving the
+  // DOI of a paper about gastric antral vascular ectasia first -- and both
+  // registries rate-limit, so not asking is the cheapest way to avoid a 429.
+  if (options.outline) {
+    const gate = gateByRelevance(records, options.outline, {
+      fraction: options.relevanceFraction,
+    });
+    for (const judgement of gate.judgements) {
+      judgement.candidate.relevance = judgement.topical;
+      judgement.candidate.anchor = judgement.anchor;
+    }
+    dropped.irrelevant = gate.rejected.length;
+    anchorRescued = gate.anchorRescued;
+    records = gate.admitted;
+    options.onProgress?.(
+      `   relevance: kept ${records.length}, dropped ${dropped.irrelevant} off-topic` +
+        (anchorRescued > 0 ? `, ${anchorRescued} kept for a citation hint` : ""),
+    );
+  }
 
   // Enrich BEFORE keying: a citation key embeds the first author's surname, so
   // assigning keys from LKM's empty author field would bake `Unknown` into
@@ -459,7 +520,24 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
     await enrichMetadata(records, { onProgress: options.onProgress });
   }
 
-  return { candidates: assignCitationKeys(records), callsMade, dropped };
+  const admittedTitles = new Set(records.map((record) => normalizeTitle(record.title)));
+  const perQuery = [...retrievedPerQuery.entries()].map(([query, retrieved]) => ({
+    query,
+    retrieved,
+    admitted: records.filter(
+      (record) =>
+        record.matched_queries.includes(query) &&
+        admittedTitles.has(normalizeTitle(record.title)),
+    ).length,
+  }));
+
+  // Key assignment sorts by title so that re-running retrieval over the same
+  // corpus yields the same keys; the WRITER, though, is told the sources arrive
+  // most-relevant-first, and that has to be true. Order the output by relevance
+  // after keying, which changes presentation without disturbing determinism.
+  const keyed = assignCitationKeys(records).sort((a, b) => b.relevance - a.relevance);
+
+  return { candidates: keyed, callsMade, dropped, anchorRescued, perQuery };
 }
 
 /**

@@ -54,6 +54,7 @@ export function prepareOptions(overrides: Partial<PrepareOptions> = {}): Prepare
     stageModels: {},
     timeoutMultiplier: 1,
     maxLkmCalls: 40,
+    targetCitations: 20,
     ...overrides,
   };
 }
