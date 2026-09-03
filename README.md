@@ -59,7 +59,7 @@ It separates hard requirements from optional capabilities, so an absent
 | Building the PDF | `pdflatex`, `bibtex`, `pdftotext`, `pdftoppm` |
 | Literature retrieval | the [`bohr`](https://www.bohrium.com) CLI, logged in — about 0.05 CNY per search |
 | Code-generated figures | `python3` with `matplotlib` |
-| Text-to-image figures | an executable `PAPER_ORCHESTRA_IMAGE_ADAPTER` |
+| Text-to-image figures | [Codex](https://developers.openai.com/codex/) logged in with ChatGPT OAuth; or an executable `PAPER_ORCHESTRA_IMAGE_ADAPTER` |
 
 ## Usage
 
@@ -228,7 +228,17 @@ directory.
 Every writing and reviewing call goes through an OpenCode session, so the
 provider is a flag and can differ per stage. Figure generation also has two
 explicit routes. Quantitative plots default to controller-executed code and must
-produce PDF. Conceptual diagrams default to text-to-image through an adapter:
+produce PDF. Conceptual diagrams default to Codex's built-in `gpt-image-2`
+generation when `codex login status` reports a ChatGPT login. This uses the
+existing Codex OAuth session and does not require `OPENAI_API_KEY`:
+
+```bash
+codex login
+paper-orchestra write --use-plotting --allow-lkm-spend
+```
+
+Set an external adapter only when another image provider or a custom image
+service should override the Codex default:
 
 ```bash
 export PAPER_ORCHESTRA_IMAGE_ADAPTER=/absolute/path/to/image-adapter
@@ -259,9 +269,11 @@ impossible rather than merely discouraged.
 
 Figures (stage 3) use the route selected in `outline.json`. Code generation runs
 in a scoped directory with no network and accepts PDF only; text-to-image uses
-the configured provider adapter. Both outputs are rendered to pixels, attached
-to a visual critic, and repaired once or fail with the critic's concrete finding.
-Supplied figures continue to work without either generation dependency.
+Codex's ChatGPT-authenticated built-in image generation by default, with
+`PAPER_ORCHESTRA_IMAGE_ADAPTER` as an explicit override. Both outputs are
+rendered to pixels, attached to a visual critic, and repaired once or fail with
+the critic's concrete finding. Supplied figures continue to work without either
+generation dependency.
 
 ## Workspace layout
 

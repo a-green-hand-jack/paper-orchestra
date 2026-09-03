@@ -117,7 +117,7 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
       "not importable in the system python - `--use-plotting` needs a provisioned venv",
   });
 
-  const imageAdapter = textToImageCapability();
+  const imageAdapter = await textToImageCapability();
   probes.push({
     name: "image provider adapter (text-to-image)",
     satisfied: imageAdapter.ok,

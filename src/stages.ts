@@ -73,7 +73,9 @@ export const TIMEOUTS_MS: Record<StageId, number> = {
 export const REMEDIATION_ATTEMPTS: Record<StageId, number> = {
   outline: 1,
   literature: 1,
-  plotting: 1,
+  // Image generations are independent Codex turns, so a third attempt can
+  // carry forward two rounds of accumulated visual feedback.
+  plotting: 2,
   section_writing: 1,
   refinement: 1,
 };

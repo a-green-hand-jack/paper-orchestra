@@ -23,7 +23,10 @@ export function runResult(workspace: string, state: RunState): Record<string, un
     run_state: state.status,
     current_stage: state.current_stage,
     next_stage: resumeStage(state),
-    validation_failures: state.error ? [state.error] : [],
+    validation_failures:
+      (state.status === "failed" || state.status === "interrupted") && state.error
+        ? [state.error]
+        : [],
     artifacts: {
       latex: artifact(ARTIFACTS.finalTex),
       bibliography: artifact(ARTIFACTS.references),

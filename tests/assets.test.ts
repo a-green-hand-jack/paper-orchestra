@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { installRuntimeAssets, missingCommands } from "../src/assets.js";
@@ -134,5 +134,17 @@ describe("supplied figures path", () => {
       readFileSync(join(workspace, ".brain", "manuscript", "figures", "info.json"), "utf8"),
     );
     expect(info[0].caption).toBe("overview");
+  });
+
+  it("can republish a read-only supplied figure when plotting resumes", async () => {
+    const { workspace } = await prepared();
+    const { runSuppliedFiguresForTest } = await import("../src/controller.js");
+    runSuppliedFiguresForTest(workspace);
+
+    const published = join(workspace, ".brain", "manuscript", "figures", "overview.png");
+    chmodSync(published, 0o444);
+
+    expect(runSuppliedFiguresForTest(workspace)).toBe(1);
+    expect(existsSync(published)).toBe(true);
   });
 });
