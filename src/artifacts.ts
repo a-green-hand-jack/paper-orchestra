@@ -34,8 +34,17 @@ export const PlotSpecSchema = z
   })
   .passthrough();
 
-export const RelatedWorkSubsectionSchema = z
-  .object({
+function subsectionObject(value: unknown): unknown {
+  // Models occasionally use the concise string form shown in prose outlines.
+  // Normalize that harmless shorthand before the locked artifact is consumed by
+  // query planning and the writing stages, so every downstream caller still
+  // receives the object shape.
+  return typeof value === "string" ? { subsection_title: value } : value;
+}
+
+export const RelatedWorkSubsectionSchema = z.preprocess(
+  subsectionObject,
+  z.object({
     subsection_title: z.string().min(1),
     methodology_cluster: z.string().default(""),
     sota_investigation_mission: z.string().default(""),
@@ -45,10 +54,12 @@ export const RelatedWorkSubsectionSchema = z
     /** Added by the literature stage; absent before it runs. */
     citation_candidates: z.array(z.string()).optional(),
   })
-  .passthrough();
+  .passthrough(),
+);
 
-export const SectionSubsectionSchema = z
-  .object({
+export const SectionSubsectionSchema = z.preprocess(
+  subsectionObject,
+  z.object({
     subsection_title: z.string().min(1),
     content_bullets: z.array(z.string()).default([]),
     /**
@@ -60,7 +71,8 @@ export const SectionSubsectionSchema = z
     citation_hints: z.array(z.string()).optional(),
     citation_candidates: z.array(z.string()).optional(),
   })
-  .passthrough();
+  .passthrough(),
+);
 
 export const SectionPlanEntrySchema = z
   .object({
