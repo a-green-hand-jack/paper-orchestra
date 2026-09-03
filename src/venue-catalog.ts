@@ -420,11 +420,7 @@ export function venueDefinition(key: string): VenueDefinition | undefined {
 }
 
 export function templateAdapter(id: string): TemplateAdapter | undefined {
-  return (
-    TEMPLATE_ADAPTERS.find((adapter) => adapter.id === id) ??
-    manualCcfTemplateAdapterForId(id) ??
-    manualMathTemplateAdapterForId(id)
-  );
+  return TEMPLATE_ADAPTERS.find((adapter) => adapter.id === id);
 }
 
 /** Return a documented manual CCF-A adapter when an exact edition ID is supplied. */
