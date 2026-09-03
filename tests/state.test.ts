@@ -51,6 +51,22 @@ describe("prepared workspace", () => {
     expect(() => verifyLocks(workspace, state)).not.toThrow();
   });
 
+  it("locks both the selected template and how it was selected", async () => {
+    const { workspace } = await prepared({
+      templateId: "iclr2026",
+      templateSelection: "automatic",
+      templateRationale: "The material describes a representation-learning method.",
+    });
+    const state = readRunState(workspace);
+    expect(state.scope).toMatchObject({
+      venue: "iclr2026",
+      template_id: "iclr2026",
+      template_selection: "automatic",
+      template_rationale: "The material describes a representation-learning method.",
+    });
+    expect(() => verifyLocks(workspace, state)).not.toThrow();
+  });
+
   it("normalizes markdown material into .brain/input", async () => {
     const { workspace, brainInputs } = await prepared();
     expect(brainInputs.some((p) => p.endsWith("idea_sparse.md"))).toBe(true);

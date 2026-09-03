@@ -5,6 +5,30 @@ objects. A venue such as CVPR is stable; its annual author kit is not. Always
 select an explicit edition (`cvpr2026`, never `cvpr`) so an existing workspace
 cannot silently change its formatting contract.
 
+## Automatic or explicit selection
+
+`paper-orchestra write` defaults to `--template auto`. Before the workspace is
+created, it asks the configured OpenCode model to inspect the idea and
+experimental log and select one reproducible, current template: `cvpr2026` for
+computer-vision work, `iclr2026` for general representation-learning work, or
+the `nature-portfolio` scaffold for natural-science work. The decision, its
+rationale, and the selected immutable id are written into the digest-locked run
+scope. The selected template is then copied into the read-only `template/`
+directory that the writing stages receive as input.
+
+An explicit `--template` always wins and never invokes the model. Use it for a
+specific venue, a Science-family kit, any CCF-A kit, mathematics, or a custom
+author kit:
+
+```bash
+paper-orchestra write --template cvpr2026 --allow-lkm-spend
+paper-orchestra write --template ./templates/fast2026 --allow-lkm-spend
+```
+
+The automatic chooser intentionally does not invent publisher kits. CCF-A,
+Science-family, and mathematics adapters require the exact official kit to be
+adapted locally and then passed explicitly by path.
+
 ## Inspect the catalog
 
 ```bash
