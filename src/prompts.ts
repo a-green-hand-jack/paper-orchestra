@@ -109,6 +109,7 @@ export function buildStagePrompt(
   const body = substitute(loadCommand(workspace, stage), placeholdersFor(stage, scope, extra));
   const outputs = STAGE_OUTPUTS[stage];
   const inputs = stageInputs(stage, scope);
+  const citationKeys = extra.citation_keys?.trim();
 
   // Plotting is the one stage whose product is a REPLY, not a file: the model
   // returns a script, the controller runs it and writes the artifacts. The
@@ -154,6 +155,13 @@ export function buildStagePrompt(
     "",
     "Write exactly these paths:",
     ...outputs.map((path) => `- \`${path}\``),
+    ...(citationKeys
+      ? [
+          "",
+          "The only permitted citation keys for this run (copy them exactly; never derive a key from a title):",
+          citationKeys,
+        ]
+      : []),
     "",
     "Rules:",
     "- `source/` and `template/` are read-only inputs. Never modify them, and never",
@@ -175,10 +183,21 @@ export function buildStagePrompt(
  * message is the repair instruction.
  */
 export function buildRemediationPrompt(stage: StageId, failed: readonly Check[]): string {
+  const citationFailure = failed.some(
+    (check) => check.name === "citation_integrity" || check.name === "citation_floor" || check.name === "latex_assembly",
+  );
   return [
     `Stage \`${stage}\` failed controller validation.`,
     "",
     ...failed.map((check) => `- **${check.name}**: ${check.detail}`),
+    ...(citationFailure
+      ? [
+          "",
+          "For citation repairs, read `.brain/raw/citation_map.json` and copy its `citation_key` values exactly.",
+          "Replace every undefined key; do not infer or synthesize a key from a paper title. Keep only citations",
+          "that genuinely support the nearby claim, while meeting the stated citation floor.",
+        ]
+      : []),
     "",
     "Fix exactly these findings and nothing else. Do not start other work, do not",
     "restructure what already passes, and do not modify anything under `source/` or",
