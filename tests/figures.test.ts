@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   extractPythonCode,
   lastTraceback,
+  parseVisualReview,
   plottingAvailable,
   renderFigure,
+  resolveFigureRoute,
   suspiciousPaths,
 } from "../src/figures.js";
 import { scratchDir } from "./fixtures.js";
@@ -82,6 +84,30 @@ describe("lastTraceback", () => {
   });
 });
 
+describe("figure route and visual review contracts", () => {
+  it("defaults quantitative plots to code and diagrams to text-to-image", () => {
+    expect(resolveFigureRoute({ plot_type: "plot", render_route: "auto" })).toBe("code");
+    expect(resolveFigureRoute({ plot_type: "diagram", render_route: "auto" })).toBe(
+      "text_to_image",
+    );
+  });
+
+  it("honours an explicit route", () => {
+    expect(resolveFigureRoute({ plot_type: "diagram", render_route: "code" })).toBe("code");
+  });
+
+  it("parses the visual critic's structured result", () => {
+    expect(parseVisualReview('```json\n{"passed":false,"suggestions":"labels overlap"}\n```')).toEqual({
+      passed: false,
+      suggestions: "labels overlap",
+    });
+  });
+
+  it("treats malformed critic output as a failed review", () => {
+    expect(parseVisualReview("looks fine").passed).toBe(false);
+  });
+});
+
 describe("renderFigure", () => {
   it("renders a real figure and reports its path and size", async () => {
     const result = await renderFigure({ figureId: "f1", code: PLOT, workDir: work("w1") });
@@ -110,7 +136,7 @@ describe("renderFigure", () => {
       workDir: work("w3"),
     });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("saved no image");
+    expect(result.error).toContain("saved no PDF");
     // The detail is the repair instruction, so it must name the exact call.
     expect(result.error).toContain('plt.savefig("f3.pdf"');
   }, 60_000);
@@ -120,15 +146,25 @@ describe("renderFigure", () => {
     // that exists, satisfies figure_coverage, and prints as a blank rectangle.
     const result = await renderFigure({
       figureId: "f4",
-      code: [
-        "import matplotlib.pyplot as plt",
-        "with open('out.png', 'wb') as fh:",
-        "    fh.write(b'\\x89PNG\\r\\n\\x1a\\n')",
-      ].join("\n"),
+      code: "with open('out.pdf', 'wb') as fh:\n    fh.write(b'%PDF-1.4 tiny')",
       workDir: work("w4"),
     });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("empty canvas");
+  }, 60_000);
+
+  it("rejects raster output from the code route", async () => {
+    const result = await renderFigure({
+      figureId: "raster",
+      code: [
+        "import matplotlib.pyplot as plt",
+        "plt.plot([1, 2], [3, 4])",
+        "plt.savefig('raster.png', dpi=300)",
+      ].join("\n"),
+      workDir: work("raster"),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must produce a PDF");
   }, 60_000);
 
   it("refuses a script that reaches outside its directory, before running it", async () => {
@@ -140,6 +176,19 @@ describe("renderFigure", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("network request");
+  }, 60_000);
+
+  it("blocks standard socket access inside the rendering process", async () => {
+    const result = await renderFigure({
+      figureId: "network",
+      code: [
+        "import socket",
+        "socket.create_connection(('example.com', 80))",
+      ].join("\n"),
+      workDir: work("network"),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("network disabled by PaperOrchestra");
   }, 60_000);
 
   it("refuses an empty script rather than running python on nothing", async () => {

@@ -25,6 +25,8 @@ Global Instruction: Do not analyze inputs in isolation. You must synthesize info
 Synthesize `experimental_log.md` and `idea.md` to identify the most compelling evidence.
 * Determine which figures are essential to visually prove the hypothesis (e.g., convergence rates, qualitative visual comparisons).
 * The `plot_type` MUST be exactly "plot" or "diagram". If it is a plot, specify the specific chart type (e.g., Radar Chart) inside the `objective`.
+* Choose `render_route` as `code` for quantitative plots whose exact values must remain auditable, or `text_to_image` for conceptual diagrams that benefit from image generation. Use `auto` only when either route is genuinely acceptable.
+* For `text_to_image`, provide a precise `generation_prompt` that describes the intended scientific content, labels, spatial relationships, and visual hierarchy without inventing results.
 * The `data_source` MUST be exactly "idea.md", "experimental_log.md", or "both".
 * Determine the ideal `aspect_ratio` for each figure. The aspect_ratio MUST be exactly one of: "1:1", "1:4", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9".
 * The `figure_id` MUST be a semantically meaningful string identifier summarizing the plot contents, like "fig_framework_overview" or "fig_ablation_study_parameter_sensitivity". It MUST NOT contain the word "Figure".
@@ -84,8 +86,10 @@ Example Output:
       "figure_id": "fig_teaser_fig_cross_modal_alignment_performance",
       "title": "Teaser: Cross-Modal Alignment Performance",
       "plot_type": "plot",
+      "render_route": "code",
       "data_source": "experimental_log.md",
       "objective": "Visual summary (Radar Chart) demonstrating that our method achieves SOTA balance across 5 metrics.",
+      "generation_prompt": "",
       "aspect_ratio": "16:9"
     }
   ],

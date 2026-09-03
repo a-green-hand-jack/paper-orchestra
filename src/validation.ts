@@ -277,6 +277,18 @@ function figureRender(workspace: string, scope: Scope): Check {
   const problems: string[] = [];
   for (const result of parsed.value) {
     if (!result.image_path) continue; // figure_coverage owns the missing case
+    if (!result.generation_provenance) {
+      problems.push(`${result.figure_id}: generation provenance is missing`);
+    }
+    const lastReview = result.critic_history[result.critic_history.length - 1];
+    if (!lastReview) {
+      problems.push(`${result.figure_id}: rendered output was not visually reviewed`);
+    } else if (!lastReview.passed) {
+      problems.push(`${result.figure_id}: final visual review did not pass`);
+    }
+    if (result.render_route === "code" && extname(result.image_path).toLowerCase() !== ".pdf") {
+      problems.push(`${result.figure_id}: code-generation output must be PDF`);
+    }
     const abs = join(workspace, BRAIN_DIR, "manuscript", result.image_path);
     if (!existsSync(abs)) {
       problems.push(`${result.figure_id}: ${result.image_path} does not exist`);
@@ -294,8 +306,8 @@ function figureRender(workspace: string, scope: Scope): Check {
   if (problems.length > 0) {
     return fail(
       name,
-      `expected every generated figure to be a real image; ${problems.join("; ")}. ` +
-        "Plot the data before saving, and do not call plt.close() or plt.clf() first.",
+      `expected every generated figure to have auditable generation, a passing visual review, ` +
+        `and a real output image; ${problems.join("; ")}.`,
     );
   }
   return pass(name, `${parsed.value.length} generated figure(s) render to real images`);

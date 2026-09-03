@@ -59,6 +59,8 @@ export const ARTIFACTS = {
   references: join(BRAIN_DIR, "raw", "references.bib"),
   citationMap: join(BRAIN_DIR, "raw", "citation_map.json"),
   candidates: join(BRAIN_DIR, "raw", "candidates.json"),
+  /** Controller-owned record of which potential paid queries were kept or removed. */
+  queryPlan: join(BRAIN_DIR, "raw", "query_plan.json"),
   updatedTemplate: join(BRAIN_DIR, "raw", "updated_template.tex"),
   plottingResults: join(BRAIN_DIR, "raw", "plotting_results.json"),
   /** Controller-written LaTeX build report, read by the latex_assembly check. */

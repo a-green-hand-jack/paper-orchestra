@@ -31,6 +31,42 @@ export const MIN_FIGURE_BYTES = 1024;
 /** What a figure script is allowed to emit. */
 const IMAGE_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg"] as const;
 
+export type FigureRoute = "code" | "text_to_image";
+
+export function resolveFigureRoute(spec: {
+  plot_type: "plot" | "diagram";
+  render_route?: "auto" | FigureRoute;
+}): FigureRoute {
+  if (spec.render_route === "code" || spec.render_route === "text_to_image") {
+    return spec.render_route;
+  }
+  return spec.plot_type === "diagram" ? "text_to_image" : "code";
+}
+
+export interface VisualReview {
+  readonly passed: boolean;
+  readonly suggestions: string;
+}
+
+/** Parse the visual critic's bounded JSON reply without trusting prose claims. */
+export function parseVisualReview(text: string): VisualReview {
+  const fenced = /```(?:json)?\s*\n([\s\S]*?)```/i.exec(text)?.[1];
+  const candidate = fenced ?? text.match(/\{[\s\S]*\}/)?.[0] ?? "";
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    if (typeof parsed.passed !== "boolean") throw new Error("missing passed");
+    return {
+      passed: parsed.passed,
+      suggestions: typeof parsed.suggestions === "string" ? parsed.suggestions.trim() : "",
+    };
+  } catch {
+    return {
+      passed: false,
+      suggestions: "visual critic returned invalid JSON; inspect the attached image and respond again",
+    };
+  }
+}
+
 export interface RenderRequest {
   readonly figureId: string;
   /** Python source, already unwrapped from any markdown fence. */
@@ -96,6 +132,10 @@ function renderEnv(workDir: string): NodeJS.ProcessEnv {
     ...process.env,
     MPLBACKEND: "Agg",
     MPLCONFIGDIR: join(workDir, ".mplconfig"),
+    // Python imports workDir/sitecustomize.py before the generated script.
+    // That hook disables the standard socket entry points even on hosts where
+    // an OS network namespace is unavailable to an unprivileged process.
+    PYTHONPATH: workDir,
   };
   for (const key of [
     "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy",
@@ -108,7 +148,7 @@ function renderEnv(workDir: string): NodeJS.ProcessEnv {
 /** Images the script left behind, newest-looking first, ignoring scratch dirs. */
 function producedImages(workDir: string): string[] {
   return readdirSync(workDir)
-    .filter((name) => IMAGE_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext)))
+    .filter((name) => name.toLowerCase().endsWith(".pdf"))
     .map((name) => join(workDir, name))
     .filter((path) => statSync(path).isFile())
     .sort((a, b) => statSync(b).size - statSync(a).size);
@@ -156,6 +196,19 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
 
   const scriptPath = join(workDir, `${figureId}.py`);
   const { writeFileSync } = await import("node:fs");
+  writeFileSync(
+    join(workDir, "sitecustomize.py"),
+    [
+      "import socket",
+      "def _paper_orchestra_network_disabled(*args, **kwargs):",
+      "    raise RuntimeError('network disabled by PaperOrchestra')",
+      "socket.create_connection = _paper_orchestra_network_disabled",
+      "socket.getaddrinfo = _paper_orchestra_network_disabled",
+      "socket.socket.connect = _paper_orchestra_network_disabled",
+      "socket.socket.connect_ex = _paper_orchestra_network_disabled",
+    ].join("\n"),
+    "utf8",
+  );
   writeFileSync(scriptPath, code, "utf8");
 
   let stderr = "";
@@ -200,13 +253,19 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
   const images = producedImages(workDir);
   const best = images[0];
   if (!best) {
+    const rasterOnly = readdirSync(workDir).some((name) =>
+      [".png", ".jpg", ".jpeg"].some((ext) => name.toLowerCase().endsWith(ext)),
+    );
     return {
       figureId,
       ok: false,
       imagePath: null,
       bytes: 0,
       error:
-        "the script ran without error but saved no image. End it with " +
+        (rasterOnly
+          ? "the code-generation route must produce a PDF, but the script saved only a raster image. "
+          : "the script ran without error but saved no PDF. ") +
+        "End it with " +
         `plt.savefig("${figureId}.pdf", bbox_inches="tight", dpi=300) using a ` +
         "relative filename.",
     };

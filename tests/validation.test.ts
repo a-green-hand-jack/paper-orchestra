@@ -387,6 +387,22 @@ describe("figure_render", () => {
     return "x".repeat(n);
   }
 
+  function audited(imagePath: string, extra: Record<string, unknown> = {}) {
+    return {
+      figure_id: "f1",
+      render_route: "code",
+      image_path: imagePath,
+      critic_history: [{ round: 0, passed: true, suggestions: "" }],
+      generation_provenance: {
+        provider: "opencode",
+        model: "fixture/model",
+        prompt: "draw the supplied values",
+        parameters: { format: "pdf" },
+      },
+      ...extra,
+    };
+  }
+
   it("rejects a rendered file that is really an empty canvas", async () => {
     // The defect it exists for: plt.close() before savefig writes a valid,
     // tiny file that exists, satisfies figure_coverage, and prints blank.
@@ -404,11 +420,30 @@ describe("figure_render", () => {
   it("passes a figure with real content", async () => {
     const { workspace } = await prepared();
     put(workspace, ".brain/manuscript/figures/real.pdf", bytes(9000));
-    json(workspace, ARTIFACTS.plottingResults, [
-      { figure_id: "f1", image_path: "figures/real.pdf" },
-    ]);
+    json(workspace, ARTIFACTS.plottingResults, [audited("figures/real.pdf")]);
 
     expect(validators.figureRender(workspace, scope({ use_plotting: true })).passed).toBe(true);
+  });
+
+  it("requires generation provenance and a passing visual review", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ".brain/manuscript/figures/real.pdf", bytes(9000));
+    json(workspace, ARTIFACTS.plottingResults, [
+      { figure_id: "f1", image_path: "figures/real.pdf", critic_history: [] },
+    ]);
+    const check = validators.figureRender(workspace, scope({ use_plotting: true }));
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("provenance is missing");
+    expect(check.detail).toContain("not visually reviewed");
+  });
+
+  it("requires PDF specifically for the code route", async () => {
+    const { workspace } = await prepared();
+    put(workspace, ".brain/manuscript/figures/real.png", bytes(9000));
+    json(workspace, ARTIFACTS.plottingResults, [audited("figures/real.png")]);
+    const check = validators.figureRender(workspace, scope({ use_plotting: true }));
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("must be PDF");
   });
 
   it("fails when the recorded path names no file at all", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OutlineSchema } from "../src/artifacts.js";
-import { collectQueries, tidyQuery } from "../src/queries.js";
+import { collectQueries, planQueries, tidyQuery } from "../src/queries.js";
 
 const OUTLINE = OutlineSchema.parse({
   plotting_plan: [],
@@ -95,5 +95,93 @@ describe("tidyQuery", () => {
 
   it("bounds length", () => {
     expect(tidyQuery("x".repeat(500)).length).toBe(300);
+  });
+});
+
+describe("planQueries", () => {
+  it("drops generic concepts that spent calls without yielding citable work", () => {
+    const outline = OutlineSchema.parse({
+      ...OUTLINE,
+      section_plan: [
+        {
+          section_title: "Experiments",
+          subsections: [
+            {
+              subsection_title: "Setup",
+              citation_hints: [
+                "Jaccard Index metric",
+                "F-score metric",
+                "AdamW optimizer",
+                "Transformer cross-attention",
+                "Segment Anything Model",
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const plan = planQueries(outline);
+    expect(plan.queries).toContain("Segment Anything Model");
+    expect(plan.queries).not.toContain("AdamW");
+    expect(plan.queries).not.toContain("Jaccard Index metric");
+    expect(plan.decisions.filter((entry) => entry.action === "dropped")).toHaveLength(4);
+  });
+
+  it("expands a collided acronym from the outline's own domain context", () => {
+    const outline = OutlineSchema.parse({
+      ...OUTLINE,
+      intro_related_work_plan: {
+        ...OUTLINE.intro_related_work_plan,
+        related_work_strategy: {
+          subsections: [
+            {
+              subsection_title: "Audio-visual segmentation",
+              limitation_search_queries: [
+                "GAVS SAM audio visual segmentation multimodal fusion limitation",
+              ],
+            },
+          ],
+        },
+      },
+      section_plan: [
+        {
+          section_title: "Related Work",
+          subsections: [
+            {
+              subsection_title: "Methods",
+              citation_hints: ["research paper or technical report introducing 'GAVS'"],
+            },
+          ],
+        },
+      ],
+    });
+    const plan = planQueries(outline);
+    expect(plan.queries[0]).toBe(
+      "GAVS SAM audio visual segmentation multimodal fusion limitation",
+    );
+    expect(plan.decisions[0]).toMatchObject({ action: "contextualized" });
+    expect(plan.queries).toHaveLength(2);
+  });
+
+  it("does not rewrite required named works", () => {
+    const outline = OutlineSchema.parse({
+      ...OUTLINE,
+      section_plan: [
+        {
+          section_title: "Related Work",
+          subsections: [
+            {
+              subsection_title: "Foundations",
+              citation_hints: ["Segment Anything", "PVT v2", "Mask2Former"],
+            },
+          ],
+        },
+      ],
+    });
+    expect(planQueries(outline).queries.slice(0, 3)).toEqual([
+      "Segment Anything",
+      "PVT v2",
+      "Mask2Former",
+    ]);
   });
 });

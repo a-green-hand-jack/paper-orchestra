@@ -2,12 +2,15 @@ import { checkpoint, initGit } from "./checkpoints.js";
 import { UserFacingError } from "./errors.js";
 import { formatModelRef, modelForStage } from "./model.js";
 import {
+  type AttachedTui,
   type Runtime,
+  attachTui,
   createSession,
   lastAssistantText,
   prompt,
   sessionUsage,
   startRuntime,
+  stopTui,
   usageDelta,
   waitForIdle,
 } from "./opencode.js";
@@ -29,9 +32,10 @@ import { citationFloor, validateStage } from "./validation.js";
 import { OutlineSchema } from "./artifacts.js";
 import { readJson, writeJsonAtomic } from "./files.js";
 import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from "./literature.js";
-import { collectQueries, tidyQuery } from "./queries.js";
+import { planQueries } from "./queries.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
-import { copyFileSync, existsSync, readdirSync } from "node:fs";
+import { renderPdfPages } from "./latexbuild.js";
+import { copyFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { FigureInfoSchema } from "./artifacts.js";
 import { ensureDir } from "./files.js";
@@ -40,7 +44,14 @@ import { ARTIFACTS } from "./paths.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireRunLock } from "./state/lock.js";
-import { plottingAvailable, renderFigure } from "./figures.js";
+import {
+  parseVisualReview,
+  plottingAvailable,
+  renderFigure,
+  resolveFigureRoute,
+  type VisualReview,
+} from "./figures.js";
+import { generateTextImage, textToImageCapability } from "./imagegen.js";
 
 export interface ControllerOptions {
   readonly workspace: string;
@@ -63,6 +74,11 @@ function say(options: ControllerOptions, line: string): void {
 function stageModel(state: RunState, stage: StageId): ModelRef | null {
   const overrides = state.stage_models as Record<string, ModelRef>;
   return modelForStage(stage, state.default_model, overrides);
+}
+
+/** A TUI may close while a completed stage is waiting at its approval gate. */
+export function stageNeedsFailureMark(state: RunState, stage: StageId): boolean {
+  return state.stages[stage].status !== "completed";
 }
 
 /**
@@ -101,6 +117,11 @@ async function drive(
 
   const sessions: Record<string, string> = {};
   const abort = new AbortController();
+  let tui: AttachedTui | null = null;
+  let activeStage: Promise<RunState> | null = null;
+  if (!options.headless) {
+    tui = attachTui(runtime, workspace);
+  }
   const onSignal = (): void => abort.abort();
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
@@ -111,7 +132,24 @@ async function drive(
     for (;;) {
       const stage = resumeStage(readRunState(workspace));
       if (!stage) break;
-      state = await runStage(runtime, options, stage, sessions, abort.signal);
+      activeStage = runStage(runtime, options, stage, sessions, abort.signal);
+      if (tui) {
+        state = await Promise.race([
+          activeStage,
+          tui.exited.then((code) => {
+            abort.abort();
+            throw new UserFacingError(
+              code === 127
+                ? "could not start the native OpenCode TUI; is `opencode` on PATH?"
+                : `native OpenCode TUI exited with code ${code}; run state was preserved`,
+            );
+          }),
+        ]);
+      } else {
+        state = await activeStage;
+      }
+      activeStage = null;
+      if (state.status === "gate_waiting") return state;
     }
 
     state = updateRunState(workspace, (current) => ({
@@ -135,7 +173,7 @@ async function drive(
     const current = readRunState(workspace);
     const stage = current.current_stage;
 
-    if (stage) {
+    if (stage && stageNeedsFailureMark(current, stage)) {
       updateStage(workspace, stage, (s) => ({
         ...s,
         status: interrupted ? "interrupted" : "failed",
@@ -158,7 +196,9 @@ async function drive(
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    if (activeStage) await activeStage.catch(() => undefined);
     writeSessionState(workspace, { serverUrl: runtime.serverUrl, sessions });
+    if (tui) await stopTui(tui);
     runtime.close();
   }
 }
@@ -172,6 +212,14 @@ async function runStage(
 ): Promise<RunState> {
   const { workspace } = options;
   let state = readRunState(workspace);
+  // Claim the stage before any provider, capability, or session setup. If one
+  // of those fails, the persisted failure belongs to this stage rather than
+  // overwriting the previously completed stage named by current_stage.
+  updateRunState(workspace, (current) => ({
+    ...current,
+    current_stage: stage,
+    status: "running",
+  }));
   const model = stageModel(state, stage);
   const timeoutMs = Math.round(TIMEOUTS_MS[stage] * state.timeout_multiplier);
 
@@ -224,7 +272,7 @@ async function runStage(
       checks,
     });
     say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
-    return resolveGate(options, stage, completed);
+    return resolveGate(options, stage, completed, signal);
   }
 
   say(
@@ -345,7 +393,7 @@ async function runStage(
       `msgs=${usage.transcript_messages}  ckpt=${sha.slice(0, 12)}`,
   );
 
-  return resolveGate(options, stage, state);
+  return resolveGate(options, stage, state, signal);
 }
 
 function reportChecks(options: ControllerOptions, checks: readonly Check[]): void {
@@ -361,22 +409,26 @@ function reportChecks(options: ControllerOptions, checks: readonly Check[]): voi
  * release it from any process. A headless run has nobody to ask, so it stops
  * cleanly with state persisted rather than blocking forever.
  */
-async function resolveGate(
+export async function resolveGate(
   options: ControllerOptions,
   stage: StageId,
   state: RunState,
+  signal?: AbortSignal,
 ): Promise<RunState> {
   if (state.mode !== "collaborative" || !COLLABORATIVE_GATES.includes(stage)) return state;
 
   if (options.headless) {
-    updateRunState(options.workspace, (c) => ({ ...c, status: "gate_waiting" }));
-    updateStage(options.workspace, stage, (s) => ({ ...s, status: "completed" }));
-    throw new UserFacingError(
-      `stage "${stage}" is complete and awaiting approval, but this run is headless ` +
-        `and cannot ask. State is saved. Approve with:\n` +
-        `  paper-orchestra approve ${options.workspace}\n` +
-        `then continue with:\n  paper-orchestra resume ${options.workspace}`,
+    const waiting = updateRunState(options.workspace, (c) => ({
+      ...c,
+      status: "gate_waiting",
+    }));
+    say(
+      options,
+      `stage "${stage}" is complete and awaiting approval. State is saved. ` +
+        `Approve with \`paper-orchestra approve ${options.workspace}\`, then continue with ` +
+        `\`paper-orchestra resume ${options.workspace}\`.`,
     );
+    return waiting;
   }
 
   updateRunState(options.workspace, (c) => ({ ...c, status: "gate_waiting" }));
@@ -387,6 +439,7 @@ async function resolveGate(
 
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, GATE_POLL_MS));
+    signal?.throwIfAborted();
     const current = readRunState(options.workspace);
     if (current.status !== "gate_waiting") {
       say(options, "   gate: approved");
@@ -434,7 +487,21 @@ async function retrieveForLiterature(
     );
   }
 
-  const queries = collectQueries(parsed.data).map(tidyQuery).filter(Boolean);
+  const planned = planQueries(parsed.data);
+  const queries = planned.queries;
+  writeJsonAtomic(join(workspace, ARTIFACTS.queryPlan), {
+    generated_at: new Date().toISOString(),
+    decisions: planned.decisions,
+  });
+  const dropped = planned.decisions.filter((entry) => entry.action === "dropped").length;
+  const contextualized = planned.decisions.filter(
+    (entry) => entry.action === "contextualized",
+  ).length;
+  say(
+    options,
+    `   query plan: ${queries.length} paid call candidate(s), ${dropped} dropped, ` +
+      `${contextualized} contextualized`,
+  );
   const budget = Math.min(queries.length, state.scope.max_lkm_calls);
 
   if (!options.allowLkmSpend) {
@@ -569,6 +636,51 @@ async function buildIfManuscriptStage(
  * and writes both artifacts. `plotting_results.json` and `figures/info.json`
  * therefore record what actually rendered, not what a model claimed rendered.
  */
+async function visuallyReviewFigure(
+  runtime: Runtime,
+  options: ControllerOptions,
+  input: {
+    sessionId: string;
+    model: ModelRef | null;
+    imagePath: string;
+    reviewDir: string;
+    timeoutMs: number;
+    signal: AbortSignal;
+  },
+): Promise<VisualReview> {
+  let preview = input.imagePath;
+  if (extname(preview).toLowerCase() === ".pdf") {
+    const pages = await renderPdfPages(preview, input.reviewDir, 1);
+    if (!pages[0]) {
+      return { passed: false, suggestions: "the PDF could not be rasterized for visual review" };
+    }
+    preview = pages[0];
+  }
+
+  const extension = extname(preview).toLowerCase();
+  const mime = extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : "image/png";
+  const data = readFileSync(preview).toString("base64");
+  await prompt(runtime, {
+    sessionId: input.sessionId,
+    model: input.model,
+    text: [
+      "Act as a strict publication-figure visual critic. Inspect the attached rendered image,",
+      "not the generating code or a textual description. Fail it if content overlaps internally,",
+      "labels or ticks are unreadable at column width, content is clipped, axes/units are wrong or",
+      "misleading, or the layout contains any other visible defect.",
+      "Return exactly one JSON object: {\"passed\": boolean, \"suggestions\": string}.",
+      "When passed is false, suggestions must be a concrete repair instruction.",
+    ].join("\n"),
+    files: [{ mime, url: `data:${mime};base64,${data}`, filename: basename(preview) }],
+  });
+  await waitForIdleOrPermissionAsk(runtime, options, {
+    sessionId: input.sessionId,
+    timeoutMs: input.timeoutMs,
+    signal: input.signal,
+  });
+  return parseVisualReview(await lastAssistantText(runtime, input.sessionId));
+}
+
 async function runPlottingGeneration(
   runtime: Runtime,
   options: ControllerOptions,
@@ -583,14 +695,6 @@ async function runPlottingGeneration(
   const model = stageModel(state, stage);
   const timeoutMs = Math.round(TIMEOUTS_MS[stage] * state.timeout_multiplier);
 
-  // Fail before spending a single token if this machine cannot render at all.
-  // The alternative is discovering it after N model calls, with N scripts that
-  // were never going to run.
-  const capability = await plottingAvailable();
-  if (!capability.ok) {
-    throw new UserFacingError(`cannot generate figures: ${capability.detail}`);
-  }
-
   const parsed = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outline)));
   if (!parsed.success) {
     throw new UserFacingError(
@@ -600,28 +704,26 @@ async function runPlottingGeneration(
   }
 
   const planned = parsed.data.plotting_plan;
-  const plots = planned.filter((spec) => spec.plot_type === "plot");
-  const diagrams = planned.filter((spec) => spec.plot_type !== "plot");
+  const routed = planned.map((spec) => ({ spec, route: resolveFigureRoute(spec) }));
+  const codeCount = routed.filter((entry) => entry.route === "code").length;
+  const imageCount = routed.length - codeCount;
+
+  if (codeCount > 0) {
+    const capability = await plottingAvailable();
+    if (!capability.ok) {
+      throw new UserFacingError(`cannot use the code-generation figure route: ${capability.detail}`);
+    }
+  }
+  if (imageCount > 0) {
+    const capability = textToImageCapability();
+    if (!capability.ok) throw new UserFacingError(capability.detail);
+  }
 
   say(
     options,
     `>> ${TITLES[stage]} (${stage})  model=${formatModelRef(model)}  ` +
-      `${plots.length} plot(s), ${capability.detail}`,
+      `${codeCount} code route, ${imageCount} text-to-image route`,
   );
-
-  // Diagrams need an image-generation endpoint, which OpenCode does not expose:
-  // `Model.capabilities` declares an output.image modality, but no response
-  // Part carries generated binary. Say so once, clearly, rather than failing
-  // per figure -- `figure_coverage` excuses them, and supplied figures cover
-  // the case where the author already has the diagram.
-  if (diagrams.length > 0) {
-    say(
-      options,
-      `   skipping ${diagrams.length} diagram(s) (${diagrams
-        .map((spec) => spec.figure_id)
-        .join(", ")}): no image-generation endpoint; supply them under source/figures/`,
-    );
-  }
 
   const sessionId = await createSession(runtime, { title: `paper-orchestra ${stage}` });
   sessions[stage] = sessionId;
@@ -650,72 +752,127 @@ async function runPlottingGeneration(
   const info = FigureInfoSchema.parse(readJson(join(workspace, ARTIFACTS.figuresInfo)) ?? []);
   const results: Array<Record<string, unknown>> = [];
 
-  for (const spec of plots) {
+  for (const { spec, route } of routed) {
     const budget = REMEDIATION_ATTEMPTS[stage] + 1;
-    let rendered: Awaited<ReturnType<typeof renderFigure>> | null = null;
+    let imagePath: string | null = null;
+    let bytes = 0;
+    let failure = "";
     let caption = "";
+    let provenance: Record<string, unknown> | null = null;
+    const criticHistory: Array<Record<string, unknown>> = [];
 
     for (let attempt = 0; attempt < budget; attempt += 1) {
-      const text =
-        attempt === 0
-          ? buildStagePrompt(workspace, stage, state.scope, {
-              figure_id: spec.figure_id,
-              title: spec.title,
-              objective: spec.objective,
-              aspect_ratio: spec.aspect_ratio,
-              data_source: spec.data_source,
-            })
-          : `The script for figure \`${spec.figure_id}\` did not produce a usable figure: ` +
-            `${rendered?.error ?? "unknown failure"}\n\nFix the cause and return the ` +
-            "complete corrected script in one ```python block, plus the caption as before.";
-
       if (attempt > 0) {
-        say(options, `   ${spec.figure_id}: retrying (${rendered?.error ?? ""})`.slice(0, 150));
+        say(options, `   ${spec.figure_id}: retrying (${failure})`.slice(0, 180));
         state = updateStage(workspace, stage, (s) => ({
           ...s,
           remediations: s.remediations + 1,
         }));
       }
 
-      await prompt(runtime, { sessionId, text, model });
-      await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+      if (route === "code") {
+        const generationPrompt =
+          attempt === 0
+            ? buildStagePrompt(workspace, stage, state.scope, {
+                figure_id: spec.figure_id,
+                title: spec.title,
+                objective: spec.objective,
+                aspect_ratio: spec.aspect_ratio,
+                data_source: spec.data_source,
+              })
+            : `The code-generated figure \`${spec.figure_id}\` failed: ${failure}\n\n` +
+              "Return a complete corrected script in one ```python block and the caption as before.";
+        await prompt(runtime, { sessionId, text: generationPrompt, model });
+        await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+        const answer = await lastAssistantText(runtime, sessionId);
+        const rendered = await renderFigure({
+          figureId: spec.figure_id,
+          code: answer,
+          workDir: join(p.brainTmp, "figures", spec.figure_id, `attempt-${attempt}`),
+        });
+        caption = extractCaption(answer) || spec.title || spec.objective;
+        provenance = {
+          provider: "opencode",
+          model: formatModelRef(model),
+          prompt: generationPrompt,
+          parameters: { format: "pdf", network: "disabled", attempt },
+        };
+        imagePath = rendered.ok ? rendered.imagePath : null;
+        bytes = rendered.bytes;
+        failure = rendered.error ?? "";
+      } else {
+        const basePrompt =
+          spec.generation_prompt.trim() ||
+          `${spec.title}. ${spec.objective}. Create a clear publication figure with aspect ratio ` +
+            `${spec.aspect_ratio}; do not add unsupported quantitative claims.`;
+        const generationPrompt = attempt === 0 ? basePrompt : `${basePrompt}\nRepair: ${failure}`;
+        try {
+          const generated = await generateTextImage({
+            figureId: spec.figure_id,
+            prompt: generationPrompt,
+            aspectRatio: spec.aspect_ratio,
+            workDir: join(p.brainTmp, "figures", spec.figure_id, `attempt-${attempt}`),
+          });
+          imagePath = generated.imagePath;
+          bytes = generated.bytes;
+          provenance = generated.provenance;
+          caption = spec.title || spec.objective;
+          failure = "";
+        } catch (error) {
+          imagePath = null;
+          failure = error instanceof Error ? error.message : String(error);
+        }
+      }
 
-      const answer = await lastAssistantText(runtime, sessionId);
-      rendered = await renderFigure({
-        figureId: spec.figure_id,
-        code: answer,
-        workDir: join(p.brainTmp, "figures", spec.figure_id),
+      if (!imagePath || failure) continue;
+      const review = await visuallyReviewFigure(runtime, options, {
+        sessionId,
+        model,
+        imagePath,
+        reviewDir: join(p.brainTmp, "figure-reviews", spec.figure_id, `attempt-${attempt}`),
+        timeoutMs,
+        signal,
       });
-      caption = extractCaption(answer) || spec.title || spec.objective;
-
-      if (rendered.ok) break;
+      criticHistory.push({
+        round: attempt,
+        passed: review.passed,
+        suggestions: review.suggestions,
+        revised_description: attempt === 0 ? "" : failure,
+      });
+      if (review.passed) break;
+      failure = `visual review failed: ${review.suggestions}`;
+      imagePath = null;
     }
 
-    if (rendered?.ok && rendered.imagePath) {
-      const target = join(figuresDir, basename(rendered.imagePath));
-      copyFileSync(rendered.imagePath, target);
+    if (imagePath) {
+      const target = join(figuresDir, basename(imagePath));
+      copyFileSync(imagePath, target);
       info.push({ name: basename(target), caption });
-      say(options, `   ${spec.figure_id}: rendered ${basename(target)} (${rendered.bytes} bytes)`);
+      say(options, `   ${spec.figure_id}: rendered ${basename(target)} (${bytes} bytes, ${route})`);
       results.push({
         figure_id: spec.figure_id,
         title: spec.title,
-        task_name: "plot",
+        task_name: spec.plot_type,
+        render_route: route,
         description: spec.objective,
         caption,
         aspect_ratio: spec.aspect_ratio,
-        critic_history: [],
+        critic_history: criticHistory,
+        ...(provenance ? { generation_provenance: provenance } : {}),
         image_path: join("figures", basename(target)),
       });
     } else {
-      say(options, `   ${spec.figure_id}: FAILED - ${rendered?.error ?? "unknown"}`);
+      say(options, `   ${spec.figure_id}: FAILED - ${failure || "unknown"}`);
       results.push({
         figure_id: spec.figure_id,
         title: spec.title,
-        task_name: "plot",
+        task_name: spec.plot_type,
+        render_route: route,
         description: spec.objective,
         caption,
         aspect_ratio: spec.aspect_ratio,
-        critic_history: [],
+        critic_history: criticHistory,
+        ...(provenance ? { generation_provenance: provenance } : {}),
       });
     }
   }
@@ -742,7 +899,7 @@ async function runPlottingGeneration(
     status: "completed",
     completed_at: new Date().toISOString(),
     usage,
-    notes: `Generated ${rendered}/${plots.length} plot(s); published ${supplied} supplied figure(s).`,
+    notes: `Generated ${rendered}/${planned.length} figure(s); published ${supplied} supplied figure(s).`,
   }));
   const sha = await checkpoint({
     workspace,
@@ -753,7 +910,7 @@ async function runPlottingGeneration(
     checks,
   });
   say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
-  return resolveGate(options, stage, completed);
+  return resolveGate(options, stage, completed, signal);
 }
 
 /**

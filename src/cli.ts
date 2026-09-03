@@ -13,6 +13,15 @@ import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
 import { bundledVenues, resolveTemplate } from "./venues.js";
+import { resolve } from "node:path";
+import { runResult } from "./automation.js";
+
+let jsonErrors = false;
+let activeWorkspace: string | null = null;
+
+function jsonLine(value: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
 
 function fail(message: string, code = 1): never {
   throw new UserFacingError(message, code);
@@ -83,8 +92,11 @@ program
     "20",
   )
   .option("--prepare-only", "create and lock the workspace, then stop", false)
+  .option("--json", "newline-delimited machine-readable events and result", false)
   .action(async (rawMaterials: string, options: Record<string, unknown>) => {
     const workspace = (options.output as string | undefined) ?? `./po-run-${compactStamp()}`;
+    jsonErrors = Boolean(options.json);
+    activeWorkspace = resolve(workspace);
     if (options.until && !isStageId(options.until as string)) {
       fail(`unknown --until stage "${options.until}"; expected one of ${STAGES.join(", ")}`);
     }
@@ -113,17 +125,27 @@ program
     });
 
     const { state } = result;
-    process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
-    process.stdout.write(`  branch    ${state.run_branch}\n`);
-    process.stdout.write(`  venue     ${state.scope.venue}\n`);
-    process.stdout.write(`  plan      ${state.scope.plan.join(" -> ")}\n`);
-    process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
-    process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);
-    process.stdout.write(`  template  ${state.template_digest.slice(0, 12)}\n`);
-    process.stdout.write(`  brain     ${result.brainInputs.length} normalized input(s)\n`);
-    process.stdout.write(`  ckpt      ${result.checkpointSha.slice(0, 12)}\n`);
+    if (options.json) {
+      jsonLine({
+        type: "prepared",
+        workspace: resolve(workspace),
+        run_id: state.run_id,
+        plan: state.scope.plan,
+        checkpoint: result.checkpointSha,
+      });
+    } else {
+      process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
+      process.stdout.write(`  branch    ${state.run_branch}\n`);
+      process.stdout.write(`  venue     ${state.scope.venue}\n`);
+      process.stdout.write(`  plan      ${state.scope.plan.join(" -> ")}\n`);
+      process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
+      process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);
+      process.stdout.write(`  template  ${state.template_digest.slice(0, 12)}\n`);
+      process.stdout.write(`  brain     ${result.brainInputs.length} normalized input(s)\n`);
+      process.stdout.write(`  ckpt      ${result.checkpointSha.slice(0, 12)}\n`);
+    }
 
-    if (result.skipped.length > 0) {
+    if (!options.json && result.skipped.length > 0) {
       process.stdout.write(`  skipped   ${result.skipped.length} file(s) during import:\n`);
       for (const entry of result.skipped.slice(0, 10)) {
         process.stdout.write(`              ${entry}\n`);
@@ -133,14 +155,21 @@ program
       }
     }
 
-    if (options.prepareOnly) return;
+    if (options.prepareOnly) {
+      if (options.json) jsonLine(runResult(workspace, state));
+      return;
+    }
 
-    process.stdout.write("\n");
-    await runController({
+    if (!options.json) process.stdout.write("\n");
+    const final = await runController({
       workspace,
       headless: Boolean(options.headless),
       allowLkmSpend: Boolean(options.allowLkmSpend),
+      ...(options.json
+        ? { onEvent: (message: string) => jsonLine({ type: "event", message }) }
+        : {}),
     });
+    if (options.json) jsonLine(runResult(workspace, final));
   });
 
 program
@@ -196,20 +225,38 @@ program
     "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call)",
     false,
   )
-  .action(async (workspace: string, options: { allowLkmSpend: boolean }) => {
+  .option("--headless", "resume without attaching the OpenCode TUI", false)
+  .option("--json", "newline-delimited machine-readable events and result", false)
+  .action(async (
+    workspace: string,
+    options: { allowLkmSpend: boolean; headless: boolean; json: boolean },
+  ) => {
+    jsonErrors = options.json;
+    activeWorkspace = resolve(workspace);
     const state = readRunState(workspace);
     verifyLocks(workspace, state);
     const next = resumeStage(state);
-    if (!next) {
-      process.stdout.write(`${state.run_id} is already complete\n`);
+    if (!next && state.status === "completed") {
+      if (options.json) jsonLine(runResult(workspace, state));
+      else process.stdout.write(`${state.run_id} is already complete\n`);
       return;
     }
-    process.stdout.write(`resuming ${state.run_id} at "${next}"\n`);
-    await runController({
+    if (!options.json) {
+      process.stdout.write(
+        next
+          ? `resuming ${state.run_id} at "${next}"\n`
+          : `finalizing approved run ${state.run_id}\n`,
+      );
+    }
+    const final = await runController({
       workspace,
-      headless: state.headless,
+      headless: options.headless || state.headless,
       allowLkmSpend: Boolean(options.allowLkmSpend),
+      ...(options.json
+        ? { onEvent: (message: string) => jsonLine({ type: "event", message }) }
+        : {}),
     });
+    if (options.json) jsonLine(runResult(workspace, final));
   });
 
 program
@@ -280,7 +327,29 @@ async function main(): Promise<void> {
     await program.parseAsync(process.argv);
   } catch (error) {
     if (error instanceof UserFacingError) {
-      process.stderr.write(`paper-orchestra: ${error.message}\n`);
+      if (jsonErrors) {
+        let runState: string | null = null;
+        if (activeWorkspace) {
+          try {
+            runState = readRunState(activeWorkspace).status;
+          } catch {
+            // Preparation may have failed before a state file existed.
+          }
+        }
+        process.stderr.write(
+          `${JSON.stringify({
+            type: "error",
+            ok: false,
+            exit_status: error.exitCode,
+            workspace: activeWorkspace,
+            run_state: runState,
+            validation_failures: [error.message],
+            error: error.message,
+          })}\n`,
+        );
+      } else {
+        process.stderr.write(`paper-orchestra: ${error.message}\n`);
+      }
       process.exit(error.exitCode);
     }
     throw error;

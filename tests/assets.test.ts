@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { installRuntimeAssets, missingCommands } from "../src/assets.js";
-import { approveRun } from "../src/controller.js";
+import { approveRun, resolveGate, stageNeedsFailureMark } from "../src/controller.js";
 import { COMMANDS } from "../src/stages.js";
 import { readRunState, updateRunState } from "../src/state/store.js";
 import { prepared } from "./fixtures.js";
@@ -68,6 +68,29 @@ describe("installRuntimeAssets", () => {
 });
 
 describe("approveRun", () => {
+  it("does not overwrite a completed stage when the TUI closes at its gate", async () => {
+    const { workspace } = await prepared();
+    const state = readRunState(workspace);
+    state.stages.outline.status = "completed";
+    expect(stageNeedsFailureMark(state, "outline")).toBe(false);
+    expect(stageNeedsFailureMark(state, "literature")).toBe(true);
+  });
+
+  it("persists a headless collaborative gate without marking the run failed", async () => {
+    const { workspace } = await prepared({ mode: "collaborative", headless: true });
+    const state = readRunState(workspace);
+    const events: string[] = [];
+    const waiting = await resolveGate(
+      { workspace, headless: true, onEvent: (line) => events.push(line) },
+      "outline",
+      state,
+    );
+    expect(waiting.status).toBe("gate_waiting");
+    expect(readRunState(workspace).status).toBe("gate_waiting");
+    expect(events.join("\n")).toContain("paper-orchestra approve");
+    expect(events.join("\n")).toContain("paper-orchestra resume");
+  });
+
   it("releases a run waiting at a gate", async () => {
     const { workspace } = await prepared();
     updateRunState(workspace, (c) => ({ ...c, status: "gate_waiting" }));

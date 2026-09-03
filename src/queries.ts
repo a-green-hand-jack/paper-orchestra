@@ -73,3 +73,123 @@ export function tidyQuery(query: string): string {
     .trim()
     .slice(0, 300);
 }
+
+export interface QueryDecision {
+  readonly original: string;
+  readonly query: string | null;
+  readonly action: "kept" | "contextualized" | "dropped";
+  readonly reason: string;
+}
+
+export interface QueryPlan {
+  readonly queries: string[];
+  readonly decisions: QueryDecision[];
+}
+
+function outlineStrings(value: unknown, out: string[] = []): string[] {
+  if (typeof value === "string") {
+    if (value.trim()) out.push(value.trim());
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) outlineStrings(entry, out);
+    return out;
+  }
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      outlineStrings(entry, out);
+    }
+  }
+  return out;
+}
+
+function fingerprint(query: string): string {
+  return query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** Concepts whose standalone LKM queries repeatedly returned another field's papers. */
+function isGenericConcept(query: string): boolean {
+  const normalized = fingerprint(query);
+  return [
+    /^(?:jaccard(?: index)?|f1? score|f score)(?: metric)?$/,
+    /^(?:adamw|adam)(?: optimizer)?$/,
+    /^(?:transformer )?cross attention$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isShortAcronym(query: string): boolean {
+  return /^[A-Z][A-Z0-9-]{1,7}$/.test(query.trim());
+}
+
+function acronymContext(acronym: string, outline: Outline): string | null {
+  const candidates = outlineStrings(outline).filter((value) => {
+    const words = value.match(/[A-Za-z0-9]+/g) ?? [];
+    return (
+      words.length >= 4 &&
+      new RegExp(`\\b${acronym}\\b`).test(value) &&
+      fingerprint(tidyQuery(value)) !== fingerprint(acronym)
+    );
+  });
+  if (candidates.length === 0) return null;
+
+  // Prefer a nearby explicit expansion, then the shortest domain-bearing
+  // sentence/query. This turns `GAVS` into the outline's own contextual query
+  // instead of asking a general-science index to guess which acronym we mean.
+  candidates.sort((a, b) => {
+    const aExpanded = new RegExp(`\\([^)]*\\b${acronym}\\b[^)]*\\)`).test(a) ? 0 : 1;
+    const bExpanded = new RegExp(`\\([^)]*\\b${acronym}\\b[^)]*\\)`).test(b) ? 0 : 1;
+    return aExpanded - bExpanded || a.length - b.length;
+  });
+  return tidyQuery(candidates[0] as string);
+}
+
+/**
+ * Build the paid LKM call plan before spending anything.
+ *
+ * Query admission is deliberately narrower than literature admission. The
+ * relevance gate protects the bibliography after retrieval; this plan avoids
+ * paying for calls already known to be ambiguous and expands short acronyms
+ * with context already present in the outline.
+ */
+export function planQueries(outline: Outline): QueryPlan {
+  const decisions: QueryDecision[] = [];
+  const queries: string[] = [];
+  const seen = new Set<string>();
+
+  for (const original of collectQueries(outline)) {
+    const tidied = tidyQuery(original);
+    if (!tidied) continue;
+    if (isGenericConcept(tidied)) {
+      decisions.push({
+        original,
+        query: null,
+        action: "dropped",
+        reason: "generic concept is ambiguous in the general-science index",
+      });
+      continue;
+    }
+
+    const contextual = isShortAcronym(tidied) ? acronymContext(tidied, outline) : null;
+    const query = contextual && fingerprint(contextual) !== fingerprint(tidied) ? contextual : tidied;
+    const key = fingerprint(query);
+    if (seen.has(key)) {
+      decisions.push({
+        original,
+        query: null,
+        action: "dropped",
+        reason: "duplicates an earlier optimized query",
+      });
+      continue;
+    }
+    seen.add(key);
+    queries.push(query);
+    decisions.push({
+      original,
+      query,
+      action: query === tidied ? "kept" : "contextualized",
+      reason: query === tidied ? "specific query" : `expanded short acronym ${tidied} from outline context`,
+    });
+  }
+
+  return { queries, decisions };
+}
