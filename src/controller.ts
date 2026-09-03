@@ -35,13 +35,12 @@ import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from 
 import { planQueries } from "./queries.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
-import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { FigureInfoSchema } from "./artifacts.js";
 import { ensureDir } from "./files.js";
 import { paths } from "./paths.js";
 import { ARTIFACTS } from "./paths.js";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireRunLock } from "./state/lock.js";
 import {
@@ -52,6 +51,7 @@ import {
   type VisualReview,
 } from "./figures.js";
 import { generateTextImage, textToImageCapability } from "./imagegen.js";
+import { ensureGraphicxPackage } from "./latex.js";
 
 export interface ControllerOptions {
   readonly workspace: string;
@@ -598,6 +598,10 @@ async function buildIfManuscriptStage(
   const { workspace } = options;
   const sourceAbs = join(workspace, sourceRel);
   if (!existsSync(sourceAbs)) return; // artifact_exists reports this better.
+
+  const source = readFileSync(sourceAbs, "utf8");
+  const withGraphicx = ensureGraphicxPackage(source);
+  if (withGraphicx !== source) writeFileSync(sourceAbs, withGraphicx, "utf8");
 
   const buildDir = stageBuildDir(workspace, sourceAbs, "manuscript");
   const result = await compileLatex({ cwd: buildDir, jobName: "manuscript" });

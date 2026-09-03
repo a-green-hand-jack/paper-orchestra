@@ -43,6 +43,25 @@ export function includedGraphics(tex: string): string[] {
 }
 
 /**
+ * Add the graphics package when a manuscript uses figures but its template
+ * does not load it. Several official templates intentionally omit `graphicx`
+ * from their minimal preambles, which otherwise makes `\\includegraphics`
+ * print its arguments as text while still leaving a partial PDF behind.
+ */
+export function ensureGraphicxPackage(tex: string): string {
+  if (includedGraphics(tex).length === 0) return tex;
+  if (/\\(?:use|Require)package\s*(?:\[[^\]]*\]\s*)?\{[^}]*\bgraphicx\b[^}]*\}/.test(tex)) {
+    return tex;
+  }
+
+  const documentClass = /^\\documentclass\s*(?:\[[^\]]*\]\s*)?\{[^}]+\}[^\n]*(?:\r?\n|$)/m.exec(tex);
+  if (!documentClass || documentClass.index === undefined) return tex;
+
+  const insertion = documentClass.index + documentClass[0].length;
+  return `${tex.slice(0, insertion)}\\usepackage{graphicx}\n${tex.slice(insertion)}`;
+}
+
+/**
  * Placeholders a finished manuscript must not contain.
  *
  * `{{...}}` is the template-substitution marker, and the TODO form is what the
