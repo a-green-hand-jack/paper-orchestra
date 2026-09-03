@@ -76,8 +76,10 @@ export const REMEDIATION_ATTEMPTS: Record<StageId, number> = {
   // Image generations are independent Codex turns, so a third attempt can
   // carry forward two rounds of accumulated visual feedback.
   plotting: 2,
-  section_writing: 1,
-  refinement: 1,
+  // Citation repairs need a deliberate pass over the controller-provided key
+  // list, then a compile pass to confirm every citation actually resolves.
+  section_writing: 2,
+  refinement: 2,
 };
 
 /**

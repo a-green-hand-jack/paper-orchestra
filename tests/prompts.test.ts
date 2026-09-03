@@ -84,6 +84,19 @@ describe("buildStagePrompt", () => {
     expect(built).toMatch(/does not read your closing message/);
     expect(built).toMatch(/read-only inputs/);
   });
+
+  it("inlines the exact citation keys for manuscript stages", async () => {
+    const { workspace } = await prepared();
+    const dir = join(workspace, ".opencode", "commands");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${COMMANDS.section_writing}.md`), "body");
+
+    const built = buildStagePrompt(workspace, "section_writing", scope(), {
+      citation_keys: "Author2024Exact, Research2023Verified",
+    });
+    expect(built).toContain("The only permitted citation keys");
+    expect(built).toContain("Author2024Exact, Research2023Verified");
+  });
 });
 
 describe("buildRemediationPrompt", () => {
@@ -101,6 +114,7 @@ describe("buildRemediationPrompt", () => {
     const built = buildRemediationPrompt("section_writing", failed);
     expect(built).toContain("citation_integrity");
     expect(built).toContain("ghost2024z");
+    expect(built).toContain("copy its `citation_key` values exactly");
   });
 
   it("forbids satisfying a check by editing supplied inputs", () => {

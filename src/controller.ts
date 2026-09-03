@@ -29,7 +29,7 @@ import {
   writeSessionState,
 } from "./state/store.js";
 import { citationFloor, validateStage } from "./validation.js";
-import { OutlineSchema } from "./artifacts.js";
+import { CitationMapSchema, OutlineSchema } from "./artifacts.js";
 import { readJson, writeJsonAtomic } from "./files.js";
 import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from "./literature.js";
 import { planQueries } from "./queries.js";
@@ -74,6 +74,15 @@ function say(options: ControllerOptions, line: string): void {
 function stageModel(state: RunState, stage: StageId): ModelRef | null {
   const overrides = state.stage_models as Record<string, ModelRef>;
   return modelForStage(stage, state.default_model, overrides);
+}
+
+function availableCitationKeys(workspace: string): string {
+  try {
+    const parsed = CitationMapSchema.safeParse(readJson(join(workspace, ARTIFACTS.citationMap)));
+    return parsed.success ? Object.keys(parsed.data).sort().join(", ") : "";
+  } catch {
+    return "";
+  }
 }
 
 /** A TUI may close while a completed stage is waiting at its approval gate. */
@@ -318,6 +327,9 @@ async function runStage(
     // number at the END of the pipeline, so refinement cannot quietly undo it.
     extra.paper_count = String(relevant);
     extra.min_cite_paper_count = String(citationFloor(relevant, state.scope));
+  }
+  if (stage === "section_writing" || stage === "refinement") {
+    extra.citation_keys = availableCitationKeys(workspace);
   }
 
   const before = await sessionUsage(runtime, sessionId);
