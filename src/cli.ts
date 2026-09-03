@@ -12,7 +12,9 @@ import { PAPER_ORCHESTRA_VERSION } from "./version.js";
 import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
-import { bundledVenues, resolveTemplate } from "./venues.js";
+import { bundledVenues, resolveTemplate, templateAdapters } from "./venues.js";
+import { CCF_A_VENUES, manualCcfTemplateAdapter, templateAdapter, venueDefinition } from "./venue-catalog.js";
+import { adaptVenueKit, installOfficialVenue, manualCcfAdapter } from "./venue-install.js";
 import { resolve } from "node:path";
 import { runResult } from "./automation.js";
 
@@ -37,6 +39,129 @@ program
   )
   .version(PAPER_ORCHESTRA_VERSION);
 
+const templates = program
+  .command("templates")
+  .description("List, inspect, install, or normalize versioned venue author kits");
+
+templates
+  .command("list")
+  .description("List immutable template adapters; add --ccf-a for all CCF-A venue identities")
+  .option("--ccf-a", "include the 58 CCF-A venue identities", false)
+  .option("--json", "machine-readable output", false)
+  .action((options: { ccfA: boolean; json: boolean }) => {
+    const adapters = templateAdapters();
+    if (options.json) {
+      process.stdout.write(
+        `${JSON.stringify({ adapters, ccf_a_venues: options.ccfA ? CCF_A_VENUES : undefined }, null, 2)}\n`,
+      );
+      return;
+    }
+    for (const adapter of adapters) {
+      process.stdout.write(
+        `${adapter.id.padEnd(20)} ${adapter.source.kind.padEnd(18)} ${adapter.title}\n`,
+      );
+    }
+    if (options.ccfA) {
+      process.stdout.write("\nCCF-A venue identities (adapt a downloaded official kit with `templates adapt`):\n");
+      for (const venue of CCF_A_VENUES) {
+        process.stdout.write(`${venue.key.padEnd(20)} ${venue.category} - ${venue.title}\n`);
+      }
+    }
+  });
+
+templates
+  .command("info")
+  .description("Show official authoring provenance and installation instructions")
+  .argument("<id>", "template adapter id or CCF-A venue key")
+  .option("--json", "machine-readable output", false)
+  .action((id: string, options: { json: boolean }) => {
+    const adapter = templateAdapter(id);
+    const venue = venueDefinition(id);
+    if (!adapter && !venue) fail(`unknown template adapter or CCF-A venue "${id}"`);
+    const value = adapter ?? venue;
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+      return;
+    }
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+    if (adapter?.source.kind === "official-archive") {
+      process.stdout.write(`\nInstall: paper-orchestra templates install ${adapter.id} ./templates/${adapter.id}\n`);
+    } else if (adapter?.source.kind === "manual") {
+      const venueFlag = adapter.venueKey ? ` --venue ${adapter.venueKey} --year ${adapter.year}` : "";
+      process.stdout.write(
+        `\nDownload the exact official kit for this edition, then normalize it:\n` +
+          `paper-orchestra templates adapt ${adapter.id} /path/to/kit ./templates/${adapter.id}${venueFlag} --entry <main.tex> --source-url <official-cfp-or-kit-url>\n`,
+      );
+    } else if (venue) {
+      process.stdout.write(
+          `\nDownload the exact author kit linked by the target edition, then normalize it:\n` +
+          `paper-orchestra templates adapt <${venue.key}-year-id> /path/to/kit ./templates/<${venue.key}-year-id> --venue ${venue.key} --year <released-year> --entry <main.tex> --source-url <official-cfp-or-kit-url>\n` +
+          "The adapter ID removes hyphens from the venue key (for example, `usenixatc2025`).\n",
+      );
+    }
+  });
+
+templates
+  .command("install")
+  .description("Download a checksum-pinned official author kit into a local template directory")
+  .argument("<id>", "official-download adapter id")
+  .argument("<destination>", "new local template directory")
+  .action(async (id: string, destination: string) => {
+    const installed = await installOfficialVenue(id, destination);
+    process.stdout.write(`installed ${installed.id} in ${installed.directory}\n`);
+  });
+
+templates
+  .command("adapt")
+  .description("Normalize a locally downloaded official kit without modifying its style files")
+  .argument("<id>", "immutable adapter id, for example fast2026")
+  .argument("<source-directory>", "directory containing the official author kit")
+  .argument("<destination>", "new local template directory")
+  .requiredOption("--entry <relative-file>", "main .tex file within the official kit")
+  .requiredOption("--source-url <https-url>", "exact official kit or CFP URL")
+  .option("--venue <ccf-a-key>", "CCF-A venue key for a manual adapter")
+  .option("--year <year>", "edition year for a manual CCF-A adapter")
+  .action(
+    (
+      id: string,
+      sourceDirectory: string,
+      destination: string,
+      options: { entry: string; sourceUrl: string; venue?: string; year?: string },
+    ) => {
+      let venueKey: string | null = null;
+      let year: number | null = null;
+      let adapter = templateAdapter(id) ?? null;
+      if (options.venue || options.year) {
+        if (!options.venue || !options.year) {
+          fail("manual CCF-A adapters require both --venue and --year");
+        }
+        const manual = manualCcfAdapter(id, options.venue, Number(options.year));
+        venueKey = manual.venueKey;
+        year = manual.year;
+        adapter = manualCcfTemplateAdapter(manual.venueKey, manual.year);
+      } else if (!adapter || adapter.source.kind !== "manual") {
+        fail(
+          `${id} is not a manual adapter. Use \`paper-orchestra templates install ${id} <destination>\` ` +
+            "when an official-download adapter is available.",
+        );
+      } else {
+        venueKey = adapter.venueKey;
+        year = adapter.year;
+      }
+      const installed = adaptVenueKit({
+        id,
+        sourceDirectory,
+        sourceUrl: options.sourceUrl,
+        destination,
+        entrypoint: options.entry,
+        adapter,
+        venueKey,
+        year,
+      });
+      process.stdout.write(`adapted ${installed.id} in ${installed.directory}\n`);
+    },
+  );
+
 program
   .command("write")
   .description("Create a workspace and run the writing pipeline")
@@ -45,7 +170,7 @@ program
   .argument("[raw-materials]", "directory holding the idea and experimental log", ".")
   .option(
     "--template <venue|dir>",
-    "conference venue (cvpr2025, iclr2025) or a path to your own template directory",
+    "bundled versioned template, installed official kit, or path to your own template directory",
     "cvpr2025",
   )
   .option("-o, --output <dir>", "workspace directory (default: ./po-run-<timestamp>)")

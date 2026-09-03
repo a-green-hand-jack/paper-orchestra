@@ -1,0 +1,15 @@
+{
+  "id": "iclr2025",
+  "source_kind": "legacy-bundled",
+  "official": false,
+  "author_instructions_url": "https://github.com/ICLR/Master-Template",
+  "provenance": "Legacy bundle retained for reproducible existing workspaces. New editions use checksum-pinned download adapters rather than vendored source files.",
+  "verified_at": "2026-09-03",
+  "license_status": "download-only",
+  "entrypoint": "template.tex",
+  "build": { "engine": "pdflatex", "bibliography": "bibtex" },
+  "constraints": {
+    "anonymity": "double-blind", "main_text_pages": null, "references_count_toward_limit": null,
+    "appendix": "main-pdf", "ethics": "conditional", "artifacts": "optional"
+  }
+}

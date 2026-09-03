@@ -8,7 +8,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import { ensureDir, walkFiles } from "./files.js";
 import { ARTIFACTS, paths } from "./paths.js";
 
@@ -306,9 +306,10 @@ export function stageBuildDir(
   ensureDir(buildDir);
 
   for (const rel of walkFiles(p.template)) {
-    const target = join(buildDir, basename(rel));
     // Skip the template's own main file: the manuscript replaces it.
-    if (basename(rel) === "template.tex") continue;
+    if (rel === "template.tex") continue;
+    const target = join(buildDir, rel);
+    ensureDir(dirname(target));
     copyWritable(join(p.template, rel), target);
   }
 
