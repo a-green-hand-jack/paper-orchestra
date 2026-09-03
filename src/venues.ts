@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UserFacingError } from "./errors.js";
+import { templateAdapter, TEMPLATE_ADAPTERS, type TemplateAdapter } from "./venue-catalog.js";
 
 /**
  * Resolve `--template` to a directory.
@@ -43,6 +44,11 @@ export function bundledVenues(): string[] {
     .sort();
 }
 
+/** Every explicit venue edition or documented external adapter. */
+export function templateAdapters(): readonly TemplateAdapter[] {
+  return TEMPLATE_ADAPTERS;
+}
+
 /**
  * A directory for `--template`, from either a venue name or a path.
  *
@@ -67,6 +73,22 @@ export function resolveTemplate(value: string): string {
       );
     }
     return dir;
+  }
+
+  const adapter = templateAdapter(value);
+  if (adapter && adapter.source.kind !== "bundled") {
+    if (adapter.source.kind === "official-archive") {
+      throw new UserFacingError(
+        `${adapter.id} is an official-download adapter, not a bundled author kit. ` +
+          `Run \`paper-orchestra templates install ${adapter.id} ./templates/${adapter.id}\`, then ` +
+          `pass \`--template ./templates/${adapter.id}\`. Official instructions: ${adapter.authorInstructionsUrl}`,
+      );
+    }
+    throw new UserFacingError(
+      `${adapter.id} requires a locally downloaded official author kit. ` +
+        `Read \`paper-orchestra templates info ${adapter.id}\`, normalize it with ` +
+        "`paper-orchestra templates adapt`, then pass the resulting directory with `--template`.",
+    );
   }
 
   const bundled = join(templateRoot(), value);

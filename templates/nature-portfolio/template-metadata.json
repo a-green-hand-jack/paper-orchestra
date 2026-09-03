@@ -1,0 +1,18 @@
+{
+  "id": "nature-portfolio",
+  "source_kind": "project-authored",
+  "official": false,
+  "author_instructions_url": "https://www.nature.com/nature/for-authors/initial-submission",
+  "provenance": "Project-authored scaffold. It does not reproduce or claim to be a Nature Portfolio author kit.",
+  "verified_at": "2026-09-03",
+  "license_status": "project-authored",
+  "entrypoint": "template.tex",
+  "build": {
+    "engine": "pdflatex",
+    "bibliography": "bibtex"
+  },
+  "constraints": {
+    "anonymity": "varies", "main_text_pages": null, "references_count_toward_limit": null,
+    "appendix": "varies", "ethics": "varies", "artifacts": "varies"
+  }
+}

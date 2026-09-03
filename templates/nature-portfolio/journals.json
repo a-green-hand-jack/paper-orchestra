@@ -1,0 +1,55 @@
+{
+  "manifest_version": 1,
+  "retrieved_at": "2026-09-03",
+  "template_status": "project-authored-non-official",
+  "template_license_status": "project-authored",
+  "journals": [
+    {
+      "id": "nature",
+      "title": "Nature",
+      "author_instructions_url": "https://www.nature.com/nature/for-authors/initial-submission",
+      "formatting_url": "https://www.nature.com/nature/for-authors/formatting-guide",
+      "article_type": "Article",
+      "review_anonymity": "single-anonymous; authors may request double-anonymous review",
+      "limits": "Initial submission: summary about 200 words; typical six-page Article 2,500 words and four display items; typical eight-page Article 4,300 words and five to six display items; 50 main references maximum.",
+      "required_sections": [
+        "title", "authors and affiliations", "summary", "main text", "references", "tables", "figure legends",
+        "Methods", "data and code availability", "acknowledgements", "funding", "author contributions",
+        "competing interests", "additional information", "extended data"
+      ],
+      "latex_policy": "At initial submission, submit a single PDF; LaTeX source is requested only after acceptance and does not need visual journal formatting.",
+      "publication_license": "Hybrid subscription or Gold Open Access; Open Access licence selected at acceptance."
+    },
+    {
+      "id": "nature-communications",
+      "title": "Nature Communications",
+      "author_instructions_url": "https://www.nature.com/ncomms/submit/guide-to-authors",
+      "formatting_url": "https://www.nature.com/documents/ncomms-formatting-instructions.pdf",
+      "article_type": "Article",
+      "review_anonymity": "single-anonymous by default; double-anonymous and transparent-review options are available where selected",
+      "limits": "No prescribed structure or length is required at initial submission; consult the current formatting instructions before revision.",
+      "required_sections": [
+        "title", "authors", "abstract", "Introduction", "Results", "Discussion", "Methods",
+        "data availability", "code availability when applicable", "references", "acknowledgements",
+        "author contributions", "competing interests", "figures and tables"
+      ],
+      "latex_policy": "Project-authored scaffold only; it is not an official Nature Communications kit.",
+      "publication_license": "Fully open access; check the current article licence at submission."
+    },
+    {
+      "id": "scientific-reports",
+      "title": "Scientific Reports",
+      "author_instructions_url": "https://www.nature.com/srep/author-instructions/submission-guidelines",
+      "formatting_url": "https://www.springernature.com/gp/authors/campaigns/latex-author-support/see-where-our-services-will-take-you/18782940",
+      "article_type": "Article or Registered Report",
+      "review_anonymity": "Consult the current submission system for the selected article type.",
+      "limits": "Guidance: ideally no more than 11 typeset pages, 4,500 main-text words excluding abstract, Methods, references, and legends; title 20 words; abstract 200 words.",
+      "required_sections": [
+        "title", "abstract", "Introduction", "Results", "Discussion", "Methods", "data availability",
+        "references", "acknowledgements", "author contributions", "competing interests", "figure legends", "tables"
+      ],
+      "latex_policy": "The journal points LaTeX authors to the generic Springer Nature journal-article template. It is not a venue-specific Scientific Reports style.",
+      "publication_license": "Fully open access; verify the selected article licence before submission."
+    }
+  ]
+}

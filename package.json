@@ -18,6 +18,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:official-templates": "npm run build && node scripts/verify-official-templates.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

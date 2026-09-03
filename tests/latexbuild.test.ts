@@ -148,6 +148,20 @@ describe("stageBuildDir", () => {
     const { computeLockDigests } = await import("../src/state/store.js");
     expect(computeLockDigests(workspace).templateDigest).toBe(state.template_digest);
   });
+
+  it("preserves nested author-kit paths", async () => {
+    const template = scratchDir("po-nested-template-");
+    mkdirSync(join(template, "styles"), { recursive: true });
+    writeFileSync(join(template, "template.tex"), "\\documentclass{article}");
+    writeFileSync(join(template, "styles", "official.sty"), "% nested style\n");
+    const { workspace } = await prepared({ templateDir: template });
+    const tex = join(scratchDir("po-src-"), "draft.tex");
+    writeFileSync(tex, MINIMAL_TEX);
+
+    const buildDir = stageBuildDir(workspace, tex);
+    expect(existsSync(join(buildDir, "styles", "official.sty"))).toBe(true);
+    expect(existsSync(join(buildDir, "official.sty"))).toBe(false);
+  });
 });
 
 describe("renderPdfPages", () => {

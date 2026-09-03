@@ -1,0 +1,15 @@
+{
+  "id": "cvpr2025",
+  "source_kind": "legacy-bundled",
+  "official": false,
+  "author_instructions_url": "https://github.com/cvpr-org/author-kit",
+  "provenance": "Legacy bundle retained for reproducible existing workspaces. New editions use checksum-pinned download adapters rather than vendored source files.",
+  "verified_at": "2026-09-03",
+  "license_status": "download-only",
+  "entrypoint": "template.tex",
+  "build": { "engine": "pdflatex", "bibliography": "bibtex" },
+  "constraints": {
+    "anonymity": "double-blind", "main_text_pages": 8, "references_count_toward_limit": false,
+    "appendix": "supplement", "ethics": "conditional", "artifacts": "optional"
+  }
+}

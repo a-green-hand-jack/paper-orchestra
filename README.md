@@ -117,11 +117,14 @@ paper-orchestra write --mode collaborative --allow-lkm-spend
 
 # your own LaTeX template
 paper-orchestra write --template ./my-template --allow-lkm-spend
+
+# list supported versioned templates and CCF-A venue identities
+paper-orchestra templates list --ccf-a
 ```
 
 | Flag | Effect |
 |---|---|
-| `--template <venue\|dir>` | `cvpr2025`, `iclr2025`, or a path to your own (default: `cvpr2025`) |
+| `--template <venue\|dir>` | A bundled versioned template (default: `cvpr2025`) or a local official-kit adapter/custom template directory |
 | `--model <provider/model>` | e.g. `openai/gpt-5.6-terra`; omit for OpenCode's default |
 | `--stage-model <stage>=<model>` | Override one stage's model; repeatable |
 | `--use-plotting` | Generate figures from your data, not just place supplied ones |
@@ -134,6 +137,10 @@ paper-orchestra write --template ./my-template --allow-lkm-spend
 | `--until <stage>` | Stop after a stage, locking a shorter plan |
 | `-o, --output <dir>` | Workspace directory (default: `./po-run-<timestamp>`) |
 
+See [docs/templates.md](docs/templates.md) for checksum-pinned CVPR/ICLR 2026
+installers, all CCF-A venue identities, external-kit normalization, and the
+Nature, Science, and mathematics paths.
+
 ### Other commands
 
 ```bash
@@ -144,6 +151,8 @@ paper-orchestra approve [dir]     # release a collaborative gate
 paper-orchestra history [dir]     # the checkpoint timeline
 paper-orchestra checkpoint [dir]  # record a manual checkpoint
 paper-orchestra doctor
+paper-orchestra templates list
+paper-orchestra templates info cvpr2026
 ```
 
 ### Where the output lands

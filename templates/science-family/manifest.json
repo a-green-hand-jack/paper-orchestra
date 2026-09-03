@@ -1,0 +1,24 @@
+{
+  "manifest_version": 1,
+  "id": "science-family",
+  "retrieved_at": "2026-09-03",
+  "template_status": "official-user-download-required",
+  "template_license_status": "other-as-stated-in-work; not cleared for vendoring",
+  "author_kit_url": "https://www.science.org/content/page/preparing-manuscripts-using-latex",
+  "overleaf_distribution_url": "https://www.overleaf.com/latex/templates/latex-template-for-science-family-journals/kjytmmfyxthd",
+  "entrypoint_policy": "Preserve the upstream kit and use a renamed .tex entry point when adapting it locally, as requested by the upstream source comments.",
+  "required_sections": [
+    "title and authors", "abstract when required by the selected format", "main text", "figures and tables",
+    "numbered references", "acknowledgements", "funding", "author contributions", "competing interests",
+    "data and materials availability", "supplement when applicable"
+  ],
+  "constraints": "Limits, review anonymity, and publication terms are journal and article-type specific; read the current journal page before submission.",
+  "journals": [
+    { "id": "science", "author_instructions_url": "https://www.science.org/content/page/science-information-authors" },
+    { "id": "science-advances", "author_instructions_url": "https://www.science.org/content/page/science-advances-information-authors" },
+    { "id": "science-immunology", "author_instructions_url": "https://www.science.org/content/page/science-immunology-information-authors" },
+    { "id": "science-robotics", "author_instructions_url": "https://www.science.org/content/page/science-robotics-information-authors" },
+    { "id": "science-signaling", "author_instructions_url": "https://www.science.org/content/page/science-signaling-information-authors" },
+    { "id": "science-translational-medicine", "author_instructions_url": "https://www.science.org/content/page/stm-information-authors" }
+  ]
+}
