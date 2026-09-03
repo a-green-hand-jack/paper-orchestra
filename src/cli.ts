@@ -12,7 +12,7 @@ import { PAPER_ORCHESTRA_VERSION } from "./version.js";
 import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
-import { bundledVenues, resolveTemplate, templateAdapters } from "./venues.js";
+import { bundledVenues, templateAdapters } from "./venues.js";
 import {
   CCF_A_VENUES,
   manualCcfTemplateAdapter,
@@ -21,6 +21,7 @@ import {
   venueDefinition,
 } from "./venue-catalog.js";
 import { adaptVenueKit, installOfficialVenue, manualCcfAdapter } from "./venue-install.js";
+import { AUTO_TEMPLATE, resolveTemplateSelection } from "./template-selection.js";
 import { resolve } from "node:path";
 import { runResult } from "./automation.js";
 
@@ -175,9 +176,9 @@ program
   // cd into the materials and run `paper-orchestra write`.
   .argument("[raw-materials]", "directory holding the idea and experimental log", ".")
   .option(
-    "--template <venue|dir>",
-    "bundled versioned template, installed official kit, or path to your own template directory",
-    "cvpr2025",
+    "--template <venue|dir|auto>",
+    "template directory or immutable adapter id; default auto selects from the paper topic",
+    AUTO_TEMPLATE,
   )
   .option("-o, --output <dir>", "workspace directory (default: ./po-run-<timestamp>)")
   .addOption(
@@ -236,10 +237,22 @@ program
       fail(`--timeout-multiplier must be a positive number, got "${options.timeoutMultiplier}"`);
     }
 
+    const defaultModel = options.model ? parseModelRef(options.model as string) : null;
+    const selectedTemplate = await resolveTemplateSelection({
+      requested: options.template as string,
+      rawMaterials,
+      ideaFilename: options.ideaFilename as string,
+      experimentalLogFilename: options.experimentalLogFilename as string,
+      model: defaultModel,
+    });
+
     const result = await prepareWorkspace({
       workspace,
       rawMaterials,
-      templateDir: resolveTemplate(options.template as string),
+      templateDir: selectedTemplate.directory,
+      templateId: selectedTemplate.templateId,
+      templateSelection: selectedTemplate.mode,
+      templateRationale: selectedTemplate.rationale,
       mode: options.mode as "autonomous" | "collaborative",
       headless: Boolean(options.headless),
       usePlotting: Boolean(options.usePlotting),
@@ -247,7 +260,7 @@ program
       ideaFilename: options.ideaFilename as string,
       experimentalLogFilename: options.experimentalLogFilename as string,
       networkPolicy: options.networkPolicy as "online" | "offline",
-      defaultModel: options.model ? parseModelRef(options.model as string) : null,
+      defaultModel,
       stageModels: parseStageModels(options.stageModel as string[]),
       timeoutMultiplier: multiplier,
       until: (options.until as StageId | undefined) ?? null,
@@ -262,12 +275,20 @@ program
         workspace: resolve(workspace),
         run_id: state.run_id,
         plan: state.scope.plan,
+        template: {
+          id: state.scope.template_id ?? state.scope.venue,
+          selection: state.scope.template_selection ?? "explicit",
+          rationale: state.scope.template_rationale ?? "",
+        },
         checkpoint: result.checkpointSha,
       });
     } else {
       process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
       process.stdout.write(`  branch    ${state.run_branch}\n`);
       process.stdout.write(`  venue     ${state.scope.venue}\n`);
+      process.stdout.write(
+        `  selection ${state.scope.template_selection ?? "explicit"} (${state.scope.template_rationale ?? "user-selected"})\n`,
+      );
       process.stdout.write(`  plan      ${state.scope.plan.join(" -> ")}\n`);
       process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
       process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);

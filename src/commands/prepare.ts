@@ -21,6 +21,10 @@ export interface PrepareOptions {
   readonly workspace: string;
   readonly rawMaterials: string;
   readonly templateDir: string;
+  /** Immutable adapter id or user-supplied directory label selected before preparation. */
+  readonly templateId?: string;
+  readonly templateSelection?: "automatic" | "explicit";
+  readonly templateRationale?: string;
   readonly mode: "autonomous" | "collaborative";
   readonly headless: boolean;
   readonly usePlotting: boolean;
@@ -110,7 +114,10 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     research_cutoff: options.researchCutoff,
     idea_filename: options.ideaFilename,
     experimental_log_filename: options.experimentalLogFilename,
-    venue: basename(resolve(options.templateDir)),
+    venue: options.templateId ?? basename(resolve(options.templateDir)),
+    ...(options.templateId ? { template_id: options.templateId } : {}),
+    ...(options.templateSelection ? { template_selection: options.templateSelection } : {}),
+    ...(options.templateRationale ? { template_rationale: options.templateRationale } : {}),
     network_policy: options.networkPolicy,
     max_lkm_calls: options.maxLkmCalls,
     target_citations: options.targetCitations,

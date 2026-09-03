@@ -57,9 +57,12 @@ export function templateAdapters(): readonly TemplateAdapter[] {
  * venue happened to share its name. Being explicit here avoids the surprise of
  * a local directory silently shadowing a bundled venue.
  */
+export function looksLikeTemplatePath(value: string): boolean {
+  return isAbsolute(value) || value.includes("/") || value.includes("\\") || value.startsWith(".");
+}
+
 export function resolveTemplate(value: string): string {
-  const looksLikePath =
-    isAbsolute(value) || value.includes("/") || value.includes("\\") || value.startsWith(".");
+  const looksLikePath = looksLikeTemplatePath(value);
 
   if (looksLikePath) {
     const dir = resolve(value);

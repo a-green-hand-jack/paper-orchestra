@@ -109,8 +109,8 @@ A worked example lives in `examples/`.
 # a specific model, and figures generated from your data
 paper-orchestra write --model openai/gpt-5.6-terra --use-plotting --allow-lkm-spend
 
-# a different venue, and a fixed literature cutoff
-paper-orchestra write --template iclr2025 --research-cutoff 2024-11 --allow-lkm-spend
+# a specified venue, and a fixed literature cutoff
+paper-orchestra write --template iclr2026 --research-cutoff 2024-11 --allow-lkm-spend
 
 # pause for your approval after outline, literature, drafting and refinement
 paper-orchestra write --mode collaborative --allow-lkm-spend
@@ -124,7 +124,7 @@ paper-orchestra templates list --ccf-a
 
 | Flag | Effect |
 |---|---|
-| `--template <venue\|dir>` | A bundled versioned template (default: `cvpr2025`) or a local official-kit adapter/custom template directory |
+| `--template <venue\|dir\|auto>` | Default `auto` asks the configured model to choose from reproducible current templates by topic. Any explicit adapter id or local template directory wins over the model. |
 | `--model <provider/model>` | e.g. `openai/gpt-5.6-terra`; omit for OpenCode's default |
 | `--stage-model <stage>=<model>` | Override one stage's model; repeatable |
 | `--use-plotting` | Generate figures from your data, not just place supplied ones |
