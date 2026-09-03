@@ -76,6 +76,7 @@ describe("compileLatex", () => {
       "\\documentclass{article}\n\\begin{document}\n\\undefinedmacro\n\\end{document}",
     );
     const result = await compileLatex({ cwd: dir, jobName: "manuscript" });
+    expect(result.ok).toBe(false);
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors.join(" ")).toMatch(/Undefined control sequence/);
   });

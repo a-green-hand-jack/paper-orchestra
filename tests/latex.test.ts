@@ -3,6 +3,7 @@ import {
   bibKeys,
   citedKeys,
   documentClass,
+  ensureGraphicxPackage,
   includedGraphics,
   unresolvedMarkers,
   usedPackages,
@@ -60,6 +61,27 @@ describe("includedGraphics", () => {
   it("finds figures with and without options", () => {
     const tex = "\\includegraphics[width=\\linewidth]{figures/overview.png}\n\\includegraphics{a.pdf}";
     expect(includedGraphics(tex)).toEqual(["a.pdf", "figures/overview.png"]);
+  });
+});
+
+describe("ensureGraphicxPackage", () => {
+  const figure = "\\includegraphics[width=\\linewidth]{figures/overview.png}";
+
+  it("adds graphicx after documentclass when a figure needs it", () => {
+    const tex = `\\documentclass{article}\n\\usepackage{iclr2026_conference}\n${figure}`;
+    expect(ensureGraphicxPackage(tex)).toBe(
+      `\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage{iclr2026_conference}\n${figure}`,
+    );
+  });
+
+  it("does not duplicate an existing graphics package", () => {
+    const tex = `\\documentclass{article}\n\\usepackage{graphicx,hyperref}\n${figure}`;
+    expect(ensureGraphicxPackage(tex)).toBe(tex);
+  });
+
+  it("leaves figure-free manuscripts unchanged", () => {
+    const tex = "\\documentclass{article}\nNo figures.";
+    expect(ensureGraphicxPackage(tex)).toBe(tex);
   });
 });
 

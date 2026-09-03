@@ -253,11 +253,15 @@ export async function compileLatex(options: BuildOptions): Promise<BuildResult> 
   // fallback for a build that died before writing a log at all.
   const diagnostic = parts.length > 1 ? parts.slice(1).join("\n\n") : log;
 
+  const errors = extractLatexErrors(diagnostic);
+
   return {
-    ok: produced,
+    // TeX can recover from an error and leave a PDF containing visibly broken
+    // content. A produced file alone is therefore not a successful build.
+    ok: produced && errors.length === 0,
     pdf: produced ? pdf : null,
     pages: produced ? await pdfPageCount(pdf) : null,
-    errors: extractLatexErrors(diagnostic),
+    errors,
     unresolvedCitationMarks: produced ? await countUnresolvedCitationMarks(pdf) : 0,
     overfullBoxes: extractOverfullBoxes(diagnostic),
     log: fullLog,
