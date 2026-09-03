@@ -13,7 +13,13 @@ import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
 import { bundledVenues, resolveTemplate, templateAdapters } from "./venues.js";
-import { CCF_A_VENUES, manualCcfTemplateAdapter, templateAdapter, venueDefinition } from "./venue-catalog.js";
+import {
+  CCF_A_VENUES,
+  manualCcfTemplateAdapter,
+  manualMathTemplateAdapterForId,
+  templateAdapter,
+  venueDefinition,
+} from "./venue-catalog.js";
 import { adaptVenueKit, installOfficialVenue, manualCcfAdapter } from "./venue-install.js";
 import { resolve } from "node:path";
 import { runResult } from "./automation.js";
@@ -130,7 +136,7 @@ templates
     ) => {
       let venueKey: string | null = null;
       let year: number | null = null;
-      let adapter = templateAdapter(id) ?? null;
+      let adapter = templateAdapter(id) ?? manualMathTemplateAdapterForId(id) ?? null;
       if (options.venue || options.year) {
         if (!options.venue || !options.year) {
           fail("manual CCF-A adapters require both --venue and --year");

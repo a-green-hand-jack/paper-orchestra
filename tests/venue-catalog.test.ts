@@ -10,7 +10,7 @@ import {
   templateAdapter,
 } from "../src/venue-catalog.js";
 import { adaptVenueKit, manualCcfAdapter } from "../src/venue-install.js";
-import { resolveTemplate } from "../src/venues.js";
+import { resolveTemplate, templateRoot } from "../src/venues.js";
 import { scratchDir } from "./fixtures.js";
 
 describe("venue catalog", () => {
