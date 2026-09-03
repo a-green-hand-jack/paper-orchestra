@@ -58,6 +58,16 @@ export function unresolvedMarkers(tex: string): string[] {
   for (const match of tex.matchAll(/%\s*TODO\([^)]*\)[^\n]*/g)) {
     if (match[0]) found.push(match[0].trim());
   }
+  // Both the bundled and official CVPR kits ship prose that describes how an
+  // abstract should be written. It is valid LaTeX, so compilation alone cannot
+  // distinguish it from a completed abstract. Treat those known scaffolds as
+  // unresolved content rather than delivering a polished-looking blank paper.
+  for (const match of tex.matchAll(/^\s*Abstract here\.\s*$/gim)) {
+    if (match[0]) found.push(match[0].trim());
+  }
+  for (const match of tex.matchAll(/The\s+ABSTRACT\s+is\s+to\s+be\s+fully\s+justified\s+italicized\s+text/gi)) {
+    if (match[0]) found.push(match[0].replace(/\s+/g, " "));
+  }
   return found;
 }
 
