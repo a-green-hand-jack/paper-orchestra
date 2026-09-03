@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { UserFacingError } from "./errors.js";
@@ -56,6 +57,39 @@ export async function startRuntime(
     directory,
     close: () => server.close(),
   };
+}
+
+export interface AttachedTui {
+  readonly process: ChildProcess;
+  readonly exited: Promise<number>;
+}
+
+/** Attach OpenCode's native terminal UI to the controller-owned server. */
+export function tuiAttachArgs(runtime: Pick<Runtime, "serverUrl">, directory: string): string[] {
+  return ["attach", runtime.serverUrl, "--dir", directory];
+}
+
+export function attachTui(runtime: Runtime, directory: string): AttachedTui {
+  const child = spawn(
+    "opencode",
+    tuiAttachArgs(runtime, directory),
+    {
+      stdio: "inherit",
+      env: process.env,
+    },
+  );
+  const exited = new Promise<number>((resolve) => {
+    child.once("error", () => resolve(127));
+    child.once("exit", (code, signal) => resolve(code ?? (signal ? 130 : 0)));
+  });
+  return { process: child, exited };
+}
+
+export async function stopTui(tui: AttachedTui): Promise<void> {
+  if (tui.process.exitCode === null && tui.process.signalCode === null) {
+    tui.process.kill("SIGTERM");
+  }
+  await tui.exited;
 }
 
 /**

@@ -58,7 +58,8 @@ It separates hard requirements from optional capabilities, so an absent
 | Everything | Node.js >= 20; [OpenCode](https://opencode.ai) on `PATH`, authenticated (`opencode auth login`) |
 | Building the PDF | `pdflatex`, `bibtex`, `pdftotext`, `pdftoppm` |
 | Literature retrieval | the [`bohr`](https://www.bohrium.com) CLI, logged in — about 0.05 CNY per search |
-| `--use-plotting` | `python3` with `matplotlib` |
+| Code-generated figures | `python3` with `matplotlib` |
+| Text-to-image figures | an executable `PAPER_ORCHESTRA_IMAGE_ADAPTER` |
 
 ## Usage
 
@@ -78,9 +79,23 @@ cd my-paper/
 paper-orchestra write --allow-lkm-spend
 ```
 
-That is the whole flow. It defaults to the current directory, the CVPR 2025
-template, and OpenCode's own default model, and writes the finished PDF into a
-timestamped workspace.
+This is the interactive mode: PaperOrchestra creates a durable workspace,
+starts the shared controller, and attaches OpenCode's native TUI. You can inspect
+the stage sessions and talk to the writing agent while the controller keeps
+validation, checkpoints, and approval state on disk. Closing the TUI preserves
+the workspace; run `paper-orchestra resume <workspace>` to continue it.
+
+For an autonomous run or a call from another agent, use the same command with
+`--headless`. Add `--json` for NDJSON events followed by one stable result object:
+
+```bash
+paper-orchestra write --headless --json --allow-lkm-spend -o ./paper-run
+paper-orchestra status ./paper-run --json
+paper-orchestra validate ./paper-run --json
+```
+
+The result object includes the absolute workspace, run state, current and next
+stage, validation failures, and paths to the LaTeX, bibliography, and final PDF.
 
 `--allow-lkm-spend` is required because literature retrieval costs real money.
 Without it the run stops before searching and tells you what it would have
@@ -112,6 +127,7 @@ paper-orchestra write --template ./my-template --allow-lkm-spend
 | `--use-plotting` | Generate figures from your data, not just place supplied ones |
 | `--mode collaborative` | Pause for approval at four gates |
 | `--headless` | Do not attach the OpenCode TUI |
+| `--json` | Emit NDJSON events and a stable machine-readable result |
 | `--target-citations <n>` | How many distinct sources to cite, capped by how many relevant ones retrieval found (default: 20) |
 | `--max-lkm-calls <n>` | Ceiling on paid retrieval calls (default: 40) |
 | `--research-cutoff <yyyy-mm>` | Treat nothing published after this as prior work |
@@ -126,6 +142,7 @@ paper-orchestra validate [dir]    # re-run every check without calling a model
 paper-orchestra resume [dir]      # continue from the first unfinished stage
 paper-orchestra approve [dir]     # release a collaborative gate
 paper-orchestra history [dir]     # the checkpoint timeline
+paper-orchestra checkpoint [dir]  # record a manual checkpoint
 paper-orchestra doctor
 ```
 
@@ -172,9 +189,10 @@ faked by a claim in a transcript:
   from Crossref and DataCite, scored for relevance against the paper's own
   topic, and written to disk *before* the model sees them. The model can only
   cite what retrieval actually found.
-- **Figure rendering** — the model writes a matplotlib script; the controller
-  executes it in a scoped directory with no network. A figure exists because a
-  process produced pixels.
+- **Figure generation and review** — the outline agent selects a code or
+  text-to-image route. The controller executes code in a network-disabled
+  directory or calls an explicit image adapter, then visually reviews the
+  rendered output before it can pass.
 - **LaTeX builds** — four-pass `pdflatex`/`bibtex`, diagnosed from the final log.
 - **PDF page rendering** for visual review.
 
@@ -207,13 +225,21 @@ directory.
 
 ### Model-agnostic
 
-Every call goes through an OpenCode session, so the provider is a flag and can
-differ per stage. Figures are generated as *code*, not as images, so figure
-generation is model-agnostic too — any model that writes Python can do it.
+Every writing and reviewing call goes through an OpenCode session, so the
+provider is a flag and can differ per stage. Figure generation also has two
+explicit routes. Quantitative plots default to controller-executed code and must
+produce PDF. Conceptual diagrams default to text-to-image through an adapter:
 
-The one thing this rules out is conceptual **diagrams**, which need an
-image-generation endpoint OpenCode does not expose. Supply those yourself under
-`figures/`; the pipeline places them and notes the ones it skipped.
+```bash
+export PAPER_ORCHESTRA_IMAGE_ADAPTER=/absolute/path/to/image-adapter
+paper-orchestra write --use-plotting --allow-lkm-spend
+```
+
+The adapter reads one JSON request from stdin and returns one JSON object with
+`provider`, `model`, `output_path`, and optional `parameters`. Its provider,
+model, prompt, parameters, route, and output are recorded in
+`plotting_results.json`. If a requested route is unavailable, the stage stops
+with setup guidance instead of silently omitting the figure.
 
 ## The pipeline
 
@@ -231,10 +257,11 @@ own topic, and written to disk before the model sees them. The model can only
 cite what retrieval found, which is what makes a fabricated reference
 impossible rather than merely discouraged.
 
-Figures (stage 3) are matplotlib scripts the model writes and the **controller**
-executes in a scoped directory with no network. Conceptual diagrams need an
-image-generation endpoint that OpenCode does not expose, so they must be
-supplied under `source/figures/`.
+Figures (stage 3) use the route selected in `outline.json`. Code generation runs
+in a scoped directory with no network and accepts PDF only; text-to-image uses
+the configured provider adapter. Both outputs are rendered to pixels, attached
+to a visual critic, and repaired once or fail with the critic's concrete finding.
+Supplied figures continue to work without either generation dependency.
 
 ## Workspace layout
 

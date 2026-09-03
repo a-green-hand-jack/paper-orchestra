@@ -13,6 +13,8 @@ import { z } from "zod";
 /** Aspect ratios the plotting prompt offers. */
 export const AspectRatioSchema = z.string().regex(/^\d+:\d+$/, "expected W:H, e.g. 16:9");
 
+export const FigureRouteSchema = z.enum(["auto", "code", "text_to_image"]);
+
 export const PlotSpecSchema = z
   .object({
     /**
@@ -22,8 +24,12 @@ export const PlotSpecSchema = z
     figure_id: z.string().min(1, "figure_id is used as a filename and cannot be empty"),
     title: z.string().default(""),
     plot_type: z.enum(["plot", "diagram"]).default("plot"),
+    /** Selected by the outline agent; `auto` is resolved deterministically by the controller. */
+    render_route: FigureRouteSchema.default("auto"),
     data_source: z.string().default("both"),
     objective: z.string().default(""),
+    /** Provider-ready visual brief for the text-to-image route. */
+    generation_prompt: z.string().default(""),
     aspect_ratio: AspectRatioSchema.default("16:9"),
   })
   .passthrough();
@@ -159,6 +165,7 @@ export const PlottingResultSchema = z
     figure_id: z.string().min(1),
     title: z.string().default(""),
     task_name: z.enum(["plot", "diagram"]).default("plot"),
+    render_route: z.enum(["code", "text_to_image"]).default("code"),
     description: z.string().default(""),
     caption: z.string().default(""),
     aspect_ratio: z.string().default("16:9"),
@@ -167,12 +174,22 @@ export const PlottingResultSchema = z
         z
           .object({
             round: z.number().int().nonnegative(),
+            passed: z.boolean().default(true),
             suggestions: z.string().default(""),
             revised_description: z.string().default(""),
           })
           .passthrough(),
       )
       .default([]),
+    generation_provenance: z
+      .object({
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        prompt: z.string().min(1),
+        parameters: z.record(z.unknown()).default({}),
+      })
+      .passthrough()
+      .optional(),
     /** Absent when the figure failed to render. */
     image_path: z.string().optional(),
   })

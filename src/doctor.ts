@@ -1,5 +1,6 @@
 import { execa } from "execa";
 import type { Check } from "./state/schema.js";
+import { textToImageCapability } from "./imagegen.js";
 
 async function which(binary: string): Promise<string | null> {
   try {
@@ -114,6 +115,13 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
     detail:
       matplotlib ??
       "not importable in the system python - `--use-plotting` needs a provisioned venv",
+  });
+
+  const imageAdapter = textToImageCapability();
+  probes.push({
+    name: "image provider adapter (text-to-image)",
+    satisfied: imageAdapter.ok,
+    detail: imageAdapter.detail,
   });
 
   return { checks, probes, ok: checks.every((c) => c.passed) };

@@ -37,8 +37,8 @@ actual numbers. `.brain/input/` holds the normalized idea and experimental log.
 - Use `matplotlib` (`numpy` is available). Do not import seaborn, pandas,
   scienceplots or any package beyond matplotlib and numpy.
 - Save with `plt.savefig("{figure_id}.pdf", bbox_inches="tight", dpi=300)`,
-  a **relative** filename, into the current directory. PDF is preferred over
-  PNG: the manuscript is typeset with LaTeX and vector art stays sharp.
+  a **relative** filename, into the current directory. PDF is mandatory for
+  this route; a PNG or JPEG output is rejected.
 - Set the figure size to match the aspect ratio, e.g. `figsize=(8, 4.5)` for 16:9.
 - Write nothing outside the current directory and call no subprocess.
 
@@ -54,6 +54,10 @@ actual numbers. `.brain/input/` holds the normalized idea and experimental log.
 - **Axis labels carry units.** A bare "Score" is not a label; "Jaccard (%)" is.
 - **No title inside the figure.** The LaTeX caption supplies it, and a title
   baked into the image duplicates the caption and wastes column height.
+- Keep labels, ticks, annotations, legends, and panels inside their bounds with
+  no internal overlap or clipped content. The controller rasterizes the PDF and
+  sends the rendered image to a visual critic; visible defects trigger one
+  bounded repair attempt and then fail explicitly.
 - **Label the data, not the legend.** Where two or three series can be labelled
   directly next to their lines, that reads better than a legend box.
 

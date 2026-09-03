@@ -37,10 +37,15 @@ fi
 
 # --- Source ----------------------------------------------------------------
 
-cleanup() { [ -n "${TMPDIR_CLONE:-}" ] && rm -rf "$TMPDIR_CLONE"; }
+cleanup() {
+  if [ -n "${TMPDIR_CLONE:-}" ]; then
+    rm -rf "$TMPDIR_CLONE"
+  fi
+}
 trap cleanup EXIT
 
-if [ -f "package.json" ] && grep -q '"name": "paper-orchestra"' package.json 2>/dev/null; then
+if [ -f "package.json" ] \
+  && grep -Eq '"name"[[:space:]]*:[[:space:]]*"paper-orchestra"' package.json 2>/dev/null; then
   SRC="$(pwd)"
   bold "Installing paper-orchestra from $SRC"
 else

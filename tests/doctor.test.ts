@@ -18,6 +18,7 @@ describe("doctor", () => {
     const names = probes.map((p) => p.name);
     expect(names.some((n) => n.includes("matplotlib"))).toBe(true);
     expect(names.some((n) => n.includes("pdftoppm"))).toBe(true);
+    expect(names.some((n) => n.includes("image provider adapter"))).toBe(true);
   });
 
   it("never lets a probe influence the pass/fail verdict", async () => {
