@@ -74,6 +74,15 @@ describe("unresolvedMarkers", () => {
     expect(found[0]).toContain("TODO(paper-orchestra)");
   });
 
+  it("finds the official CVPR abstract scaffold even though it compiles", () => {
+    const found = unresolvedMarkers("The ABSTRACT is to be fully justified italicized text, at the top of the left-hand column.");
+    expect(found).toEqual(["The ABSTRACT is to be fully justified italicized text"]);
+  });
+
+  it("finds the bundled abstract placeholder", () => {
+    expect(unresolvedMarkers("\\begin{abstract}\nAbstract here.\n\\end{abstract}")).toEqual(["Abstract here."]);
+  });
+
   it("passes a finished manuscript", () => {
     expect(unresolvedMarkers("\\section{Intro}\nReal prose \\cite{a2024x}.")).toEqual([]);
   });

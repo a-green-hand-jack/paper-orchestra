@@ -26,6 +26,7 @@ CRITICAL INSTRUCTIONS:
 
 1. Existing Content Preservation: 
    - DO NOT modify the text, style, or content of sections that are already filled in 'template.tex'. 
+   - Replace every submission scaffold and placeholder prose in the template, especially any sample abstract instructions. Those instructions are not manuscript content.
    - Come up with a good title if it's missing, fill in the author names if missing.
    - Keep the preamble (packages) exactly as is.
 
