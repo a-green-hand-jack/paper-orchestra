@@ -35,7 +35,7 @@ import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from 
 import { planQueries } from "./queries.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
-import { copyFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { FigureInfoSchema } from "./artifacts.js";
 import { ensureDir } from "./files.js";
@@ -127,7 +127,11 @@ async function drive(
   process.once("SIGTERM", onSignal);
 
   try {
-    state = updateRunState(workspace, (current) => ({ ...current, status: "running" }));
+    state = updateRunState(workspace, (current) => ({
+      ...current,
+      status: "running",
+      error: null,
+    }));
 
     for (;;) {
       const stage = resumeStage(readRunState(workspace));
@@ -157,6 +161,7 @@ async function drive(
       status: "completed",
       current_stage: null,
       completed_at: new Date().toISOString(),
+      error: null,
     }));
     await checkpoint({
       workspace,
@@ -715,7 +720,7 @@ async function runPlottingGeneration(
     }
   }
   if (imageCount > 0) {
-    const capability = textToImageCapability();
+    const capability = await textToImageCapability();
     if (!capability.ok) throw new UserFacingError(capability.detail);
   }
 
@@ -805,7 +810,17 @@ async function runPlottingGeneration(
           spec.generation_prompt.trim() ||
           `${spec.title}. ${spec.objective}. Create a clear publication figure with aspect ratio ` +
             `${spec.aspect_ratio}; do not add unsupported quantitative claims.`;
-        const generationPrompt = attempt === 0 ? basePrompt : `${basePrompt}\nRepair: ${failure}`;
+        const repairs = [
+          ...criticHistory.map((review) => String(review.suggestions ?? "")),
+          failure.replace(/^visual review failed:\s*/i, ""),
+        ]
+          .map((repair) => repair.trim())
+          .filter((repair, index, all) => repair.length > 0 && all.indexOf(repair) === index);
+        const generationPrompt =
+          attempt === 0
+            ? basePrompt
+            : `${basePrompt}\n\nRepair every issue found by visual review:\n` +
+              repairs.map((repair) => `- ${repair}`).join("\n");
         try {
           const generated = await generateTextImage({
             figureId: spec.figure_id,
@@ -966,7 +981,11 @@ function publishSuppliedFigures(workspace: string): number {
     [".pdf", ".png", ".jpg", ".jpeg"].includes(extname(name).toLowerCase()),
   );
   for (const name of supplied) {
-    copyFileSync(join(sourceFigures, name), join(target, name));
+    const destination = join(target, name);
+    // Imported source material is deliberately read-only. Remove the prior
+    // published copy first so resuming plotting remains idempotent.
+    rmSync(destination, { force: true });
+    copyFileSync(join(sourceFigures, name), destination);
   }
 
   // Prefer captions the user supplied; fall back to the stem of the filename.

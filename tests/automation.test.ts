@@ -25,4 +25,20 @@ describe("agent-callable CLI result", () => {
       artifacts: { latex: null, final_pdf: null },
     });
   });
+
+  it("does not report a stale failure after a recovered run completes", async () => {
+    const { workspace } = await prepared();
+    const state = updateRunState(workspace, (current) => ({
+      ...current,
+      status: "completed",
+      current_stage: null,
+      error: "an earlier plotting attempt failed",
+    }));
+
+    expect(runResult(workspace, state)).toMatchObject({
+      ok: true,
+      run_state: "completed",
+      validation_failures: [],
+    });
+  });
 });
