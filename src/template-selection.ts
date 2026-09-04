@@ -25,6 +25,20 @@ export interface AutomaticTemplateCandidate {
   readonly id: "cvpr2026" | "iclr2026" | "nature-portfolio";
   readonly title: string;
   readonly guidance: string;
+  /**
+   * The bundled edition to use when the newest one cannot be fetched.
+   *
+   * Two of the three candidates are `official-archive` adapters, which means a
+   * checksum-pinned download. Offering only those made the bundled templates
+   * unreachable from `--template auto`: an input with no template of its own,
+   * on a machine with no network, could not get a vision or machine-learning
+   * template at all -- it downloaded or it failed, even though a perfectly good
+   * `cvpr2025` sits inside the package.
+   *
+   * A different year of the same venue is a small, stateable difference. Being
+   * unable to write the paper is not.
+   */
+  readonly bundledFallback: string;
 }
 
 /**
@@ -38,16 +52,19 @@ export const AUTOMATIC_TEMPLATE_CANDIDATES: readonly AutomaticTemplateCandidate[
     id: "cvpr2026",
     title: "CVPR 2026",
     guidance: "Computer vision, images, video, visual perception, and vision-language work whose primary contribution is visual understanding.",
+    bundledFallback: "cvpr2025",
   },
   {
     id: "iclr2026",
     title: "ICLR 2026",
     guidance: "Machine learning, representations, optimization, and general deep-learning methods not primarily framed as computer vision.",
+    bundledFallback: "iclr2025",
   },
   {
     id: "nature-portfolio",
     title: "Nature Portfolio authoring scaffold",
     guidance: "Physics, chemistry, biology, earth science, medicine, and other natural-science research. This is a project-authored scaffold, not an official Nature journal kit.",
+    bundledFallback: "nature-portfolio",
   },
 ];
 
@@ -72,6 +89,8 @@ export type OfficialTemplateInstaller = (id: string, destination: string) => Pro
 
 export interface ResolveTemplateSelectionOptions extends TemplateSelectionRequest {
   readonly requested: string;
+  /** When "offline", never attempt a kit download; use the bundled edition. */
+  readonly networkPolicy?: "online" | "offline";
   /** Test seam for a deterministic selector; production uses OpenCode. */
   readonly decide?: TemplateDecider;
   /** Test seam for the checksum-pinned installer. */
@@ -208,12 +227,23 @@ function manualAdapterFor(id: string): TemplateAdapter | undefined {
   return templateAdapter(id) ?? manualCcfTemplateAdapterForId(id) ?? manualMathTemplateAdapterForId(id);
 }
 
+/** How an adapter's directory was obtained, so a run can record a fallback. */
+export interface ResolvedAdapterTemplate {
+  readonly directory: string;
+  /** Set when the requested edition was unavailable and a bundled one was used. */
+  readonly fellBackTo: string | null;
+  readonly why: string | null;
+}
+
 async function resolveAdapterTemplate(
   adapter: TemplateAdapter,
   cacheDirectory: string,
   installOfficial: OfficialTemplateInstaller,
-): Promise<string> {
-  if (adapter.source.kind === "bundled") return resolveTemplate(adapter.id);
+  options: { readonly fallback?: string; readonly offline?: boolean } = {},
+): Promise<ResolvedAdapterTemplate> {
+  if (adapter.source.kind === "bundled") {
+    return { directory: resolveTemplate(adapter.id), fellBackTo: null, why: null };
+  }
   if (adapter.source.kind === "manual") {
     throw new UserFacingError(
       `${adapter.id} requires the exact official author kit. Normalize it with \`paper-orchestra templates adapt\` ` +
@@ -221,11 +251,44 @@ async function resolveAdapterTemplate(
     );
   }
 
+  // An already-downloaded kit is the requested edition and needs no network.
   const destination = join(cacheDirectory, adapter.id);
-  if (existsSync(destination)) return resolveTemplate(destination);
-  ensureDir(dirname(destination));
-  await installOfficial(adapter.id, destination);
-  return resolveTemplate(destination);
+  if (existsSync(destination)) {
+    return { directory: resolveTemplate(destination), fellBackTo: null, why: null };
+  }
+
+  // Falling back rather than failing, and only for an automatic choice: the
+  // user did not ask for this edition, we did, so a network problem is ours to
+  // absorb. An EXPLICIT `--template cvpr2026` still fails loudly, because there
+  // the edition is the instruction and silently substituting another year would
+  // be answering a different question.
+  const fallback = options.fallback;
+  if (!fallback) {
+    ensureDir(dirname(destination));
+    await installOfficial(adapter.id, destination);
+    return { directory: resolveTemplate(destination), fellBackTo: null, why: null };
+  }
+
+  if (options.offline) {
+    return {
+      directory: resolveTemplate(fallback),
+      fellBackTo: fallback,
+      why: `this run is --network-policy offline, so the pinned ${adapter.id} kit could not be fetched`,
+    };
+  }
+
+  try {
+    ensureDir(dirname(destination));
+    await installOfficial(adapter.id, destination);
+    return { directory: resolveTemplate(destination), fellBackTo: null, why: null };
+  } catch (error) {
+    const detail = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
+    return {
+      directory: resolveTemplate(fallback),
+      fellBackTo: fallback,
+      why: `the pinned ${adapter.id} kit could not be fetched (${detail.slice(0, 160)})`,
+    };
+  }
 }
 
 async function resolveExplicitTemplate(
@@ -238,10 +301,8 @@ async function resolveExplicitTemplate(
   }
   const adapter = manualAdapterFor(requested);
   if (!adapter) return { templateId: requested, directory: resolveTemplate(requested) };
-  return {
-    templateId: adapter.id,
-    directory: await resolveAdapterTemplate(adapter, cacheDirectory, installOfficial),
-  };
+  const resolved = await resolveAdapterTemplate(adapter, cacheDirectory, installOfficial);
+  return { templateId: adapter.id, directory: resolved.directory };
 }
 
 /**
@@ -271,10 +332,23 @@ export async function resolveTemplateSelection(
   if (!adapter) {
     throw new UserFacingError(`automatic template "${decision.templateId}" is not registered`);
   }
+  const candidate = AUTOMATIC_TEMPLATE_CANDIDATES.find((entry) => entry.id === decision.templateId);
+  const resolved = await resolveAdapterTemplate(adapter, cacheDirectory, installer, {
+    ...(candidate ? { fallback: candidate.bundledFallback } : {}),
+    ...(options.networkPolicy === "offline" ? { offline: true } : {}),
+  });
+  // The fallback goes in the rationale because that string is what `status`
+  // prints and what `scope_digest` covers -- so "we did not use the edition we
+  // chose" is recorded in the run rather than only in a log line nobody reads.
+  const rationale = resolved.fellBackTo
+    ? `${decision.rationale} Used the bundled ${resolved.fellBackTo} instead: ${resolved.why}.`
+        .slice(0, 500)
+    : decision.rationale;
   return {
     requested: options.requested,
     mode: "automatic",
-    ...decision,
-    directory: await resolveAdapterTemplate(adapter, cacheDirectory, installer),
+    templateId: resolved.fellBackTo ?? decision.templateId,
+    rationale,
+    directory: resolved.directory,
   };
 }

@@ -273,6 +273,7 @@ program
           requested,
           rawMaterials,
           model: defaultModel,
+          networkPolicy: options.networkPolicy as "online" | "offline",
         });
 
     const result = await prepareWorkspace({
