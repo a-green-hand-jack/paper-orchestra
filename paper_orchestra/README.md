@@ -1,13 +1,23 @@
-# Harbor agent adapter
+# PaperOrchestra as a Harbor agent
 
 Runs PaperOrchestra as a Harbor agent, so the benchmark drives it the way it
 drives every other agent.
 
+Install once, into Harbor's own environment -- it lives in an isolated
+`uv tool` venv and cannot otherwise see this repository:
+
 ```bash
-PYTHONPATH=$(git rev-parse --show-toplevel) harbor run \
-  --agent harbor_agent.paper_orchestra:PaperOrchestra \
+uv pip install -e . --python "$(dirname "$(readlink -f "$(which harbor)")")/python"
+```
+
+Editable, so the adapter that runs is the one in the checkout. Then, from
+anywhere:
+
+```bash
+harbor run \
+  --agent paper_orchestra:PaperOrchestra \
   --model openai/gpt-5.6-sol \
-  -p paperwrite-bench-short/pwb-0001 \
+  -p datasets/paper-writing-exam/paperwrite-bench-short/pwb-0001 \
   --agent-timeout-multiplier 2.5
 ```
 

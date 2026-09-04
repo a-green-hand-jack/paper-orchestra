@@ -1,0 +1,26 @@
+# Python packaging exists only for the Harbor agent adapter.
+#
+# PaperOrchestra itself is the TypeScript package described by `package.json`.
+# This file makes `paper_orchestra/` importable by Harbor's own interpreter,
+# which lives in an isolated `uv tool` environment and therefore cannot see
+# this repository:
+#
+#   uv pip install -e . --python "$(dirname "$(readlink -f "$(which harbor)")")/python"
+#
+# Installed editable, so the adapter that runs is the one in the checkout.
+[project]
+name = "paper-orchestra-harbor"
+version = "2.0.0"
+description = "Harbor agent adapter for PaperOrchestra"
+requires-python = ">=3.11"
+# `harbor` is deliberately not a dependency: this is installed INTO Harbor's
+# environment, which already has it, and declaring it would invite pip to
+# resolve a second copy.
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["paper_orchestra"]
