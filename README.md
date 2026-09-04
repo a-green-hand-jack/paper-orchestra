@@ -101,6 +101,13 @@ stage, validation failures, and paths to the LaTeX, bibliography, and final PDF.
 Without it the run stops before searching and tells you what it would have
 spent — roughly 2 CNY for a full paper.
 
+**Unless you bring your own bibliography.** Put a `references.bib` in your
+materials and PaperOrchestra uses it instead of searching: zero retrieval calls,
+zero spend, and `--allow-lkm-spend` is not needed. The file is used verbatim —
+never rewritten, never added to — and the manuscript may only cite keys it
+defines. A bibliography is a decision you have already made, so a run that has
+one is free.
+
 A worked example lives in `examples/`.
 
 ### Common variations
@@ -197,7 +204,10 @@ faked by a claim in a transcript:
 - **Literature retrieval** — candidates come from Bohrium LKM, are enriched
   from Crossref and DataCite, scored for relevance against the paper's own
   topic, and written to disk *before* the model sees them. The model can only
-  cite what retrieval actually found.
+  cite what retrieval actually found. When you supply a `references.bib`,
+  retrieval is skipped and every entry traces to that digest-locked file
+  instead — a stronger guarantee, since the reference set never came from a
+  model at all.
 - **Figure generation and review** — the outline agent selects a code or
   text-to-image route. The controller executes code in a network-disabled
   directory or calls an explicit image adapter, then visually reviews the
@@ -264,17 +274,24 @@ with setup guidance instead of silently omitting the figure.
 
 | # | Stage | Produces |
 |---|---|---|
-| 1 | `outline` | `outline.json` — section plan, citation hints, figure plan |
-| 2 | `literature` | `references.bib`, `citation_map.json`, `candidates.json` |
-| 3 | `plotting` | `figures/*`, `plotting_results.json` |
-| 4 | `section_writing` | `raw_draft.tex` |
-| 5 | `refinement` | `final_paper.tex`, `final_paper.pdf` |
+| 1 | `triage` | `synthesized/idea.md`, `synthesized/experimental_log.md`, `triage.json` |
+| 2 | `outline` | `outline.json` — section plan, citation hints, figure plan |
+| 3 | `literature` | `references.bib`, `citation_map.json`, `candidates.json` |
+| 4 | `plotting` | `figures/*`, `plotting_results.json` |
+| 5 | `section_writing` | `raw_draft.tex` |
+| 6 | `refinement` | `final_paper.tex`, `final_paper.pdf` |
 
-Retrieval (stage 2) is controller-owned: candidates come from Bohrium LKM, are
+Two stages need no model when you have already done their work. Triage is
+skipped when you supply both pre-writing documents, and retrieval is skipped
+when you supply a `references.bib` — in both cases the controller records what
+it used and the validators confirm it, at zero cost.
+
+Retrieval (stage 3) is controller-owned: candidates come from Bohrium LKM, are
 enriched from Crossref and DataCite, scored for relevance against the paper's
 own topic, and written to disk before the model sees them. The model can only
-cite what retrieval found, which is what makes a fabricated reference
-impossible rather than merely discouraged.
+cite what retrieval found — or, with a supplied bibliography, only what that
+file defines — which is what makes a fabricated reference impossible rather
+than merely discouraged.
 
 Figures (stage 3) use the route selected in `outline.json`. Code generation runs
 in a scoped directory with no network and accepts PDF only; text-to-image uses

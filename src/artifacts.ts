@@ -135,13 +135,21 @@ export const CandidateSchema = z
     citation_key: z.string().min(1),
     title: z.string().min(1),
     /**
-     * Which retrieval backend produced this record. `bohrium_lkm` is what is
-     * implemented; the others are reserved so adding a backend does not need a
-     * schema migration.
+     * Where this record came from. `bohrium_lkm` is the retrieval backend that
+     * is implemented and `semantic_scholar`/`arxiv` are reserved, so adding one
+     * does not need a schema migration.
+     *
+     * `supplied` is not a backend: it means the entry came from a bibliography
+     * the author put under `source/`, so its provenance is the digest-locked
+     * file rather than a query we paid for. It is recorded here for the reader
+     * of the artifact; `bibliographyProvenance` decides which path a run is on
+     * from `source/` itself, never from this field, because everything under
+     * `.brain/` is writable by the agent being validated.
      */
-    provider: z.enum(["bohrium_lkm", "semantic_scholar", "arxiv"]),
+    provider: z.enum(["bohrium_lkm", "semantic_scholar", "arxiv", "supplied"]),
     /** The provider's own identifier, so a record can be re-fetched and audited. */
     provider_id: z.string().min(1),
+    /** When the record was obtained -- retrieved, or ingested from a supplied file. */
     retrieved_at: z.string().min(1),
     authors: z.array(z.string()).default([]),
     venue: z.string().default(""),

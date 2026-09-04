@@ -214,7 +214,8 @@ program
   )
   .option(
     "--allow-lkm-spend",
-    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call)",
+    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call); " +
+      "not needed when the materials supply a references.bib",
     false,
   )
   .option("--max-lkm-calls <n>", "ceiling on literature retrieval calls", "40")
@@ -376,7 +377,8 @@ program
   .argument("[workspace]", "run workspace", ".")
   .option(
     "--allow-lkm-spend",
-    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call)",
+    "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call); " +
+      "not needed when the materials supply a references.bib",
     false,
   )
   .option("--headless", "resume without attaching the OpenCode TUI", false)

@@ -22,6 +22,7 @@ import {
   unresolvedMarkers,
   usedPackages,
 } from "./latex.js";
+import { suppliedBibliography } from "./bibliography.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
 import type { StageId } from "./stages.js";
@@ -231,10 +232,18 @@ function citationFloorCheck(workspace: string, manuscriptRel: string, scope: Sco
   const tex = readIfExists(join(workspace, manuscriptRel));
   if (tex === null) return fail(name, `expected ${manuscriptRel} to exist`);
 
-  const parsed = parseArtifact(workspace, ARTIFACTS.citationMap, CitationMapSchema, name);
-  if (!parsed.ok) return parsed.check;
+  // Counted from the bibliography, which is both what the message below claims
+  // and what an external grader resolves citations against. It used to be
+  // counted from `citation_map.json`, so this validator and
+  // `citation_integrity` could report two different numbers for "available",
+  // and neither matched the file the two of them were talking about. The counts
+  // are identical on the retrieval path -- the controller writes both files from
+  // one candidate list -- and only the origin-independent one is right for a
+  // bibliography the author supplied.
+  const bib = readIfExists(join(workspace, ARTIFACTS.references));
+  if (bib === null) return fail(name, `expected ${ARTIFACTS.references} to exist`);
 
-  const available = Object.keys(parsed.value).length;
+  const available = bibKeys(bib).length;
   const floor = citationFloor(available, scope);
   const cited = new Set(citedKeys(tex)).size;
 
@@ -242,7 +251,7 @@ function citationFloorCheck(workspace: string, manuscriptRel: string, scope: Sco
     return fail(
       name,
       `expected the manuscript to cite at least ${floor} distinct sources; it cites ` +
-        `${cited}. ${available} vetted sources are available in references.bib. Add ` +
+        `${cited}. ${available} sources are available in references.bib. Add ` +
         `citations from the existing bibliography where they genuinely support a claim -- ` +
         "do not invent keys, and do not pad a single sentence with unrelated references.",
     );
@@ -318,7 +327,22 @@ function figureRender(workspace: string, scope: Scope): Check {
   return pass(name, `${parsed.value.length} generated figure(s) render to real images`);
 }
 
-/** No two bibliography entries may describe the same paper. */
+/**
+ * No two bibliography entries may describe the same paper.
+ *
+ * This targets OUR retrieval: two providers returning one paper under different
+ * ids is a defect in the merge, and a manuscript citing it twice reads as
+ * padding. It does not target the author's own library.
+ *
+ * On a supplied bibliography the duplicates are an editorial fact about a file
+ * we were told to use as-is. `pwb-0001`'s 114 real entries contain seven such
+ * pairs -- a short hand-written key beside a verbose generated one for the same
+ * paper (`llava` / `liu2023visualinstructiontuning`) -- which is simply what a
+ * bibliography merged from several tools looks like. Failing the stage for it
+ * would reject the file for something BibTeX itself accepts, and something the
+ * external grader does not care about. So the duplicates are reported, loudly
+ * enough to be visible in the checkpoint, and the stage proceeds.
+ */
 function literatureDedup(workspace: string): Check {
   const name = "literature_dedup";
   const parsed = parseArtifact(workspace, ARTIFACTS.citationMap, CitationMapSchema, name);
@@ -330,6 +354,21 @@ function literatureDedup(workspace: string): Check {
     byTitle.set(normalized, [...(byTitle.get(normalized) ?? []), key]);
   }
   const collisions = [...byTitle.values()].filter((keys) => keys.length > 1);
+
+  const suppliedRel = suppliedBibliography(workspace);
+  if (suppliedRel) {
+    if (collisions.length === 0) {
+      return pass(name, `${byTitle.size} distinct references in the supplied bibliography`);
+    }
+    return pass(
+      name,
+      `${byTitle.size} distinct papers across ${Object.keys(parsed.value).length} entries; ` +
+        `${suppliedRel} lists ${collisions.length} paper(s) more than once ` +
+        `(${collisions.map((keys) => keys.join("/")).join("; ")}). Supplied as-is; ` +
+        "cite one key per paper.",
+    );
+  }
+
   if (collisions.length > 0) {
     return fail(
       name,
@@ -341,16 +380,52 @@ function literatureDedup(workspace: string): Check {
 }
 
 /**
- * Every bibliography entry must trace to a retrieval record.
+ * Every bibliography entry must trace to something outside the model's reach.
  *
- * Absent from the Python entirely. Because the controller performs retrieval
- * and writes both files, this is mechanically checkable: an entry with no
- * candidate record was added by the model, which is the fabrication case.
+ * Absent from the Python entirely. Because the controller -- never the model --
+ * writes both sides of this comparison, it is mechanically checkable: an entry
+ * with nothing backing it was added by the model, which is the fabrication case.
+ *
+ * There are two origins and the evidence differs, so the check does too.
+ *
+ * The branch is decided by `suppliedBibliography`, which asks whether
+ * `source/references.bib` exists. That is deliberate: `source/` is digest-locked
+ * and read-only, whereas everything under `.brain/` is writable by the agent
+ * being validated (#28). Reading `provider: "supplied"` out of `candidates.json`
+ * would have let a model turn this check off by editing one string.
  */
 function bibliographyProvenance(workspace: string): Check {
   const name = "bibliography_provenance";
   const bib = readIfExists(join(workspace, ARTIFACTS.references));
   if (bib === null) return fail(name, `expected ${ARTIFACTS.references} to exist`);
+
+  const suppliedRel = suppliedBibliography(workspace);
+  if (suppliedRel) {
+    // Stronger than the retrieval path, not weaker: the reference set is a
+    // digest-locked file under `source/`, so `verifyLocks` would already have
+    // refused the run if it had changed since prepare. Comparing against
+    // `candidates.json` here instead would be circular -- the controller
+    // derives that file FROM this one.
+    const supplied = readIfExists(join(workspace, suppliedRel));
+    if (supplied === null) {
+      return fail(name, `expected the supplied bibliography ${suppliedRel} to be readable`);
+    }
+    const authored = new Set(bibKeys(supplied));
+    const invented = bibKeys(bib).filter((key) => !authored.has(key));
+    if (invented.length > 0) {
+      return fail(
+        name,
+        `expected every entry in ${ARTIFACTS.references} to come from the supplied ` +
+          `bibliography ${suppliedRel}; these do not appear in it: ${invented.join(", ")}. ` +
+          "Cite only from the supplied bibliography; do not add entries to it.",
+      );
+    }
+    return pass(
+      name,
+      `${authored.size} entries, each traced to the digest-locked ${suppliedRel}`,
+    );
+  }
+
   if (!existsSync(join(workspace, ARTIFACTS.candidates))) {
     return fail(
       name,
