@@ -5,7 +5,12 @@ import { checkpoint, initGit } from "../checkpoints.js";
 import { compactStamp } from "../timestamp.js";
 import { opencodeVersion } from "../doctor.js";
 import { ensureDir } from "../files.js";
-import { importDirectory, prepareBrainInput } from "../input.js";
+import { importDirectory, importTemplateFiles, prepareBrainInput } from "../input.js";
+import {
+  discoverTemplate,
+  templateLayout,
+  type TemplateDiscovery,
+} from "../template-discovery.js";
 import { formatModelRef } from "../model.js";
 import { paths } from "../paths.js";
 import { STAGES, type StageId } from "../stages.js";
@@ -19,8 +24,19 @@ import {
 
 export interface PrepareOptions {
   readonly workspace: string;
+  /**
+   * The one input: a directory holding whatever the author has. The template,
+   * the bibliography, the figures and the notes are all things that may or may
+   * not be in there, and finding them is our job rather than the author's.
+   */
   readonly rawMaterials: string;
-  readonly templateDir: string;
+  /**
+   * An explicit template, overriding discovery. Null means "look in the input,
+   * and fall back to a bundled venue if there is nothing there" -- which is
+   * the path a Harbor container takes, since it hands an agent one location
+   * and no way to name a second.
+   */
+  readonly templateDir: string | null;
   /** Immutable adapter id or user-supplied directory label selected before preparation. */
   readonly templateId?: string;
   readonly templateSelection?: "automatic" | "explicit";
@@ -81,6 +97,20 @@ export function currentYearMonth(): string {
  * directory before starting, so an interrupted paper is wiped rather than
  * continued.
  */
+/**
+ * What to record as the run's venue.
+ *
+ * `scope.venue` has no functional consumer -- it is printed by `status` and
+ * folded into `scope_digest` -- so its job is to tell a reader where the
+ * template came from. A discovered one says so and gives the path, which is
+ * the only way to tell from `run.json` alone that nobody named a template.
+ */
+function templateLabel(options: PrepareOptions, discovered: TemplateDiscovery | null): string {
+  if (options.templateId) return options.templateId;
+  if (discovered) return `discovered:${discovered.main}`;
+  return basename(resolve(options.templateDir as string));
+}
+
 export async function prepareWorkspace(options: PrepareOptions): Promise<PrepareResult> {
   const workspace = resolve(options.workspace);
   const p = paths(workspace);
@@ -107,8 +137,20 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     ensureDir(dir);
   }
 
-  const source = importDirectory(resolve(options.rawMaterials), p.source);
-  const template = importDirectory(resolve(options.templateDir), p.template);
+  const raw = resolve(options.rawMaterials);
+
+  // Discovery runs BEFORE the import, on the raw input, for two reasons. The
+  // template has to be kept out of `source/` rather than removed from it
+  // afterwards, and the import prunes noise directories -- so a kit sitting in
+  // `build/` would be invisible to anything looking at `source/` and visible
+  // to anything looking at the input, with no error either way.
+  const discovered = options.templateDir === null ? discoverTemplate(raw) : null;
+  const claimed = new Set(discovered?.templateFiles ?? []);
+
+  const source = importDirectory(raw, p.source, { exclude: claimed });
+  const template = discovered
+    ? importTemplateFiles(raw, p.template, templateLayout(discovered))
+    : importDirectory(resolve(options.templateDir as string), p.template);
 
   const scope: Scope = ScopeSchema.parse({
     plan: planFor(options.until ?? null),
@@ -116,10 +158,18 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     research_cutoff: options.researchCutoff,
     idea_filename: options.ideaFilename,
     experimental_log_filename: options.experimentalLogFilename,
-    venue: options.templateId ?? basename(resolve(options.templateDir)),
+    venue: templateLabel(options, discovered),
     ...(options.templateId ? { template_id: options.templateId } : {}),
-    ...(options.templateSelection ? { template_selection: options.templateSelection } : {}),
-    ...(options.templateRationale ? { template_rationale: options.templateRationale } : {}),
+    ...(options.templateSelection || discovered
+      ? { template_selection: options.templateSelection ?? "discovered" }
+      : {}),
+    ...(options.templateRationale || discovered
+      ? {
+          template_rationale:
+            options.templateRationale ??
+            `Found ${(discovered as TemplateDiscovery).main} in the supplied input.`,
+        }
+      : {}),
     network_policy: options.networkPolicy,
     max_lkm_calls: options.maxLkmCalls,
     target_citations: options.targetCitations,

@@ -15,9 +15,15 @@ import { permissionsFor } from "./permissions.js";
  */
 function assetRoot(): string {
   const here = dirname(fileURLToPath(import.meta.url));
+  // `src/assets/` is the source and `npm run build` copies it to `dist/assets/`,
+  // so it is always a sibling of the module doing the asking -- the same lookup
+  // whether the package is installed globally, linked, or run from a clone. The
+  // `../src` fallback is for a compiled-elsewhere layout, and `..` for the
+  // pre-move layout a stale install may still have.
   for (const candidate of [
+    resolve(here, "assets"),
+    resolve(here, "..", "src", "assets"),
     resolve(here, "..", "assets"),
-    resolve(here, "..", "..", "assets"),
   ]) {
     if (existsSync(join(candidate, "commands"))) return candidate;
   }

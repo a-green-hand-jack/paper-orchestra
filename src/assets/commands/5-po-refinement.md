@@ -1,5 +1,5 @@
 <!--
-Originally ported from methods/prompts/content_refinement_agent.py, which has since been removed (see MIGRATION.md).
+Originally ported from methods/prompts/content_refinement_agent.py, which has since been removed.
 
 THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
 There is no generator to rerun: scripts/port_prompts.py was removed with

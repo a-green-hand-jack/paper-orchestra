@@ -22,6 +22,7 @@ import {
 } from "./venue-catalog.js";
 import { adaptVenueKit, installOfficialVenue, manualCcfAdapter } from "./venue-install.js";
 import { AUTO_TEMPLATE, resolveTemplateSelection } from "./template-selection.js";
+import { discoverTemplate } from "./template-discovery.js";
 import { resolve } from "node:path";
 import { runResult } from "./automation.js";
 
@@ -239,21 +240,35 @@ program
     }
 
     const defaultModel = options.model ? parseModelRef(options.model as string) : null;
-    const selectedTemplate = await resolveTemplateSelection({
-      requested: options.template as string,
-      rawMaterials,
-      ideaFilename: options.ideaFilename as string,
-      experimentalLogFilename: options.experimentalLogFilename as string,
-      model: defaultModel,
-    });
+
+    // A template the author already has beats one we would go and choose. Only
+    // when the input holds none does the selector run -- and that is the one
+    // path here that costs a model call and may need the network, so skipping
+    // it is the common case rather than the exception.
+    //
+    // `prepareWorkspace` runs discovery again to act on it. Two calls of a
+    // deterministic function, so the answer is the same; the alternative is
+    // handing `prepare` a result it cannot verify, which would make it
+    // unusable on its own.
+    const requested = options.template as string;
+    const discoveredTemplate = requested === AUTO_TEMPLATE ? discoverTemplate(rawMaterials) : null;
+    const selectedTemplate = discoveredTemplate
+      ? null
+      : await resolveTemplateSelection({
+          requested,
+          rawMaterials,
+          ideaFilename: options.ideaFilename as string,
+          experimentalLogFilename: options.experimentalLogFilename as string,
+          model: defaultModel,
+        });
 
     const result = await prepareWorkspace({
       workspace,
       rawMaterials,
-      templateDir: selectedTemplate.directory,
-      templateId: selectedTemplate.templateId,
-      templateSelection: selectedTemplate.mode,
-      templateRationale: selectedTemplate.rationale,
+      templateDir: selectedTemplate?.directory ?? null,
+      templateId: selectedTemplate?.templateId,
+      templateSelection: selectedTemplate?.mode,
+      templateRationale: selectedTemplate?.rationale,
       mode: options.mode as "autonomous" | "collaborative",
       headless: Boolean(options.headless),
       usePlotting: Boolean(options.usePlotting),
