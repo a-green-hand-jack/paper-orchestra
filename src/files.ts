@@ -78,21 +78,43 @@ export function digestTree(root: string, files: readonly string[]): string {
 export interface WalkOptions {
   /** Directory names to skip entirely. */
   readonly skipDirs?: readonly string[];
+  /**
+   * Skip a directory by predicate, for families a fixed list cannot express
+   * (workspace directories are named `po-run-<timestamp>`).
+   */
+  readonly skipDir?: (name: string) => boolean;
   /** Predicate on the relative path; false skips the file. */
   readonly accept?: (relPath: string) => boolean;
+  /**
+   * What to do with a symlink or a non-regular file. Defaults to `"throw"`, so
+   * every existing caller keeps refusing them.
+   */
+  readonly onUnsafe?: "throw" | "skip";
+  /** Called with each entry `"skip"` passed over, for reporting. */
+  readonly onSkip?: (relPath: string, reason: "symlink" | "special file") => void;
 }
 
 /**
  * Walk a tree and return relative file paths.
  *
- * Refuses symlinks and anything that is neither a regular file nor a directory
- * (fifos, sockets, devices). A symlink inside imported material could point at
- * `/etc/passwd` or escape the workspace entirely, and it would be digested as
- * its target rather than as a link, so silently skipping it would be worse than
- * failing: the lock would not detect a later retarget.
+ * Symlinks and anything that is neither a regular file nor a directory (fifos,
+ * sockets, devices) are refused by default. A symlink inside *imported*
+ * material could point at `/etc/passwd` or escape the workspace, and it would
+ * be digested as its target rather than as a link, so silently skipping it
+ * would be worse than failing: the lock would not detect a later retarget.
+ *
+ * That reasoning applies to the digest walk over `source/` and `template/`,
+ * which is why `onUnsafe` defaults to `"throw"` and why `protectedFiles` must
+ * keep the default. It does NOT apply to the candidate walk over the user's own
+ * raw materials: a skipped symlink is never copied, so it never enters the
+ * digest set and there is nothing to retarget. Refusing there instead means a
+ * repository containing a virtualenv or a `latest ->` pointer cannot be
+ * imported at all, which is a real materials directory failing on a link the
+ * run would never have read.
  */
 export function walkFiles(root: string, options: WalkOptions = {}): string[] {
   const skip = new Set(options.skipDirs ?? []);
+  const unsafe = options.onUnsafe ?? "throw";
   const out: string[] = [];
 
   const visit = (dir: string): void => {
@@ -101,14 +123,18 @@ export function walkFiles(root: string, options: WalkOptions = {}): string[] {
       const rel = relative(root, abs);
 
       if (entry.isSymbolicLink()) {
-        throw new UnsafePathError(`refusing symlink: ${rel}`);
+        if (unsafe === "throw") throw new UnsafePathError(`refusing symlink: ${rel}`);
+        options.onSkip?.(rel, "symlink");
+        continue;
       }
       if (entry.isDirectory()) {
-        if (!skip.has(entry.name)) visit(abs);
+        if (!skip.has(entry.name) && !options.skipDir?.(entry.name)) visit(abs);
         continue;
       }
       if (!entry.isFile()) {
-        throw new UnsafePathError(`refusing special file: ${rel}`);
+        if (unsafe === "throw") throw new UnsafePathError(`refusing special file: ${rel}`);
+        options.onSkip?.(rel, "special file");
+        continue;
       }
       if (options.accept && !options.accept(rel)) continue;
       out.push(rel);

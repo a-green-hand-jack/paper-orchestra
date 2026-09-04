@@ -298,12 +298,14 @@ program
     }
 
     if (!options.json && result.skipped.length > 0) {
-      process.stdout.write(`  skipped   ${result.skipped.length} file(s) during import:\n`);
-      for (const entry of result.skipped.slice(0, 10)) {
-        process.stdout.write(`              ${entry}\n`);
-      }
-      if (result.skipped.length > 10) {
-        process.stdout.write(`              ... and ${result.skipped.length - 10} more\n`);
+      // Grouped by reason rather than listing the first ten paths. Once a whole
+      // directory can be the input, "42 not importable, 3 too large" tells the
+      // user what to fix; ten filenames and "and 3990 more" does not.
+      const byReason = Object.entries(result.skippedByReason).sort((a, b) => b[1] - a[1]);
+      const summary = byReason.map(([reason, count]) => `${count} ${reason}`).join(", ");
+      process.stdout.write(`  skipped   ${result.skipped.length} file(s): ${summary}\n`);
+      for (const entry of result.skipped.slice(0, 5)) {
+        process.stdout.write(`              e.g. ${entry}\n`);
       }
     }
 
