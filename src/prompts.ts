@@ -1,8 +1,7 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { UserFacingError } from "./errors.js";
-import { ARTIFACTS, BRAIN_DIR } from "./paths.js";
-import { materialPaths } from "./input.js";
+import { ARTIFACTS, BRAIN_DIR, BRIEF_FILE, TEMPLATE_DIR } from "./paths.js";
 import { COMMANDS, type StageId } from "./stages.js";
 import type { Scope } from "./state/schema.js";
 import type { Check } from "./state/schema.js";
@@ -47,7 +46,7 @@ export function loadCommand(workspace: string, stage: StageId): string {
 
 /** Files a stage must produce, phrased for the prompt. */
 const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
-  triage: [ARTIFACTS.synthesizedIdea, ARTIFACTS.synthesizedLog, ARTIFACTS.triageReport],
+  triage: [ARTIFACTS.materialsMap],
   outline: [ARTIFACTS.outline],
   // references.bib and citation_map.json are written by the controller before
   // this stage runs, so the model is asked only for the synthesis artifacts.
@@ -62,44 +61,68 @@ const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
   refinement: [ARTIFACTS.finalTex],
 };
 
+/** Workspace-relative path, but only when it is actually there. */
+function ifPresent(workspace: string, rel: string): string[] {
+  return existsSync(join(workspace, rel)) ? [rel] : [];
+}
+
 /**
  * Inputs a stage may read, phrased for the prompt.
  *
- * The material paths come from `materialPaths`, not from a `source/` prefix
- * concatenated onto a filename: after triage they live under `.brain/input/`,
- * and before it they live in `source/`. Resolving that in one place is what
- * keeps this function free of a branch per path.
+ * Every content stage reads THE MATERIALS. That is the correction this file
+ * carries: the read list used to name two synthesized documents and nothing
+ * else, so whatever the triage stage did not copy into them was invisible for
+ * the rest of the run -- a lossy funnel that no later stage could see past. A
+ * writer that needs the actual table now goes and reads the actual table.
+ *
+ * `materials.json` accompanies them when it exists. It is a map, not a
+ * substitute: it says which of several hundred files are worth opening and
+ * carries the grounded numbers, so a large input stays tractable without any
+ * stage being cut off from the source. It is absent when the input was small
+ * enough to read whole, which is why every reference to it is conditional.
+ *
+ * `template/guidelines.md` is conditional for a different reason: only a venue
+ * author kit ships one. Naming a path that is not there taught the model that
+ * this list is approximate, which is the opposite of what a read list is for.
  */
-function stageInputs(workspace: string, stage: StageId, scope: Scope): string[] {
-  const material = materialPaths(workspace, scope);
-  const source = [material.idea, material.experimentalLog];
+function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[] {
+  // The brief leads: it is the author's own statement of what the paper must
+  // be, and a stage that reads it after the template has already inferred the
+  // format from a placeholder file.
+  const materials = [
+    ...ifPresent(workspace, BRIEF_FILE),
+    `${BRAIN_DIR}/input/`,
+    ...ifPresent(workspace, ARTIFACTS.materialsMap),
+  ];
+  const guidelines = ifPresent(workspace, join(TEMPLATE_DIR, "guidelines.md"));
   switch (stage) {
     case "triage":
-      // Triage reads the normalized view of everything, and the inventory that
-      // describes it. It is the producer of `source`, not a consumer.
-      return [`${BRAIN_DIR}/input/`, "template/guidelines.md"];
+      // Triage is the producer of the map, not a consumer: it reads the
+      // normalized view of everything and the inventory that describes it.
+      return [...ifPresent(workspace, BRIEF_FILE), `${BRAIN_DIR}/input/`, ...guidelines];
     case "outline":
-      return [...source, "template/template.tex", "template/guidelines.md"];
+      return [...materials, join(TEMPLATE_DIR, "template.tex"), ...guidelines];
     case "literature":
       return [
         ARTIFACTS.outline,
         ARTIFACTS.citationMap,
         ARTIFACTS.references,
-        ...source,
-        "template/template.tex",
+        ...materials,
+        join(TEMPLATE_DIR, "template.tex"),
       ];
     case "plotting":
-      return [ARTIFACTS.outline, ...source];
+      return [ARTIFACTS.outline, ...materials];
     case "section_writing":
       return [
         ARTIFACTS.outlineV1,
         ARTIFACTS.citationMap,
         ARTIFACTS.updatedTemplate,
         ARTIFACTS.figuresInfo,
-        "template/guidelines.md",
+        ...materials,
+        ...guidelines,
       ];
     case "refinement":
-      return [ARTIFACTS.rawDraft, ARTIFACTS.citationMap, "template/guidelines.md"];
+      return [ARTIFACTS.rawDraft, ARTIFACTS.citationMap, ...materials, ...guidelines];
   }
 }
 
@@ -171,6 +194,15 @@ export function buildStagePrompt(
           "",
           "The only permitted citation keys for this run (copy them exactly; never derive a key from a title):",
           citationKeys,
+        ]
+      : []),
+    "",
+    ...(existsSync(join(workspace, BRIEF_FILE))
+      ? [
+          "",
+          `\`${BRIEF_FILE}\` is the commissioning brief: the author's own requirements for`,
+          "this paper -- venue, length, structure, what each section must contain. Where it",
+          "and your defaults disagree, it wins. Where it is silent, use your judgement.",
         ]
       : []),
     "",

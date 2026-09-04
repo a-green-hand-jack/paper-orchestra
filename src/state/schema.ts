@@ -75,8 +75,6 @@ export const ScopeSchema = z.object({
   plan: z.array(z.enum(STAGES)),
   use_plotting: z.boolean(),
   research_cutoff: z.string().regex(/^\d{4}-\d{2}$/, "expected YYYY-MM"),
-  idea_filename: z.string().min(1),
-  experimental_log_filename: z.string().min(1),
   venue: z.string().min(1),
   /** Selected immutable adapter id or the user-supplied template path label. */
   template_id: z.string().min(1).optional(),

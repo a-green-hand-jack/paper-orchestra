@@ -8,7 +8,7 @@ import {
   FigureInfoSchema,
   OutlineSchema,
   PlottingResultsSchema,
-  TriageReportSchema,
+  MaterialsMapSchema,
 } from "./artifacts.js";
 import { assertInside, walkFiles } from "./files.js";
 import {
@@ -24,6 +24,7 @@ import {
 } from "./latex.js";
 import { suppliedBibliography } from "./bibliography.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
+import { materialsFitWhole } from "./input.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
 import type { StageId } from "./stages.js";
 import type { Check, Scope } from "./state/schema.js";
@@ -721,28 +722,30 @@ function noUnresolvedMarkers(workspace: string, manuscriptRel: string): Check {
 }
 
 /** Where a triage-cited path is allowed to live. */
-function triageReadableRoots(workspace: string): string[] {
+function materialsReadableRoots(workspace: string): string[] {
   const p = paths(workspace);
   return [p.source, p.brainInput];
 }
 
 /**
- * Every path triage cites must exist among the materials.
+ * Every path the map cites must exist among the materials.
  *
  * Modelled on `bibliographyProvenance`: the controller knows what was imported,
- * so a reference it cannot resolve was invented. Without this, `sources` and
- * `claims` could name plausible-sounding files that were never there.
+ * so a reference it cannot resolve was invented. Without this, `reading` and
+ * `facts` could name plausible-sounding files that were never there -- and
+ * since later stages now go and READ the paths this map names, an invented one
+ * is a stage sent to a file that does not exist.
  */
-function triageProvenance(workspace: string): Check {
-  const name = "triage_provenance";
-  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+function materialsProvenance(workspace: string): Check {
+  const name = "materials_provenance";
+  const parsed = parseArtifact(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema, name);
   if (!parsed.ok) return parsed.check;
-  const report = parsed.value;
+  const map = parsed.value;
 
-  const roots = triageReadableRoots(workspace);
+  const roots = materialsReadableRoots(workspace);
   const cited = [
-    ...report.sources.map((entry) => entry.path),
-    ...report.claims.map((claim) => claim.source_path),
+    ...map.reading.map((entry) => entry.path),
+    ...map.facts.map((fact) => fact.source_path),
   ];
   const unresolved: string[] = [];
   for (const rel of [...new Set(cited)]) {
@@ -765,7 +768,7 @@ function triageProvenance(workspace: string): Check {
   if (unresolved.length > 0) {
     return fail(
       name,
-      `expected every path in triage.json to name a file among the imported materials; ` +
+      `expected every path in materials.json to name a file among the imported materials; ` +
         `these do not: ${unresolved.slice(0, 8).join(", ")}. Cite only files you actually read.`,
     );
   }
@@ -778,101 +781,111 @@ function flatten(text: string): string {
 }
 
 /**
- * Every claim's quote must really appear in the file it names.
+ * Every fact's quote must really appear in the file it names.
  *
- * This is the answer to "how is a bad synthesis caught", and it is why a byte
+ * This is the answer to "how is a bad reading caught", and it is why a byte
  * floor is not: `{}` clears a floor, and a fluent invented paragraph clears any
  * length check. A model that fabricated a number cannot produce a quote that is
  * actually in a file, and a substring test is a fact about the filesystem
  * rather than a second model's opinion -- the same standard the rest of the
  * validators hold to.
+ *
+ * An empty ledger is allowed only alongside a non-empty `unresolved`. A theory
+ * paper genuinely records no measured numbers, and demanding one would demand
+ * an invention; but silence on both counts is the signature of a stage that did
+ * not look, so the absence has to be stated rather than merely occur.
  */
-function triageGrounding(workspace: string): Check {
-  const name = "triage_grounding";
-  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+function materialsGrounding(workspace: string): Check {
+  const name = "materials_grounding";
+  const parsed = parseArtifact(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema, name);
   if (!parsed.ok) return parsed.check;
-  const report = parsed.value;
+  const map = parsed.value;
 
-  if (report.mode === "supplied") {
-    return pass(name, "documents were supplied, so there is nothing to ground");
-  }
-  if (report.claims.length === 0) {
+  if (map.facts.length === 0 && map.unresolved.length === 0) {
     return fail(
       name,
-      "expected triage.json to carry at least one claim quoting the material it came from, " +
-        "found none. Each claim needs a statement, the file it came from, and text copied " +
-        "verbatim from that file.",
+      "expected materials.json to carry at least one fact quoting the material it came " +
+        "from. If the materials genuinely record no measured result, say so in " +
+        "`unresolved` instead of leaving both lists empty.",
     );
   }
 
   const ungrounded: string[] = [];
-  for (const claim of report.claims) {
+  for (const fact of map.facts) {
     let abs: string;
     try {
-      abs = assertInside(workspace, claim.source_path);
+      abs = assertInside(workspace, fact.source_path);
     } catch {
-      ungrounded.push(`${claim.source_path} (escapes the workspace)`);
+      ungrounded.push(`${fact.source_path} (escapes the workspace)`);
       continue;
     }
     const body = readIfExists(abs);
     if (body === null) {
-      ungrounded.push(`${claim.source_path} (does not exist)`);
+      ungrounded.push(`${fact.source_path} (does not exist)`);
       continue;
     }
-    if (!flatten(body).includes(flatten(claim.quote))) {
-      ungrounded.push(`"${claim.quote.slice(0, 60)}" is not in ${claim.source_path}`);
+    if (!flatten(body).includes(flatten(fact.quote))) {
+      ungrounded.push(`"${fact.quote.slice(0, 60)}" is not in ${fact.source_path}`);
     }
   }
 
   if (ungrounded.length > 0) {
     return fail(
       name,
-      `expected every claim's quote to appear verbatim in the file it names; ` +
+      `expected every fact's quote to appear verbatim in the file it names; ` +
         `${ungrounded.slice(0, 5).join("; ")}. Copy the text rather than paraphrasing it.`,
     );
   }
-  return pass(name, `${report.claims.length} claim(s) grounded in the materials`);
+  return pass(
+    name,
+    map.facts.length > 0
+      ? `${map.facts.length} fact(s) grounded in the materials`
+      : `no measured results; ${map.unresolved.length} gap(s) recorded`,
+  );
 }
 
 /**
- * The synthesized documents must have the shape the later stages assume.
+ * The map must be a selection, and it must be usable as one.
  *
- * A modest structural floor, in the spirit of `outlineCoverage`: the outline
- * stage reads headed sections out of the idea document, and the writer quotes
- * numbers out of the log, so an idea with no structure or a log with no figures
- * at all is a synthesis that will fail later and more expensively. Grounding
- * does the substantive work; this only rules out the empty shell.
+ * Deliberately NOT a floor on how much was written. The previous shape required
+ * 400 bytes of each of two synthesized documents, at least two markdown
+ * headings, and at least one digit -- which forced exactly the padding its own
+ * prompt forbade, and which a theory paper could not satisfy honestly. What is
+ * checkable without inviting invention is structural: the map points at
+ * distinct real files, and it does not claim to have considered fewer files
+ * than it lists.
  */
-function triageCoverage(workspace: string, minHeadings = 2): Check {
-  const name = "triage_coverage";
-  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+function materialsSelection(workspace: string): Check {
+  const name = "materials_selection";
+  const parsed = parseArtifact(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema, name);
   if (!parsed.ok) return parsed.check;
-  if (parsed.value.mode === "supplied") {
-    return pass(name, "documents were supplied by the author");
+  const map = parsed.value;
+
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  for (const entry of map.reading) {
+    if (seen.has(entry.path)) duplicated.add(entry.path);
+    seen.add(entry.path);
   }
-
-  const idea = readIfExists(join(workspace, ARTIFACTS.synthesizedIdea));
-  const log = readIfExists(join(workspace, ARTIFACTS.synthesizedLog));
-  if (idea === null) return fail(name, `expected ${ARTIFACTS.synthesizedIdea} to exist`);
-  if (log === null) return fail(name, `expected ${ARTIFACTS.synthesizedLog} to exist`);
-
-  const headings = (idea.match(/^#{1,6}\s+\S/gm) ?? []).length;
-  if (headings < minHeadings) {
+  if (duplicated.size > 0) {
     return fail(
       name,
-      `expected the synthesized idea to carry at least ${minHeadings} markdown headings ` +
-        `(problem, approach, contributions), found ${headings}`,
+      `expected each file to appear once in \`reading\`; these repeat: ` +
+        `${[...duplicated].slice(0, 5).join(", ")}`,
     );
   }
-  if (!/\d/.test(log)) {
+  if (map.materials_considered < map.reading.length) {
     return fail(
       name,
-      "expected the synthesized experimental log to report at least one measured number; " +
-        "it contains no digits. If the materials hold no results, say so in `unresolved` " +
-        "rather than writing a log without them.",
+      `expected materials_considered (${map.materials_considered}) to be at least the ` +
+        `${map.reading.length} file(s) listed in \`reading\`; it counts everything you looked ` +
+        "at, not everything you kept",
     );
   }
-  return pass(name, `${headings} headings in the idea, numbers present in the log`);
+  return pass(
+    name,
+    `${map.reading.length} of ${map.materials_considered} file(s) selected for reading`,
+  );
 }
 
 /**
@@ -884,13 +897,23 @@ function triageCoverage(workspace: string, minHeadings = 2): Check {
 export function validateStage(workspace: string, stage: StageId, scope: Scope): Check[] {
   switch (stage) {
     case "triage":
+      // Recomputed, not recorded: the controller skips this stage for an input
+      // small enough to read whole, and both sides must reach that answer from
+      // the same tree rather than from a flag either could disagree with.
+      if (materialsFitWhole(workspace)) {
+        return [
+          pass(
+            "materials_read_whole",
+            "the materials are small enough for every stage to read in full; no map needed",
+          ),
+        ];
+      }
       return [
-        artifactExists(workspace, ARTIFACTS.synthesizedIdea, 400),
-        artifactExists(workspace, ARTIFACTS.synthesizedLog, 400),
-        schemaValid(workspace, ARTIFACTS.triageReport, TriageReportSchema),
-        triageProvenance(workspace),
-        triageGrounding(workspace),
-        triageCoverage(workspace),
+        artifactExists(workspace, ARTIFACTS.materialsMap, 32),
+        schemaValid(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema),
+        materialsProvenance(workspace),
+        materialsGrounding(workspace),
+        materialsSelection(workspace),
       ];
 
     case "outline":
@@ -982,8 +1005,8 @@ export const validators = {
   figureRender,
   templateCompatibility,
   anonymityPreserved,
-  triageProvenance,
-  triageGrounding,
-  triageCoverage,
+  materialsProvenance,
+  materialsGrounding,
+  materialsSelection,
   noUnresolvedMarkers,
 };

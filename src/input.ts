@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { ARTIFACTS, SOURCE_DIR } from "./paths.js";
-import { TriageReportSchema, type TriageReport } from "./artifacts.js";
 import { UserFacingError } from "./errors.js";
 import {
   assertInside,
@@ -22,6 +21,7 @@ import {
   walkFiles,
 } from "./files.js";
 import { INTERNAL_DIRS, paths } from "./paths.js";
+import { authoredFiles, depthOf } from "./salience.js";
 
 /**
  * Files that must never be copied into a workspace, because a workspace is
@@ -567,104 +567,108 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
   return { files: produced.map((path) => relative(workspace, path)), skipped };
 }
 
-/** Figure assets supplied by the user, used when plotting is disabled. */
+/** Extensions a supplied figure can arrive as. */
+const FIGURE_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg"]);
+
+/**
+ * Directory names an author uses for the figures they drew themselves.
+ *
+ * A name list rather than "any directory holding images", because a repository
+ * is full of images that are not this paper's figures -- a README banner, a
+ * screenshot in a docs folder, an icon. Publishing those would put them in the
+ * manuscript: `figureCoverage` requires every figure in `info.json` to be
+ * `\includegraphics`'d, so a stray logo becomes a figure the writer is
+ * REQUIRED to place.
+ */
+const FIGURE_DIR_NAMES = new Set(["figures", "figure", "figs", "fig", "images", "imgs", "plots"]);
+
+/**
+ * Where the author put the figures they drew, workspace-relative, or null.
+ *
+ * SEARCHED, for the same reason `suppliedBibliography` is: reading exactly
+ * `source/figures/` finds nothing when the input is a repository whose
+ * materials sit one level down, and "no figures supplied" is indistinguishable
+ * from "the author drew none". Seven figures then go unpublished and
+ * `figureCoverage` passes trivially over the empty set.
+ *
+ * Vendored directories are excluded by `salience.ts`. That matters here as much
+ * as it does for bibliographies: one corpus input's bundled tool ships both
+ * `assets/overview.png` and `frontend/examples/cvpr_example_figure.png`.
+ */
+export function suppliedFiguresDir(workspace: string): string | null {
+  const root = paths(workspace).source;
+  const byDir = new Map<string, number>();
+  for (const rel of authoredFiles(root)) {
+    if (!FIGURE_EXTENSIONS.has(extname(rel).toLowerCase())) continue;
+    const dir = dirname(rel);
+    const base = dir.split(sep).pop()?.toLowerCase();
+    if (base === undefined || !FIGURE_DIR_NAMES.has(base)) continue;
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+  }
+  if (byDir.size === 0) return null;
+  const best = [...byDir.keys()].sort(
+    (a, b) => depthOf(a) - depthOf(b) || a.localeCompare(b),
+  )[0] as string;
+  return join(SOURCE_DIR, best);
+}
+
+/** Figure assets supplied by the author, used when plotting is disabled. */
 export function suppliedFigures(workspace: string): string[] {
-  const dir = join(paths(workspace).source, "figures");
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
-  return readdirSync(dir)
-    .filter((name) => [".pdf", ".png", ".jpg", ".jpeg"].includes(extname(name).toLowerCase()))
+  const dir = suppliedFiguresDir(workspace);
+  if (dir === null) return [];
+  return readdirSync(join(workspace, dir))
+    .filter((name) => FIGURE_EXTENSIONS.has(extname(name).toLowerCase()))
     .sort();
 }
 
 /**
- * Where the pre-writing documents actually are.
+ * Ceilings under which the materials can simply be read in full.
  *
- * `triage.json` is the single source of truth once it exists, which is what
- * lets both paths -- supplied and synthesized -- present an identical contract
- * downstream, so `stageInputs` needs no branch of its own. The fallback to
- * `source/<filename>` keeps a `--until`-truncated plan and any workspace
- * prepared before triage existed working unchanged.
+ * The triage stage exists to make a large input tractable: it says which of
+ * several hundred files are worth opening. A handful of notes needs none of
+ * that -- every stage can read all of it -- and running a model to produce a
+ * map of three files would spend tokens to restate a directory listing.
+ *
+ * This replaces the previous router, which asked whether the author had
+ * supplied two files with particular names. That question only had an answer
+ * for inputs shaped the way one benchmark shapes them; "is this small enough to
+ * read whole" has an answer for any input, which is the property a general
+ * tool needs.
+ *
+ * Both ceilings, because either alone is escapable in a way that matters: 400
+ * tiny files are small in bytes and still need a map, and one 5 MB log is a
+ * single file nobody can read whole.
+ *
+ * Measured against the corpus this is tuned on, no task qualifies -- the
+ * smallest holds 133 KB of text across 30 files. That is the correct outcome
+ * and worth stating: these tasks are exactly the case the mapping stage is for.
  */
-export interface MaterialPaths {
-  /** Workspace-relative path to the idea document. */
-  readonly idea: string;
-  readonly experimentalLog: string;
-}
-
-export function materialPaths(
-  workspace: string,
-  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
-): MaterialPaths {
-  const report = readTriageReport(workspace);
-  if (report) {
-    return { idea: report.idea_path, experimentalLog: report.experimental_log_path };
-  }
-  return {
-    idea: join(SOURCE_DIR, scope.idea_filename),
-    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
-  };
-}
-
-function readTriageReport(workspace: string): TriageReport | null {
-  const path = join(workspace, ARTIFACTS.triageReport);
-  if (!existsSync(path)) return null;
-  const parsed = TriageReportSchema.safeParse(
-    JSON.parse(readFileSync(path, "utf8")) as unknown,
-  );
-  return parsed.success ? parsed.data : null;
-}
+export const READ_WHOLE_MAX_BYTES = 64 * 1024;
+export const READ_WHOLE_MAX_FILES = 25;
 
 /**
- * Whether a supplied document has content the author actually put there.
+ * Can every stage just read all of the normalized materials?
  *
- * Not a byte floor. The question is whether the file was filled in at all, and
- * a length threshold answers a different question -- whether they wrote
- * *enough* -- which is a quality judgement, and quality is what triage is for.
- * Every threshold I tried also sat wrong on some real boundary: a one-line
- * idea is around 30 bytes, so any floor big enough to feel meaningful rejects
- * documents a user legitimately wrote.
- *
- * The error directions are not symmetric either. A terse document routed to
- * synthesis is at least still read; a usable one routed away is silently
- * replaced by a rewrite the author never asked for.
+ * Deterministic and recomputed rather than recorded, so the controller's
+ * decision to skip the mapping stage and the validator's expectation of a
+ * missing map cannot disagree. A flag in `.brain/` would be writable by the
+ * agent being validated; a flag in `run.json` would freeze a decision that
+ * depends on a tree the run can still be resumed against.
  */
-function hasAuthoredContent(path: string): boolean {
-  try {
-    return readFileSync(path, "utf8").trim().length > 0;
-  } catch {
-    return false;
+export function materialsFitWhole(workspace: string): boolean {
+  const p = paths(workspace);
+  const files = walkFiles(p.brainInput, { onUnsafe: "skip" });
+  if (files.length === 0 || files.length > READ_WHOLE_MAX_FILES) return false;
+  let bytes = 0;
+  for (const rel of files) {
+    try {
+      bytes += statSync(join(p.brainInput, rel)).size;
+    } catch {
+      return false;
+    }
+    if (bytes > READ_WHOLE_MAX_BYTES) return false;
   }
-}
-
-/**
- * The two documents, when the user supplied both and triage can be skipped.
- *
- * Returns paths rather than a boolean so the controller can write them straight
- * into `triage.json` and keep that file the only place downstream reads.
- *
- * A byte floor is defensible here in a way it is not for artifact validation,
- * because this is a ROUTING decision: getting it wrong costs one triage call,
- * not a bad paper. Deliberately excluded is any judgement about content --
- * "did the user hand us these two documents" is a question about the
- * filesystem, and a content heuristic would make an expensive model call depend
- * on something the user cannot predict.
- */
-export function suppliedMaterials(
-  workspace: string,
-  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
-): MaterialPaths | null {
-  const candidate: MaterialPaths = {
-    idea: join(SOURCE_DIR, scope.idea_filename),
-    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
-  };
-  for (const rel of [candidate.idea, candidate.experimentalLog]) {
-    const abs = join(workspace, rel);
-    if (!existsSync(abs)) return null;
-    if (statKind(abs) !== "file") return null;
-    if (!looksLikeText(abs)) return null;
-    if (!hasAuthoredContent(abs)) return null;
-  }
-  return candidate;
+  return true;
 }
 
 /**
@@ -672,8 +676,8 @@ export function suppliedMaterials(
  *
  * Given to the model rather than left to be discovered, so it starts with a map
  * instead of spending a turn globbing, and so `materials_considered` in
- * `triage.json` has something to be checked against. Sizes are included because
- * they are the cheapest signal about which files carry substance.
+ * `materials.json` has something to be checked against. Sizes are included
+ * because they are the cheapest signal about which files carry substance.
  *
  * Bounded: a repository can hold thousands of files, and the inventory must not
  * crowd out the materials themselves. Directories are summarized once the list

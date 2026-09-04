@@ -62,14 +62,26 @@ It separates hard requirements from optional capabilities, so an absent
 
 ## Usage
 
-Put your materials in a directory:
+Point it at whatever you have. One directory — a project, a repository, a
+folder of notes — and PaperOrchestra explores it:
 
 ```
-my-paper/
-├── idea_sparse.md          # the idea, problem statement, contributions
-├── experimental_log.md     # experimental record, including result tables
-└── figures/                # optional: figures you already have
+my-paper/                          my-project/
+├── notes.md                       ├── README.md
+├── results/                       ├── src/
+│   └── table_main.tex             ├── experiments/
+├── figures/                       │   ├── train.sh
+└── references.bib                 │   └── results.csv
+                                   ├── paper/
+                                   │   └── main.tex      ← found, used as the template
+                                   └── refs.bib          ← found, so no paid retrieval
 ```
+
+Nothing here is required and nothing has to be named a particular way. A
+template in the input is used; without one, a bundled venue is chosen from the
+paper's topic. A bibliography in the input is used as it is, so retrieval is
+skipped and costs nothing. Figures you already drew are published as they are.
+Whatever is left is the research material.
 
 Then run it from there:
 
@@ -169,11 +181,14 @@ paper-orchestra templates info cvpr2026
 ### Validators, not self-assessment
 
 A stage completes because its artifacts exist and pass checks — never because
-the model said it was done. Eleven validators run per stage:
+the model said it was done. Fourteen validators run per stage:
 
 | Validator | Catches |
 |---|---|
 | `schema_valid` | An artifact that does not match its schema |
+| `materials_provenance` | A cited material path that was never in the input |
+| `materials_grounding` | A quoted number that is not really in the file it names |
+| `materials_selection` | A map that repeats a file, or claims to have read fewer than it lists |
 | `outline_coverage` | An empty section plan, or a figure with no usable id |
 | `citation_integrity` | A `\cite` key that resolves to nothing |
 | `citation_floor` | A manuscript that cites far fewer sources than were found |
@@ -267,17 +282,25 @@ with setup guidance instead of silently omitting the figure.
 
 | # | Stage | Produces |
 |---|---|---|
-| 1 | `triage` | `synthesized/idea.md`, `synthesized/experimental_log.md`, `triage.json` |
+| 1 | `triage` | `materials.json` — which files to read, the grounded facts, the gaps |
 | 2 | `outline` | `outline.json` — section plan, citation hints, figure plan |
 | 3 | `literature` | `references.bib`, `citation_map.json`, `candidates.json` |
 | 4 | `plotting` | `figures/*`, `plotting_results.json` |
 | 5 | `section_writing` | `raw_draft.tex` |
 | 6 | `refinement` | `final_paper.tex`, `final_paper.pdf` |
 
-Two stages need no model when you have already done their work. Triage is
-skipped when you supply both pre-writing documents, and retrieval is skipped
-when you supply a `references.bib` — in both cases the controller records what
-it used and the validators confirm it, at zero cost.
+Stage 1 maps the materials; it does not rewrite them. Every later stage reads
+the author's own files, and `materials.json` tells it which ones are worth
+opening and carries the ledger of measured numbers, each with a quote copied
+verbatim from the file it came from. A validator re-reads those files, so a
+fabricated number cannot pass — and nothing the map leaves out becomes
+invisible, because the files are still there to read.
+
+Two stages need no model when there is nothing for one to do. The mapping
+stage is skipped when the materials are small enough for every stage to read in
+full, and retrieval is skipped when the input already holds a bibliography — in
+both cases the controller records what it used and the validators confirm it,
+at zero cost.
 
 Retrieval (stage 3) is controller-owned: candidates come from Bohrium LKM, are
 enriched from Crossref and DataCite, scored for relevance against the paper's

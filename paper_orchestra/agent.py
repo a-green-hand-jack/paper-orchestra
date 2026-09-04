@@ -116,16 +116,21 @@ class PaperOrchestra(BaseInstalledAgent):
 
         model_flag = f"--model {shlex.quote(self.model_name)} " if self.model_name else ""
 
-        # The instruction is written into the container but NOT into the input
-        # tree. PaperOrchestra has no parameter for a writing brief yet, so
-        # passing it would be a lie; putting it among the materials would make
-        # the adapter prepare the input, which is the thing this adapter must
-        # not do. It is saved so a trajectory reader can see what the task
-        # asked for, and its absence from the run is a finding, not a bug here.
+        # The rendered instruction IS the brief: Harbor's contract is one
+        # location plus one instruction, and the instruction is where the venue,
+        # the page limit and the per-section requirements live. It is written to
+        # the log directory and handed over with `--brief`, so PaperOrchestra
+        # locks it into the workspace itself.
+        #
+        # Note what this is not: the adapter does not put it among the
+        # materials, name a template, or write a guidelines file. `--brief` is a
+        # parameter the tool has, so passing it is mechanical -- which is the
+        # only kind of work that belongs here.
+        instruction_path = "/logs/agent/instruction.md"
         await self.exec_as_agent(
             environment,
             command=(
-                f"mkdir -p /logs/agent && cat > /logs/agent/instruction.md <<'PO_EOF'\n"
+                f"mkdir -p /logs/agent && cat > {instruction_path} <<'PO_EOF'\n"
                 f"{instruction}\nPO_EOF"
             ),
         )
@@ -135,6 +140,7 @@ class PaperOrchestra(BaseInstalledAgent):
             command=(
                 ". ~/.nvm/nvm.sh 2>/dev/null; "
                 f"paper-orchestra write /workspace {model_flag}"
+                f"--brief {shlex.quote(instruction_path)} "
                 f"--headless --json -o {shlex.quote(WORKSPACE)} "
                 "2>&1 | stdbuf -oL tee /logs/agent/paper-orchestra.jsonl"
             ),

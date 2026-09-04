@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { extname, join } from "node:path";
 
 import type { Candidate } from "./artifacts.js";
-import { SOURCE_DIR } from "./paths.js";
-import { statKind } from "./files.js";
+import { paths, SOURCE_DIR } from "./paths.js";
+import { findAuthoredFile } from "./salience.js";
 
 /**
  * Ingestion of a bibliography the author supplied, instead of one we retrieved.
@@ -111,31 +111,63 @@ function bibVenue(body: string): string {
 }
 
 /**
- * The supplied bibliography, or null when this run has to retrieve one.
+ * The bibliography the author supplied, or null when this run has to retrieve one.
  *
  * A fact about the filesystem: the file is under `source/`, so it is already
  * covered by `source_digest` and made read-only at prepare time. That is what
  * lets the provenance validator branch on this predicate rather than on a field
  * inside `.brain/`, which the agent it validates can write.
  *
- * "Non-trivial" is one parsable entry -- the same reasoning as the triage
- * router: whether the author handed us a bibliography is a question about the
- * filesystem, and a bar on entry count or quality would make an expensive
- * routing decision depend on something no user can predict.
+ * SEARCHED, not looked up at a fixed path. Reading exactly
+ * `source/references.bib` only finds the file when the author hands us a
+ * directory shaped the way we imagined; point the same tool at a repository and
+ * the bibliography sits at `source/materials/references.bib`, the lookup
+ * answers "none", and the run pays for retrieval in order to cite a different
+ * set of papers than the one the author chose. Nothing reports an error.
+ *
+ * Any `.bib` counts, not only one called `references.bib`: the author names
+ * their own files. What does not count is a vendored dependency's -- see
+ * `salience.ts`, without which one corpus input's bundled example bibliography
+ * would be adopted as the paper's own.
+ *
+ * When several qualify, the largest wins. An author with both a working library
+ * and a leftover stub meant the library, and "most entries" separates them
+ * without asking the user to know our precedence rules.
+ *
+ * "Non-trivial" is one parsable entry -- the same standard as before: whether
+ * the author handed us a bibliography is a question about the filesystem, and a
+ * bar on entry count or quality would make an expensive routing decision depend
+ * on something no user can predict.
  */
 export function suppliedBibliography(workspace: string): string | null {
-  const rel = join(SOURCE_DIR, "references.bib");
-  const abs = join(workspace, rel);
-  if (!existsSync(abs) || statKind(abs) !== "file") return null;
-  const entries = parseBibEntries(readFileSync(abs, "utf8"));
-  return entries.length > 0 ? rel : null;
+  const root = paths(workspace).source;
+  const entryCount = new Map<string, number>();
+  const countOf = (rel: string): number => {
+    const cached = entryCount.get(rel);
+    if (cached !== undefined) return cached;
+    let count = 0;
+    try {
+      count = parseBibEntries(readFileSync(join(root, rel), "utf8")).length;
+    } catch {
+      count = 0;
+    }
+    entryCount.set(rel, count);
+    return count;
+  };
+
+  const found = findAuthoredFile(
+    root,
+    (rel) => extname(rel).toLowerCase() === ".bib" && countOf(rel) > 0,
+    countOf,
+  );
+  return found === null ? null : join(SOURCE_DIR, found);
 }
 
 /**
  * Candidate records for a supplied bibliography.
  *
- * Written so the files downstream reads have one shape whatever the origin --
- * the same reason `triage.json` is written on both of its paths. It is NOT the
+ * Written so the files downstream reads have one shape whatever the origin. It
+ * is NOT the
  * evidence for provenance on this path: checking the bibliography against
  * records derived from it would be circular. The evidence is the digest-locked
  * `source/references.bib` itself, which `bibliographyProvenance` compares

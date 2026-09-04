@@ -17,6 +17,23 @@ export const TEMPLATE_DIR = "template";
 export const OPENCODE_DIR = ".opencode";
 export const RUN_DIR = ".po-run";
 
+/**
+ * The commissioning brief, when the caller supplied one.
+ *
+ * Under `source/` because it IS an input: it is the author's statement of what
+ * the paper must be, it is covered by `source_digest`, and it is read-only for
+ * the same reason the rest of the materials are. Written by `prepare` before
+ * the digests are computed, so a brief cannot be introduced or edited after
+ * the lock.
+ *
+ * It exists because a brief does not always arrive as a file in a directory.
+ * A Harbor container renders one and hands it over as a STRING -- one location
+ * plus one instruction is the whole contract -- and with nowhere to put it, the
+ * venue, the page limit and the per-section requirements it carries were simply
+ * dropped.
+ */
+export const BRIEF_FILE = join(SOURCE_DIR, "BRIEF.md");
+
 /** Directories excluded from input walks and digests. */
 export const INTERNAL_DIRS: readonly string[] = [
   ".git",
@@ -54,18 +71,12 @@ export type Paths = ReturnType<typeof paths>;
 
 /** Stage artifact paths, relative to the workspace root. */
 export const ARTIFACTS = {
-  /** Triage's provenance record, and the single source of truth for material paths. */
-  triageReport: join(BRAIN_DIR, "raw", "triage.json"),
   /**
-   * Synthesized pre-writing documents.
-   *
-   * Under `synthesized/` on purpose: the normalized view mirrors the user's
-   * files by relative path, so a top-level `idea.md` in the materials would
-   * otherwise collide with triage's own output. The subdirectory makes that
-   * impossible and makes a checkpoint diff self-describing.
+   * The map into the author's materials: what to read, the grounded facts, and
+   * what the materials do not say. Absent when the input was small enough that
+   * every stage can simply read all of it.
    */
-  synthesizedIdea: join(BRAIN_DIR, "input", "synthesized", "idea.md"),
-  synthesizedLog: join(BRAIN_DIR, "input", "synthesized", "experimental_log.md"),
+  materialsMap: join(BRAIN_DIR, "raw", "materials.json"),
   outline: join(BRAIN_DIR, "raw", "outline.json"),
   outlineV1: join(BRAIN_DIR, "raw", "outline_v1.json"),
   references: join(BRAIN_DIR, "raw", "references.bib"),
