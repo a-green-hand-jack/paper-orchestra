@@ -36,7 +36,7 @@ import { planQueries } from "./queries.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { basename, extname, resolve } from "node:path";
 import { FigureInfoSchema } from "./artifacts.js";
 import { ensureDir } from "./files.js";
 import { paths } from "./paths.js";
@@ -98,12 +98,22 @@ export function stageNeedsFailureMark(state: RunState, stage: StageId): boolean 
  * by the model's closing message.
  */
 export async function runController(options: ControllerOptions): Promise<RunState> {
-  const { workspace } = options;
+  // Resolved once, here, and passed down, so every path the controller derives
+  // is absolute.
+  //
+  // `prepareWorkspace` already resolves (`commands/prepare.ts`), so `run.json`
+  // records an absolute workspace while the controller used to receive the raw
+  // CLI string. With the default `-o ./po-run-<timestamp>` that string is
+  // relative, and the two disagreed. Mostly invisible -- until a subprocess is
+  // given a workspace-derived path together with a `cwd` inside the workspace,
+  // at which point the relative path resolves against the wrong base and every
+  // code-route figure fails to open its own script.
+  const resolved: ControllerOptions = { ...options, workspace: resolve(options.workspace) };
   // Taken before any state is read or written: a second controller on this
   // workspace would interleave checkpoints and race state writes.
-  const runLock = acquireRunLock(workspace);
+  const runLock = acquireRunLock(resolved.workspace);
   try {
-    return await drive(options, runLock);
+    return await drive(resolved, runLock);
   } finally {
     runLock.release();
   }
