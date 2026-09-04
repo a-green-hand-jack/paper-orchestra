@@ -160,7 +160,7 @@ const NOISE_DIRS = new Set([
  */
 const WORKSPACE_DIR_PREFIX = "po-run-";
 
-function isNoiseDir(name: string): boolean {
+export function isNoiseDir(name: string): boolean {
   return NOISE_DIRS.has(name) || name.startsWith(WORKSPACE_DIR_PREFIX);
 }
 
