@@ -1,6 +1,6 @@
 import { execa } from "execa";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 /**
  * Controller-owned execution of model-written matplotlib scripts.
@@ -213,7 +213,12 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
 
   let stderr = "";
   try {
-    const result = await execa("python3", [scriptPath], {
+    // The script's basename, not `scriptPath`: `cwd` is already `workDir`, so a
+    // path here would be resolved against it. When `workDir` is relative that
+    // produced `<workDir>/<workDir>/<figureId>.py` and python3 could not open
+    // its own script. Passing the basename is correct whatever `workDir` is,
+    // and keeps host paths out of any error text the model is shown.
+    const result = await execa("python3", [basename(scriptPath)], {
       cwd: workDir,
       env: renderEnv(workDir),
       timeout: RENDER_TIMEOUT_MS,
