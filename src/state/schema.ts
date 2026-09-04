@@ -90,20 +90,20 @@ export const ScopeSchema = z.object({
    */
   max_lkm_calls: z.number().int().nonnegative().default(40),
   /**
-   * How many distinct sources the manuscript should cite.
+   * A USER-SUPPLIED override for how many distinct sources to cite, or absent.
    *
-   * Replaces the Python's rule of citing 90% of whatever retrieval returned
-   * (`literature_review_agent.py:492`). That rule is only defensible when
-   * retrieval is precise: against LKM's general-science corpus it read as "put
-   * 90% of the off-topic hits into the paper", and two measured runs cited 84
-   * of 94 and 67 of 74 sources in ~2150 words -- roughly one citation per 25
-   * words, which is citation stuffing rather than academic prose.
+   * Absent is the normal case. This used to default to 20, and a single
+   * constant was measurably wrong in both directions: on graded tasks whose
+   * reference papers cite 22, 47 and 62, ours cited 29 (precision 0.31), 34
+   * (recall 0.51) and 47 (recall 0.66). How much support an argument needs is
+   * a property of the paper, so the outline stage proposes it
+   * (`Outline.citation_target`) and the controller bounds it -- see
+   * `citationFloor`.
    *
-   * A target rather than a ratio, so the number a reader sees is a property of
-   * the paper and not of how large a retrieval budget the run happened to have.
-   * The effective floor is `min(target, sources actually available)`.
+   * Set only by `--target-citations`, and then it wins outright: an explicit
+   * instruction is not a thing to second-guess.
    */
-  target_citations: z.number().int().nonnegative().default(20),
+  target_citations: z.number().int().nonnegative().optional(),
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 

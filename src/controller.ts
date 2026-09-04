@@ -397,7 +397,12 @@ async function runStage(
     // off-domain tail into the manuscript. `citation_floor` enforces the same
     // number at the END of the pipeline, so refinement cannot quietly undo it.
     extra.paper_count = String(relevant);
-    extra.min_cite_paper_count = String(citationFloor(relevant, state.scope));
+    // The outline is on disk and schema-checked by the time this runs, so the
+    // floor the model is told matches the one the validators will enforce.
+    const plan = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outline)));
+    extra.min_cite_paper_count = String(
+      citationFloor(relevant, state.scope, plan.success ? plan.data : null),
+    );
     extra.bibliography_origin = bibliographyOriginNote(workspace);
   }
   if (stage === "section_writing" || stage === "refinement") {

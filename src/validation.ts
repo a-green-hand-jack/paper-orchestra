@@ -26,6 +26,8 @@ import { suppliedBibliography } from "./bibliography.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
 import { materialsFitWhole } from "./input.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
+import { plannedCitationCount } from "./queries.js";
+import type { Outline } from "./artifacts.js";
 import type { StageId } from "./stages.js";
 import type { Check, Scope } from "./state/schema.js";
 
@@ -215,8 +217,58 @@ function citationIntegrity(workspace: string, manuscriptRel: string): Check {
  * instruction the writer receives and the rule that judges it must be one
  * number, or the writer is being graded against something it was never told.
  */
-export function citationFloor(available: number, scope: Scope): number {
-  return Math.min(available, scope.target_citations);
+/** Last resort when there is no outline to ask and no override. */
+const FALLBACK_CITATION_TARGET = 20;
+
+/**
+ * How many distinct sources the manuscript must cite.
+ *
+ * The model proposes, the controller bounds. `Outline.citation_target` is the
+ * proposal, because the stage that planned the sections is the one that knows
+ * how much support the argument takes -- a fixed constant was wrong in both
+ * directions on every graded task measured.
+ *
+ * Two bounds. Availability, because a paper cannot cite what retrieval did not
+ * find. And the plan's OWN citation hints, because a stage must not be able to
+ * excuse its successor from citing the work it just said was needed: if the
+ * outline attached 40 hints, 40 is the floor whatever number it also wrote
+ * down. That keeps the judgement with the model while keeping the number
+ * anchored to something structural rather than to the model's preference.
+ */
+export function citationFloor(
+  available: number,
+  scope: Scope,
+  outline: Outline | null,
+): number {
+  if (scope.target_citations !== undefined) {
+    return Math.min(available, scope.target_citations);
+  }
+  const proposed = outline && outline.citation_target > 0
+    ? outline.citation_target
+    : FALLBACK_CITATION_TARGET;
+  const planned = outline ? plannedCitationCount(outline) : 0;
+  return Math.min(available, Math.max(proposed, planned));
+}
+
+/**
+ * The outline this run is working from, preferring the literature-updated one.
+ *
+ * `outline_v1.json` carries resolved `citation_candidates`; `outline.json`
+ * carries the hints they came from. Either answers the question, and after the
+ * literature stage the first is the current plan.
+ */
+function currentOutline(workspace: string): Outline | null {
+  for (const rel of [ARTIFACTS.outlineV1, ARTIFACTS.outline]) {
+    const raw = readIfExists(join(workspace, rel));
+    if (raw === null) continue;
+    try {
+      const parsed = OutlineSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) return parsed.data;
+    } catch {
+      // A malformed outline is reported by its own schema check.
+    }
+  }
+  return null;
 }
 
 /**
@@ -250,7 +302,7 @@ function citationFloorCheck(workspace: string, manuscriptRel: string, scope: Sco
   if (bib === null) return fail(name, `expected ${ARTIFACTS.references} to exist`);
 
   const available = bibKeys(bib).length;
-  const floor = citationFloor(available, scope);
+  const floor = citationFloor(available, scope, currentOutline(workspace));
   const cited = new Set(citedKeys(tex)).size;
 
   if (cited < floor) {

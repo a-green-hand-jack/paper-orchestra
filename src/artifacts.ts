@@ -91,6 +91,21 @@ export const SectionPlanEntrySchema = z
 
 export const OutlineSchema = z
   .object({
+    /**
+     * How many distinct sources this paper's argument needs.
+     *
+     * Decided here because it is a property of the paper, not of the tool. A
+     * fixed CLI default of 20 was wrong in both directions on measured tasks:
+     * one graded paper's reference cites 22 and ours cited 29, costing
+     * precision; another cites 62 and ours cited 47, costing recall. The stage
+     * that has read the materials and written the section plan is the one that
+     * can say how much support the argument takes.
+     *
+     * The controller bounds it rather than trusting it outright -- see
+     * `citationFloor`. Zero means "no opinion", and the plan's own citation
+     * hints then decide.
+     */
+    citation_target: z.number().int().nonnegative().default(0),
     plotting_plan: z.array(PlotSpecSchema).default([]),
     intro_related_work_plan: z
       .object({

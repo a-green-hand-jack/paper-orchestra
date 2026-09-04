@@ -21,6 +21,24 @@ Your inputs are:
 
 Global Instruction: Do not analyze inputs in isolation. You must synthesize information across all provided documents for every step.
 
+#### Directive 0: Citation Target
+
+Set `citation_target` to the number of DISTINCT sources this paper's argument
+actually needs. Judge it from the work, not from a habit:
+
+* Every dataset, metric, optimizer, baseline and foundational architecture the
+  paper names needs a source.
+* Every claim about what prior work does or fails to do needs a source.
+* A related-work section that surveys a field needs more than one that
+  positions against three specific competitors.
+
+Do not pad it and do not lowball it. A paper that cites far more sources than
+its argument uses reads as padding; one that cites far fewer reads as
+unresearched. The controller enforces a floor derived from this number and from
+the citation hints you attach below, capped by how many sources retrieval
+actually found -- so a number well above what the plan supports simply makes
+the writing stage's job impossible.
+
 #### Directive 1: Plotting & Visualization Plan
 Synthesize the materials to identify the most compelling evidence.
 * Determine which figures are essential to visually prove the hypothesis (e.g., convergence rates, qualitative visual comparisons).
@@ -78,12 +96,13 @@ Guidelines on Scientific Depth & Mathematical Rigor:
 - Grounded Formalization: Propose explicit subsections for rigorous mathematical formulations (e.g., loss functions, core algorithms, theoretical proofs). You must base these strictly on the materials; do not instruct the writing agent to include hallucinated variables or unsupported math.
 
 ### Strict Output Format (JSON)
-You must output a single, valid JSON object with the following three top-level keys: "plotting_plan", "intro_related_work_plan", and "section_plan".
+You must output a single, valid JSON object with the following four top-level keys: "citation_target", "plotting_plan", "intro_related_work_plan", and "section_plan".
 
 Example Output:
 
 ```json
 {
+  "citation_target": 34,
   "plotting_plan": [
     {
       "figure_id": "fig_teaser_fig_cross_modal_alignment_performance",
