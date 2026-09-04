@@ -202,14 +202,21 @@ describe("citation integrity", () => {
 });
 
 describe("citation floor", () => {
-  /** A citation map with `count` distinct vetted sources. */
-  function sources(count: number): Record<string, unknown> {
-    return Object.fromEntries(
-      Array.from({ length: count }, (_, at) => [
-        `Key${at}`,
-        { citation_key: `Key${at}`, title: `Paper ${at}` },
-      ]),
-    );
+  /**
+   * A bibliography with `count` distinct entries.
+   *
+   * The floor counts availability from `references.bib`, not from
+   * `citation_map.json`: that is the file the message names and the file an
+   * external grader resolves citations against, and it is the only count that
+   * is right for a bibliography the author supplied rather than one we
+   * retrieved. The two agree on the retrieval path, since the controller writes
+   * both from one candidate list.
+   */
+  function sources(count: number): string {
+    return Array.from(
+      { length: count },
+      (_, at) => `@article{Key${at},\n  title={Paper ${at}},\n  year={2024}\n}`,
+    ).join("\n\n");
   }
 
   function cites(count: number): string {
@@ -220,7 +227,7 @@ describe("citation floor", () => {
     // The measured defect: refinement discarded ~75% of the citations two runs
     // running (84 to 20, 67 to 16) and nothing anywhere noticed.
     const { workspace } = await prepared();
-    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.references, sources(40));
     put(workspace, ARTIFACTS.finalTex, cites(6));
 
     const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
@@ -233,7 +240,7 @@ describe("citation floor", () => {
     // A run that legitimately found only eight relevant papers must not be
     // failed for citing eight of eight.
     const { workspace } = await prepared();
-    json(workspace, ARTIFACTS.citationMap, sources(8));
+    put(workspace, ARTIFACTS.references, sources(8));
     put(workspace, ARTIFACTS.finalTex, cites(8));
 
     expect(validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope()).passed).toBe(true);
@@ -241,7 +248,7 @@ describe("citation floor", () => {
 
   it("counts distinct keys, so repeating one citation cannot satisfy the floor", async () => {
     const { workspace } = await prepared();
-    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.references, sources(40));
     put(workspace, ARTIFACTS.finalTex, "\\cite{Key0} ".repeat(30));
 
     const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
@@ -251,7 +258,7 @@ describe("citation floor", () => {
 
   it("tells the model not to pad, since the detail becomes the repair instruction", async () => {
     const { workspace } = await prepared();
-    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.references, sources(40));
     put(workspace, ARTIFACTS.finalTex, cites(2));
 
     const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());
@@ -261,7 +268,7 @@ describe("citation floor", () => {
 
   it("honours a run that deliberately targets fewer citations", async () => {
     const { workspace } = await prepared();
-    json(workspace, ARTIFACTS.citationMap, sources(40));
+    put(workspace, ARTIFACTS.references, sources(40));
     put(workspace, ARTIFACTS.finalTex, cites(6));
 
     expect(
@@ -280,7 +287,7 @@ describe("citation floor", () => {
     );
   });
 
-  it("reports a missing citation map as data rather than throwing", async () => {
+  it("reports a missing bibliography as data rather than throwing", async () => {
     const { workspace } = await prepared();
     put(workspace, ARTIFACTS.finalTex, cites(3));
     const check = validators.citationFloorCheck(workspace, ARTIFACTS.finalTex, scope());

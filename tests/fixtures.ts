@@ -117,3 +117,62 @@ export function makeMessyRawMaterials(): string {
   symlinkSync(join(dir, "logs"), join(dir, "latest"));
   return dir;
 }
+
+/**
+ * A bibliography shaped like a real one rather than a clean one.
+ *
+ * Every irregularity here was copied from `pwb-0001`'s 114-entry file, because
+ * that is the shape this path has to accept: BibTeX takes all of it, the file
+ * compiles, and the author was told to use it as-is.
+ *
+ * - a stray comma on its own line before a field
+ * - an abstract containing a whole LaTeX document, so braces nest
+ * - a mixed-case entry type
+ * - one entry with no `year`
+ * - two keys for the same paper, one hand-written and one generated
+ */
+export const MESSY_BIBLIOGRAPHY = [
+  "@inproceedings{vqa,",
+  "  title={Vqa: Visual question answering},",
+  "  author={Antol, Stanislaw and Agrawal, Aishwarya and Parikh, Devi},",
+  "  booktitle={Proceedings of the IEEE international conference on computer vision},",
+  "  year={2015}",
+  ",",
+  "  abstract = {We propose the task of free-form VQA. We provide a dataset of",
+  "\\documentclass[12pt]{minimal} \\begin{document}$$\\sim$$\\end{document}0.25 M images.}",
+  "}",
+  "",
+  "@ARTICLE{llava,",
+  "  title={Visual instruction tuning},",
+  "  author={Liu, Haotian and Li, Chunyuan},",
+  "  journal={NeurIPS},",
+  "  year={2023}",
+  "}",
+  "",
+  "@misc{liu2023visualinstructiontuning,",
+  "      title={Visual Instruction Tuning}, ",
+  "      author={Haotian Liu and Chunyuan Li},",
+  "      year={2023},",
+  "      eprint={2304.08485}",
+  "}",
+  "",
+  "@article{math,",
+  "  title={Measuring Mathematical Problem Solving With the MATH Dataset},",
+  "  author={Hendrycks, Dan and Burns, Collin},",
+  "  journal={Sort},",
+  "  pages={0--6}",
+  "}",
+  "",
+].join("\n");
+
+/**
+ * Materials that carry the author's own bibliography.
+ *
+ * Otherwise identical to `makeRawMaterials`, so a test can attribute any
+ * difference in behaviour to the bibliography alone.
+ */
+export function makeRawMaterialsWithBibliography(bib = MESSY_BIBLIOGRAPHY): string {
+  const dir = makeRawMaterials();
+  writeFileSync(join(dir, "references.bib"), bib);
+  return dir;
+}

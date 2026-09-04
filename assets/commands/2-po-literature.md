@@ -5,7 +5,7 @@ THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
 There is no generator to rerun: scripts/port_prompts.py was removed with
 its inputs.
 
-Controller-substituted placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}
+Controller-substituted placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}, {bibliography_origin}
 -->
 
 Role: Senior AI Researcher.
@@ -23,9 +23,8 @@ INPUTS:
 YOU MUST ONLY CITE THE GIVEN 'collected_papers', DO NOT cite new papers other than the given papers.
 
 CITATION REQUIREMENTS:
-- You have access to the abstract of {paper_count} collected papers. Every one has
-  been retrieved and screened for relevance to THIS paper's subject; they are ordered
-  with the most relevant first.
+- You have access to the abstract of {paper_count} collected papers.
+  {bibliography_origin}
 - You MUST cite at least {min_cite_paper_count} distinct papers across the introduction
   and related work sections.
 - Do NOT try to cite all of them. Prefer the smallest set that genuinely supports your

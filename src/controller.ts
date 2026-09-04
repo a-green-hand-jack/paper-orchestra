@@ -52,6 +52,11 @@ import {
 } from "./figures.js";
 import { generateTextImage, textToImageCapability } from "./imagegen.js";
 import { materialsInventory, suppliedMaterials } from "./input.js";
+import {
+  bibliographyOriginNote,
+  suppliedBibliography,
+  toSuppliedCandidates,
+} from "./bibliography.js";
 import { ensureGraphicxPackage } from "./latex.js";
 
 export interface ControllerOptions {
@@ -411,6 +416,7 @@ async function runStage(
     // number at the END of the pipeline, so refinement cannot quietly undo it.
     extra.paper_count = String(relevant);
     extra.min_cite_paper_count = String(citationFloor(relevant, state.scope));
+    extra.bibliography_origin = bibliographyOriginNote(workspace);
   }
   if (stage === "section_writing" || stage === "refinement") {
     extra.citation_keys = availableCitationKeys(workspace);
@@ -579,6 +585,50 @@ async function retrieveForLiterature(
   state: RunState,
 ): Promise<number> {
   const { workspace } = options;
+
+  // An author who supplied a bibliography has already decided what this paper
+  // cites. Retrieving anyway would spend money to obtain a DIFFERENT set of
+  // papers than the one the manuscript must draw from, so the paid substep is
+  // skipped and the supplied file is ingested instead.
+  //
+  // Only the retrieval is skipped, not the stage: the model still has to write
+  // `outline_v1.json` and fill the template's Introduction and Related Work.
+  // That is what makes this different in kind from the plotting and triage
+  // short-circuits, which have no work left once the artifacts are on disk.
+  const suppliedRel = suppliedBibliography(workspace);
+  if (suppliedRel) {
+    const raw = readFileSync(join(workspace, suppliedRel), "utf8");
+    const candidates = toSuppliedCandidates(raw, new Date().toISOString());
+
+    // Copied verbatim rather than regenerated from the parsed records.
+    // `toBibtex` emits the fields retrieval collects, which is a subset of what
+    // a real file carries: re-serializing `pwb-0001`'s bibliography turns
+    // 189 KB into 39 KB, dropping every abstract along with pages, volume and
+    // entry-type nuance. The grader compiles what we ship, and the author's
+    // file already compiles, so the only safe transformation is none.
+    writeFileSync(join(workspace, ARTIFACTS.references), raw, "utf8");
+    writeJsonAtomic(join(workspace, ARTIFACTS.candidates), candidates);
+    writeJsonAtomic(join(workspace, ARTIFACTS.citationMap), toCitationMap(candidates));
+    // Written even though it is empty, so the run's own spend record says zero
+    // paid queries rather than leaving an auditor with a missing file to
+    // interpret.
+    writeJsonAtomic(join(workspace, ARTIFACTS.queryPlan), {
+      generated_at: new Date().toISOString(),
+      origin: "supplied_bibliography",
+      supplied_path: suppliedRel,
+      reason:
+        "the author supplied a bibliography, so no query was planned and nothing was paid for",
+      decisions: [],
+    });
+
+    say(
+      options,
+      `   using the supplied bibliography ${suppliedRel}: ${candidates.length} entr(ies), ` +
+        "0 LKM call(s), 0.00 CNY",
+    );
+    return candidates.length;
+  }
+
   const outlinePath = join(workspace, ARTIFACTS.outline);
   const parsed = OutlineSchema.safeParse(readJson(outlinePath));
   if (!parsed.success) {
