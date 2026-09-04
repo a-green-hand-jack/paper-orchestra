@@ -70,8 +70,30 @@ check(
 
 // A remediation is not a failure, but a stage that spent its whole budget is a
 // finding that needs an explanation rather than a silent pass.
-const BUDGET = { outline: 1, literature: 1, plotting: 2, section_writing: 2, refinement: 2 };
-const exhausted = plan.filter((s) => (stages[s]?.remediations ?? 0) >= (BUDGET[s] ?? 1));
+//
+// Transcribed from `REMEDIATION_ATTEMPTS` rather than imported. That is
+// deliberate -- a grader that shares code with the thing it grades cannot
+// detect a change in it -- but transcription drifts: adding the `triage` stage
+// left this table one entry short, and a `?? 1` fallback would have hidden that
+// behind a number that happened to be right. So an unknown stage is a hard
+// error here, which turns silent drift into a message naming the stage.
+const BUDGET = {
+  triage: 1,
+  outline: 1,
+  literature: 1,
+  plotting: 2,
+  section_writing: 2,
+  refinement: 2,
+};
+const unknown = plan.filter((s) => !(s in BUDGET));
+if (unknown.length > 0) {
+  console.error(
+    `harbor-trajectory does not know the remediation budget for: ${unknown.join(", ")}. ` +
+      "Update BUDGET from REMEDIATION_ATTEMPTS in src/stages.ts before reporting a result.",
+  );
+  process.exit(2);
+}
+const exhausted = plan.filter((s) => (stages[s]?.remediations ?? 0) >= BUDGET[s]);
 const anyRemediation = plan.filter((s) => (stages[s]?.remediations ?? 0) > 0);
 check(
   "no stage exhausted its remediation budget",
