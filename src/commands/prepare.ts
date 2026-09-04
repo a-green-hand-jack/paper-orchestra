@@ -48,6 +48,8 @@ export interface PrepareOptions {
 export interface PrepareResult {
   readonly state: RunState;
   readonly skipped: string[];
+  /** Skip counts by reason, so a repo-sized import reports why, not just what. */
+  readonly skippedByReason: Record<string, number>;
   readonly brainInputs: string[];
   readonly checkpointSha: string;
 }
@@ -144,7 +146,7 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
   let state = createRunState(createInput);
   state = writeRunState(workspace, state);
 
-  const brainInputs = await prepareBrainInput(workspace);
+  const brain = await prepareBrainInput(workspace);
 
   state = writeRunState(workspace, { ...state, status: "prepared" });
 
@@ -158,10 +160,18 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     model: formatModelRef(options.defaultModel),
   });
 
+  const skippedByReason: Record<string, number> = {};
+  for (const counts of [source.skippedByReason, template.skippedByReason]) {
+    for (const [reason, count] of Object.entries(counts)) {
+      skippedByReason[reason] = (skippedByReason[reason] ?? 0) + count;
+    }
+  }
+
   return {
     state,
-    skipped: [...source.skipped, ...template.skipped],
-    brainInputs,
+    skipped: [...source.skipped, ...template.skipped, ...brain.skipped],
+    skippedByReason,
+    brainInputs: brain.files,
     checkpointSha,
   };
 }

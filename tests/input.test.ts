@@ -1,9 +1,9 @@
 import { execa } from "execa";
-import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { UnsafePathError } from "../src/files.js";
+import { UnsafePathError, walkFiles } from "../src/files.js";
 import {
   assertArchiveSafe,
   importDirectory,
@@ -96,11 +96,33 @@ describe("importDirectory", () => {
     expect(result.files).not.toContain(".env");
   });
 
-  it("refuses the whole import when material contains a symlink", () => {
+  it("skips a symlink without importing its target, rather than refusing the directory", () => {
+    // The property that matters is that /etc/passwd never lands in the
+    // workspace, not that the import aborts. Refusing outright means a repo
+    // with a virtualenv or a `latest ->` pointer cannot be imported at all,
+    // and a skipped symlink is never copied, so it never enters the digest.
     const from = scratch();
+    const to = join(scratch(), "source");
     writeFileSync(join(from, "idea_sparse.md"), "# idea");
+    writeFileSync(join(from, "experimental_log.md"), "# log");
     symlinkSync("/etc/passwd", join(from, "sneaky.md"));
-    expect(() => importDirectory(from, join(scratch(), "source"))).toThrow(UnsafePathError);
+
+    const result = importDirectory(from, to);
+
+    expect(result.files).not.toContain("sneaky.md");
+    expect(existsSync(join(to, "sneaky.md"))).toBe(false);
+    expect(result.skipped.join(" ")).toContain("sneaky.md (symlink)");
+    expect(result.skippedByReason["symlink"]).toBe(1);
+  });
+
+  it("still refuses a symlink on the digest walk over an imported tree", () => {
+    // walkFiles keeps its throwing default, so `protectedFiles` and
+    // `digestTree` cannot be fooled by a link planted after import. This is
+    // the guarantee the change above must not weaken.
+    const root = scratch();
+    writeFileSync(join(root, "a.md"), "a");
+    symlinkSync("/etc/passwd", join(root, "b.md"));
+    expect(() => walkFiles(root)).toThrow(UnsafePathError);
   });
 
   it("refuses a missing or non-directory input", () => {

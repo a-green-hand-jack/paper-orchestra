@@ -1,6 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { prepareWorkspace, type PrepareOptions } from "../src/commands/prepare.js";
 
 export function scratchDir(prefix = "po-test-"): string {
@@ -70,4 +70,50 @@ export async function prepared(overrides: Partial<PrepareOptions> = {}) {
 export function tamper(path: string, content: string): void {
   chmodSync(path, 0o644);
   writeFileSync(path, content);
+}
+
+/**
+ * Materials shaped like a real project directory rather than two curated
+ * documents: code, logs, a virtualenv, a symlink, an extensionless file, a
+ * name that only looks like a credential, a colliding pair of PDFs, and a
+ * previous run's workspace sitting in the same directory.
+ *
+ * `makeRawMaterials` is deliberately left alone as the *supplied* fixture, so
+ * every existing test that calls `prepared()` keeps exercising the path that
+ * needs no model.
+ */
+export function makeMessyRawMaterials(): string {
+  const dir = scratchDir("po-messy-");
+  const put = (rel: string, body: string): void => {
+    const abs = join(dir, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, body);
+  };
+
+  put("research_overview.md", "# Idea\n\nA temporal adapter for SAM.\n");
+  put("notes/brainstorm.md", "Ablations to run.\n");
+  put("src/train.py", "import torch\n\nLR = 3e-4\n");
+  put("scripts/run.sh", "#!/bin/bash\npython src/train.py --lr 3e-4\n");
+  put("logs/run1.log", "step=100 loss=0.42\n");
+  put("results.csv", "metric,value\nJ,43.43\n");
+  put("pyproject.toml", "[project]\nname = 'x'\n");
+  put("LICENSE", "Apache License 2.0\n");
+  // Reads like a credential to an unanchored substring match, but is not one.
+  put("tokenizer_notes.md", "BPE vocabulary sizing.\n");
+  // Must never be imported: a workspace is checkpointed.
+  put(".env", "OPENAI_API_KEY=sk-secret\n");
+  // Build artifact whose bytes happen to decode as text.
+  put("build/out.pyc", "junk\n");
+  put(".venv/lib/python3.11/site-packages/foo.py", "x = 1\n");
+  put("__pycache__/train.cpython-311.pyc", "junk\n");
+  // A previous run's workspace, which `-o` puts here by default.
+  put("po-run-20260101000000/.po-run/run.json", "{}\n");
+  put("po-run-20260101000000/source/idea_sparse.md", "stale\n");
+  // Same basename in two directories: a flat PDF conversion loses one.
+  put("notes/results.pdf", "%PDF-1.4\n");
+  put("data/results.pdf", "%PDF-1.4\n");
+
+  symlinkSync("/etc/passwd", join(dir, "sneaky.md"));
+  symlinkSync(join(dir, "logs"), join(dir, "latest"));
+  return dir;
 }
