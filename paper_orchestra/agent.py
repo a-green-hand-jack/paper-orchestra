@@ -97,6 +97,7 @@ class PaperOrchestra(BaseInstalledAgent):
         allow_lkm_spend: bool | str = False,
         max_lkm_calls: int | str | None = None,
         target_citations: int | str | None = None,
+        research_cutoff: str | None = None,
         **kwargs,
     ):
         """Accept the knobs a Harbor job needs, via `--ak key=value`.
@@ -115,6 +116,13 @@ class PaperOrchestra(BaseInstalledAgent):
         self.allow_lkm_spend = _as_bool(allow_lkm_spend)
         self.max_lkm_calls = None if max_lkm_calls is None else int(max_lkm_calls)
         self.target_citations = None if target_citations is None else int(target_citations)
+        # A task can intend a research cutoff -- one corpus config exports
+        # PAPER_ORCHESTRA_RESEARCH_CUTOFF=2024-10-01 from its own entrypoint,
+        # because reconstructing a paper means citing what existed when it was
+        # written. PaperOrchestra defaults to the current month, which would
+        # admit work published years after the paper under reconstruction, so
+        # the job needs a way to say otherwise.
+        self.research_cutoff = research_cutoff
 
     @staticmethod
     @override
@@ -197,6 +205,8 @@ class PaperOrchestra(BaseInstalledAgent):
             retrieval_flags += f"--max-lkm-calls {self.max_lkm_calls} "
         if self.target_citations is not None:
             retrieval_flags += f"--target-citations {self.target_citations} "
+        if self.research_cutoff:
+            retrieval_flags += f"--research-cutoff {shlex.quote(self.research_cutoff)} "
 
         # The rendered instruction IS the brief: Harbor's contract is one
         # location plus one instruction, and the instruction is where the venue,
