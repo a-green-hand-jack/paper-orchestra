@@ -335,13 +335,14 @@ function figureRender(workspace: string, scope: Scope): Check {
  * padding. It does not target the author's own library.
  *
  * On a supplied bibliography the duplicates are an editorial fact about a file
- * we were told to use as-is. `pwb-0001`'s 114 real entries contain seven such
- * pairs -- a short hand-written key beside a verbose generated one for the same
- * paper (`llava` / `liu2023visualinstructiontuning`) -- which is simply what a
- * bibliography merged from several tools looks like. Failing the stage for it
- * would reject the file for something BibTeX itself accepts, and something the
- * external grader does not care about. So the duplicates are reported, loudly
- * enough to be visible in the checkpoint, and the stage proceeds.
+ * we were told to use as-is. A short hand-written key sits beside a verbose
+ * generated one for the same paper -- `llava` next to
+ * `liu2023visualinstructiontuning` -- which is simply what a library merged
+ * from several tools looks like; a 114-entry file measured here held seven such
+ * pairs. Failing the stage for it would reject the file for something BibTeX
+ * itself accepts, and would substitute our judgement for the author's about
+ * which of their entries deserve to exist. So the duplicates are reported,
+ * loudly enough to be visible in the checkpoint, and the stage proceeds.
  */
 function literatureDedup(workspace: string): Check {
   const name = "literature_dedup";

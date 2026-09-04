@@ -79,8 +79,8 @@ describe("parsing a real bibliography", () => {
   });
 
   it("reads a field that follows a stray comma, because real files have them", () => {
-    // `pwb-0001` has a lone `,` on its own line before `abstract = {...}` in
-    // most entries. Refusing it would reject a file that compiles.
+    // A lone `,` on its own line before `abstract = {...}` occurs in most
+    // entries of some real files. Refusing it would reject a file that compiles.
     const entry = parseBibEntries(MESSY_BIBLIOGRAPHY)[0]!;
     expect(bibField(entry.body, "abstract")).not.toBeNull();
   });
@@ -129,8 +129,8 @@ describe("candidates built from a supplied bibliography", () => {
   });
 
   it("reports the venue the file actually gives, however wrong it looks", () => {
-    // `journal={Sort}` is really in `pwb-0001`. Faithfulness beats correction:
-    // we are not the authority on the author's bibliography.
+    // `journal={Sort}` is copied from a real file. Faithfulness beats
+    // correction: we are not the authority on someone else's bibliography.
     const math = toSuppliedCandidates(MESSY_BIBLIOGRAPHY, "t").find((c) => c.citation_key === "math");
     expect(math?.venue).toBe("Sort");
   });
@@ -260,9 +260,10 @@ describe("provenance for a supplied bibliography", () => {
 
 describe("duplicates in a supplied bibliography", () => {
   it("are reported without failing the stage", async () => {
-    // `pwb-0001` really does list seven papers twice. Dedup targets our own
-    // retrieval merge, not the author's library, and the external grader does
-    // not care -- so failing here would reject a file BibTeX accepts.
+    // Real libraries list the same paper twice. Dedup targets our own
+    // retrieval merge, where a duplicate is a defect in the merge; in someone's
+    // own library it is an editorial choice, and failing here would reject a
+    // file BibTeX accepts.
     const { workspace } = await afterSuppliedIngestion();
     const check = validators.literatureDedup(workspace);
     expect(check.passed).toBe(true);
@@ -331,9 +332,9 @@ describe("the literature stage on the supplied path", () => {
 
   it("keeps the bibliography byte-identical to the author's file", async () => {
     // Re-serializing from the parsed records loses every abstract along with
-    // pages, volume and entry-type nuance: `pwb-0001` goes from 189 KB to
-    // 39 KB. The grader compiles what we ship, and the author's file already
-    // compiles, so the only safe transformation is none.
+    // pages, volume and entry-type nuance: one measured file went from 189 KB
+    // to 39 KB. Whatever compiles the manuscript compiles what we ship, and the
+    // author's file already compiles, so the only safe transformation is none.
     const { workspace } = await afterSuppliedIngestion();
     expect(readFileSync(join(workspace, ARTIFACTS.references), "utf8")).toBe(
       readFileSync(join(workspace, SOURCE_DIR, "references.bib"), "utf8"),

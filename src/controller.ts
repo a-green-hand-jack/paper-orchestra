@@ -602,10 +602,11 @@ async function retrieveForLiterature(
 
     // Copied verbatim rather than regenerated from the parsed records.
     // `toBibtex` emits the fields retrieval collects, which is a subset of what
-    // a real file carries: re-serializing `pwb-0001`'s bibliography turns
-    // 189 KB into 39 KB, dropping every abstract along with pages, volume and
-    // entry-type nuance. The grader compiles what we ship, and the author's
-    // file already compiles, so the only safe transformation is none.
+    // a hand-maintained file carries: re-serializing one 189 KB bibliography
+    // measured here produced 39 KB, dropping every abstract along with pages,
+    // volume and entry-type nuance. Whatever compiles the manuscript compiles
+    // what we ship, and the author's file already compiles, so the only safe
+    // transformation is none.
     writeFileSync(join(workspace, ARTIFACTS.references), raw, "utf8");
     writeJsonAtomic(join(workspace, ARTIFACTS.candidates), candidates);
     writeJsonAtomic(join(workspace, ARTIFACTS.citationMap), toCitationMap(candidates));

@@ -12,13 +12,14 @@ import { statKind } from "./files.js";
  * and on that path retrieval is worse than unnecessary: it costs money and
  * returns a set of papers unrelated to the one the manuscript must cite from.
  *
- * The parser is deliberately tolerant. A real bibliography is machine-merged
- * from several tools and is not clean: `pwb-0001`'s 114 entries include a stray
- * comma on its own line before a field, mixed-case entry types (`@ARTICLE`),
- * and abstracts that embed a whole `\documentclass{...}\begin{document}` block.
- * BibTeX itself accepts all of that, so refusing it here would reject a file
- * that compiles -- and the point of this path is to use the author's file as it
- * is, not to grade it.
+ * The parser is deliberately tolerant, because a bibliography that a person
+ * actually uses is machine-merged from several tools and is not clean. Observed
+ * in real files: a stray comma on its own line before a field, mixed-case entry
+ * types (`@ARTICLE`), abstracts that embed a whole
+ * `\documentclass{...}\begin{document}` block, missing `year`, and a venue
+ * field carrying something that is plainly not a venue. BibTeX accepts all of
+ * it, so refusing it here would reject a file that compiles -- and the point of
+ * this path is to use the author's file as it is, not to grade it.
  */
 
 /** One entry, with its body left raw so field extraction stays in one place. */

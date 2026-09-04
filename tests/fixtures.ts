@@ -121,9 +121,9 @@ export function makeMessyRawMaterials(): string {
 /**
  * A bibliography shaped like a real one rather than a clean one.
  *
- * Every irregularity here was copied from `pwb-0001`'s 114-entry file, because
- * that is the shape this path has to accept: BibTeX takes all of it, the file
- * compiles, and the author was told to use it as-is.
+ * Every irregularity here was copied from a real 114-entry bibliography,
+ * because that is the shape this path has to accept: BibTeX takes all of it,
+ * the file compiles, and it is not ours to correct.
  *
  * - a stray comma on its own line before a field
  * - an abstract containing a whole LaTeX document, so braces nest
