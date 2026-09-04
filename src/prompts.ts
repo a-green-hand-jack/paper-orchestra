@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { UserFacingError } from "./errors.js";
-import { ARTIFACTS } from "./paths.js";
+import { ARTIFACTS, BRAIN_DIR } from "./paths.js";
+import { materialPaths } from "./input.js";
 import { COMMANDS, type StageId } from "./stages.js";
 import type { Scope } from "./state/schema.js";
 import type { Check } from "./state/schema.js";
@@ -46,6 +47,7 @@ export function loadCommand(workspace: string, stage: StageId): string {
 
 /** Files a stage must produce, phrased for the prompt. */
 const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
+  triage: [ARTIFACTS.synthesizedIdea, ARTIFACTS.synthesizedLog, ARTIFACTS.triageReport],
   outline: [ARTIFACTS.outline],
   // references.bib and citation_map.json are written by the controller before
   // this stage runs, so the model is asked only for the synthesis artifacts.
@@ -60,13 +62,22 @@ const STAGE_OUTPUTS: Record<StageId, readonly string[]> = {
   refinement: [ARTIFACTS.finalTex],
 };
 
-/** Inputs a stage may read, phrased for the prompt. */
-function stageInputs(stage: StageId, scope: Scope): string[] {
-  const source = [
-    `source/${scope.idea_filename}`,
-    `source/${scope.experimental_log_filename}`,
-  ];
+/**
+ * Inputs a stage may read, phrased for the prompt.
+ *
+ * The material paths come from `materialPaths`, not from a `source/` prefix
+ * concatenated onto a filename: after triage they live under `.brain/input/`,
+ * and before it they live in `source/`. Resolving that in one place is what
+ * keeps this function free of a branch per path.
+ */
+function stageInputs(workspace: string, stage: StageId, scope: Scope): string[] {
+  const material = materialPaths(workspace, scope);
+  const source = [material.idea, material.experimentalLog];
   switch (stage) {
+    case "triage":
+      // Triage reads the normalized view of everything, and the inventory that
+      // describes it. It is the producer of `source`, not a consumer.
+      return [`${BRAIN_DIR}/input/`, "template/guidelines.md"];
     case "outline":
       return [...source, "template/template.tex", "template/guidelines.md"];
     case "literature":
@@ -108,7 +119,7 @@ export function buildStagePrompt(
 ): string {
   const body = substitute(loadCommand(workspace, stage), placeholdersFor(stage, scope, extra));
   const outputs = STAGE_OUTPUTS[stage];
-  const inputs = stageInputs(stage, scope);
+  const inputs = stageInputs(workspace, stage, scope);
   const citationKeys = extra.citation_keys?.trim();
 
   // Plotting is the one stage whose product is a REPLY, not a file: the model

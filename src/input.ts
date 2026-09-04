@@ -4,11 +4,14 @@ import {
   copyFileSync,
   existsSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   statSync,
 } from "node:fs";
-import { basename, dirname, extname, join, relative } from "node:path";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { ARTIFACTS, SOURCE_DIR } from "./paths.js";
+import { TriageReportSchema, type TriageReport } from "./artifacts.js";
 import { UserFacingError } from "./errors.js";
 import {
   assertInside,
@@ -499,4 +502,212 @@ export function suppliedFigures(workspace: string): string[] {
   return readdirSync(dir)
     .filter((name) => [".pdf", ".png", ".jpg", ".jpeg"].includes(extname(name).toLowerCase()))
     .sort();
+}
+
+/**
+ * Where the pre-writing documents actually are.
+ *
+ * `triage.json` is the single source of truth once it exists, which is what
+ * lets both paths -- supplied and synthesized -- present an identical contract
+ * downstream, so `stageInputs` needs no branch of its own. The fallback to
+ * `source/<filename>` keeps a `--until`-truncated plan and any workspace
+ * prepared before triage existed working unchanged.
+ */
+export interface MaterialPaths {
+  /** Workspace-relative path to the idea document. */
+  readonly idea: string;
+  readonly experimentalLog: string;
+}
+
+export function materialPaths(
+  workspace: string,
+  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
+): MaterialPaths {
+  const report = readTriageReport(workspace);
+  if (report) {
+    return { idea: report.idea_path, experimentalLog: report.experimental_log_path };
+  }
+  return {
+    idea: join(SOURCE_DIR, scope.idea_filename),
+    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
+  };
+}
+
+function readTriageReport(workspace: string): TriageReport | null {
+  const path = join(workspace, ARTIFACTS.triageReport);
+  if (!existsSync(path)) return null;
+  const parsed = TriageReportSchema.safeParse(
+    JSON.parse(readFileSync(path, "utf8")) as unknown,
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Whether a supplied document has content the author actually put there.
+ *
+ * Not a byte floor. The question is whether the file was filled in at all, and
+ * a length threshold answers a different question -- whether they wrote
+ * *enough* -- which is a quality judgement, and quality is what triage is for.
+ * Every threshold I tried also sat wrong on some real boundary: a one-line
+ * idea is around 30 bytes, so any floor big enough to feel meaningful rejects
+ * documents a user legitimately wrote.
+ *
+ * The error directions are not symmetric either. A terse document routed to
+ * synthesis is at least still read; a usable one routed away is silently
+ * replaced by a rewrite the author never asked for.
+ */
+function hasAuthoredContent(path: string): boolean {
+  try {
+    return readFileSync(path, "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The two documents, when the user supplied both and triage can be skipped.
+ *
+ * Returns paths rather than a boolean so the controller can write them straight
+ * into `triage.json` and keep that file the only place downstream reads.
+ *
+ * A byte floor is defensible here in a way it is not for artifact validation,
+ * because this is a ROUTING decision: getting it wrong costs one triage call,
+ * not a bad paper. Deliberately excluded is any judgement about content --
+ * "did the user hand us these two documents" is a question about the
+ * filesystem, and a content heuristic would make an expensive model call depend
+ * on something the user cannot predict.
+ */
+export function suppliedMaterials(
+  workspace: string,
+  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
+): MaterialPaths | null {
+  const candidate: MaterialPaths = {
+    idea: join(SOURCE_DIR, scope.idea_filename),
+    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
+  };
+  for (const rel of [candidate.idea, candidate.experimentalLog]) {
+    const abs = join(workspace, rel);
+    if (!existsSync(abs)) return null;
+    if (statKind(abs) !== "file") return null;
+    if (!looksLikeText(abs)) return null;
+    if (!hasAuthoredContent(abs)) return null;
+  }
+  return candidate;
+}
+
+/**
+ * A listing of the normalized materials, for the triage prompt.
+ *
+ * Given to the model rather than left to be discovered, so it starts with a map
+ * instead of spending a turn globbing, and so `materials_considered` in
+ * `triage.json` has something to be checked against. Sizes are included because
+ * they are the cheapest signal about which files carry substance.
+ *
+ * Bounded: a repository can hold thousands of files, and the inventory must not
+ * crowd out the materials themselves. Directories are summarized once the list
+ * would grow past the cap.
+ */
+export function materialsInventory(workspace: string, maxEntries = 200): string {
+  const p = paths(workspace);
+  const files = walkFiles(p.brainInput)
+    .filter((rel) => !rel.startsWith(`synthesized${sep}`) && rel !== "synthesized")
+    .map((rel) => ({ rel, bytes: statSync(join(p.brainInput, rel)).size }));
+
+  if (files.length === 0) return "(no normalized material found)";
+
+  const header = `${files.length} file(s) under .brain/input/`;
+  if (files.length <= maxEntries) {
+    return [
+      header,
+      "",
+      ...files.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
+    ].join("\n");
+  }
+
+  const byDir = new Map<string, { count: number; bytes: number }>();
+  for (const f of files) {
+    const dir = f.rel.includes(sep) ? f.rel.slice(0, f.rel.lastIndexOf(sep)) : ".";
+    const entry = byDir.get(dir) ?? { count: 0, bytes: 0 };
+    byDir.set(dir, { count: entry.count + 1, bytes: entry.bytes + f.bytes });
+  }
+  const largest = [...files].sort((a, b) => b.bytes - a.bytes).slice(0, 40);
+  return [
+    `${header}, too many to list individually. Directory summary:`,
+    "",
+    ...[...byDir.entries()]
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([dir, e]) => `  ${dir}/  ${e.count} file(s), ${e.bytes} bytes`),
+    "",
+    "Largest files:",
+    "",
+    ...largest.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
+    "",
+    "Use glob and read to explore the rest.",
+  ].join("\n");
+}
+
+/**
+ * A bounded sample of a raw materials directory, for the template selector.
+ *
+ * The selector only has to judge the paper's topic, which does not require
+ * structured documents -- so when the two named documents are absent it reads
+ * a sample of whatever is there instead of failing. Ranked, because the budget
+ * buys only a few files and which ones matter: prose over code, shallow over
+ * deep, and names that announce their content over names that do not.
+ *
+ * Runs the same widened candidate walk as `importDirectory` (noise directories
+ * skipped, symlinks skipped, binaries excluded) so it cannot read something the
+ * import itself would refuse.
+ */
+export function materialSurvey(rawMaterials: string, budgetChars: number): string {
+  const root = resolve(rawMaterials);
+  const candidates = walkFiles(root, {
+    skipDirs: INTERNAL_DIRS,
+    skipDir: isNoiseDir,
+    onUnsafe: "skip",
+  }).filter((rel) => {
+    if (isSensitive(rel)) return false;
+    if (isBinaryMaterial(rel)) return false;
+    const extension = extname(rel).toLowerCase();
+    if (NEVER_IMPORT_EXTENSIONS.has(extension)) return false;
+    const abs = join(root, rel);
+    try {
+      if (statSync(abs).size > MAX_TEXT_FILE_BYTES) return false;
+    } catch {
+      return false;
+    }
+    return isImportable(rel) || looksLikeText(abs);
+  });
+
+  if (candidates.length === 0) return "(no readable material found)";
+
+  const INTERESTING = /idea|log|result|readme|note|experiment|abstract|paper|overview|report/i;
+  const PROSE = new Set([".md", ".txt", ".rst", ".org", ".tex"]);
+  const ranked = [...candidates].sort((a, b) => score(b) - score(a));
+
+  function score(rel: string): number {
+    let value = 0;
+    if (PROSE.has(extname(rel).toLowerCase())) value += 4;
+    if (INTERESTING.test(basename(rel))) value += 3;
+    value -= rel.split(sep).length - 1;
+    return value;
+  }
+
+  const take = Math.min(ranked.length, 12);
+  const perFile = Math.max(400, Math.floor(budgetChars / take));
+  const blocks: string[] = [];
+  let used = 0;
+  for (const rel of ranked) {
+    if (used >= budgetChars) break;
+    let body: string;
+    try {
+      body = readFileSync(join(root, rel), "utf8").slice(0, perFile);
+    } catch {
+      continue;
+    }
+    const block = `<file path="${rel}">\n${body}\n</file>`;
+    used += block.length;
+    blocks.push(block);
+  }
+  return blocks.join("\n\n");
 }

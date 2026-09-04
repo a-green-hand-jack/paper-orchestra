@@ -51,6 +51,7 @@ import {
   type VisualReview,
 } from "./figures.js";
 import { generateTextImage, textToImageCapability } from "./imagegen.js";
+import { materialsInventory, suppliedMaterials } from "./input.js";
 import { ensureGraphicxPackage } from "./latex.js";
 
 export interface ControllerOptions {
@@ -249,6 +250,74 @@ async function runStage(
 
   say(options, "");
 
+  // Triage with both documents supplied needs no model at all: the author
+  // already wrote them, so the controller records that and lets the validators
+  // confirm. Same shape as plotting-with-generation-off below, and the same
+  // reason -- prompting here would spend tokens to restate what is on disk.
+  //
+  // triage.json is written either way, which is what lets `materialPaths` stay
+  // branch-free: downstream reads one file, not two possible layouts.
+  if (stage === "triage") {
+    const supplied = suppliedMaterials(workspace, state.scope);
+    if (supplied) {
+      say(options, `>> ${TITLES[stage]} (${stage})  materials supplied, no model call`);
+      writeJsonAtomic(join(workspace, ARTIFACTS.triageReport), {
+        mode: "supplied",
+        idea_path: supplied.idea,
+        experimental_log_path: supplied.experimentalLog,
+        materials_considered: 2,
+        sources: [
+          { path: supplied.idea, role: "idea", why: "supplied by the author" },
+          {
+            path: supplied.experimentalLog,
+            role: "experimental_log",
+            why: "supplied by the author",
+          },
+        ],
+        claims: [],
+        unresolved: [],
+      });
+      say(options, `   using ${supplied.idea} and ${supplied.experimentalLog}`);
+
+      const checks = validateStage(workspace, stage, state.scope);
+      const failed = checks.filter((check) => !check.passed);
+      reportChecks(options, checks);
+      if (failed.length > 0) {
+        updateStage(workspace, stage, (s) => ({
+          ...s,
+          status: "failed",
+          attempts: s.attempts + 1,
+          error: failed.map((c) => `${c.name}: ${c.detail}`).join("; "),
+        }));
+        throw new UserFacingError(
+          `stage "${stage}" failed validation: ` +
+            failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+        );
+      }
+
+      const completed = updateStage(workspace, stage, (s) => ({
+        ...s,
+        status: "completed",
+        attempts: s.attempts + 1,
+        started_at: s.started_at ?? new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+        notes: "Author supplied both documents; no synthesis needed.",
+      }));
+      const sha = await checkpoint({
+        workspace,
+        runId: completed.run_id,
+        stage,
+        status: "completed",
+        mode: completed.mode,
+        checks,
+      });
+      say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
+      // Gated like any other completed stage: in collaborative mode the user
+      // should confirm we picked the right files, even on the free path.
+      return resolveGate(options, stage, completed, signal);
+    }
+  }
+
   // Plotting with generation ON runs a per-figure loop rather than the single
   // prompt every other stage uses, so it has its own path.
   if (stage === "plotting" && state.scope.use_plotting) {
@@ -327,6 +396,11 @@ async function runStage(
   updateRunState(workspace, (c) => ({ ...c, current_stage: stage, status: "running" }));
 
   const extra: Record<string, string> = {};
+  if (stage === "triage") {
+    // Hand the model a map instead of a turn spent globbing, and give
+    // `materials_considered` something a validator can compare against.
+    extra.materials = materialsInventory(workspace);
+  }
   if (stage === "literature") {
     const relevant = await retrieveForLiterature(options, state);
     // The floor is a target capped by availability, NOT a fraction of the

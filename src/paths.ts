@@ -54,6 +54,18 @@ export type Paths = ReturnType<typeof paths>;
 
 /** Stage artifact paths, relative to the workspace root. */
 export const ARTIFACTS = {
+  /** Triage's provenance record, and the single source of truth for material paths. */
+  triageReport: join(BRAIN_DIR, "raw", "triage.json"),
+  /**
+   * Synthesized pre-writing documents.
+   *
+   * Under `synthesized/` on purpose: the normalized view mirrors the user's
+   * files by relative path, so a top-level `idea.md` in the materials would
+   * otherwise collide with triage's own output. The subdirectory makes that
+   * impossible and makes a checkpoint diff self-describing.
+   */
+  synthesizedIdea: join(BRAIN_DIR, "input", "synthesized", "idea.md"),
+  synthesizedLog: join(BRAIN_DIR, "input", "synthesized", "experimental_log.md"),
   outline: join(BRAIN_DIR, "raw", "outline.json"),
   outlineV1: join(BRAIN_DIR, "raw", "outline_v1.json"),
   references: join(BRAIN_DIR, "raw", "references.bib"),

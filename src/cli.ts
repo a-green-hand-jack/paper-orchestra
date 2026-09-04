@@ -210,7 +210,7 @@ program
   .option("--timeout-multiplier <n>", "scale every stage timeout", "1")
   .option(
     "--until <stage>",
-    "stop after this stage, locking a shorter plan (outline, literature, plotting, section_writing, refinement)",
+    `stop after this stage, locking a shorter plan (${STAGES.join(", ")})`,
   )
   .option(
     "--allow-lkm-spend",

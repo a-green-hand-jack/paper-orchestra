@@ -9,11 +9,12 @@ describe("status report", () => {
     const { workspace } = await prepared();
     const report = buildStatus(readRunState(workspace), 1);
     expect(report.stages.map((s) => s.id)).toEqual([...STAGES]);
-    expect(report.stages.map((s) => s.number)).toEqual([1, 2, 3, 4, 5]);
+    expect(report.stages.map((s) => s.number)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("points at the stage a resume would run", async () => {
     const { workspace } = await prepared();
+    updateStage(workspace, "triage", (s) => ({ ...s, status: "completed" }));
     updateStage(workspace, "outline", (s) => ({ ...s, status: "completed" }));
     expect(buildStatus(readRunState(workspace), 1).next_stage).toBe("literature");
   });
@@ -50,7 +51,9 @@ describe("status report", () => {
       status: "failed",
       error: "outline_coverage: expected section_plan to be non-empty",
     }));
-    const stage = buildStatus(readRunState(workspace), 1).stages[0];
+    const stage = buildStatus(readRunState(workspace), 1).stages.find(
+      (entry) => entry.id === "outline",
+    );
     expect(stage?.status).toBe("failed");
     expect(stage?.error).toContain("outline_coverage");
   });

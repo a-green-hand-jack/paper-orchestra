@@ -246,3 +246,51 @@ export const BuildReportSchema = z
   })
   .passthrough();
 export type BuildReport = z.infer<typeof BuildReportSchema>;
+
+/**
+ * `triage.json` — how the pre-writing documents came to be.
+ *
+ * Two jobs. It records which of the user's files fed which document, so a run's
+ * provenance survives; and it carries the quotes that make a synthesis
+ * checkable. `mode` distinguishes the two paths: `"supplied"` when the user
+ * handed over both documents and no model ran, `"synthesized"` when triage
+ * wrote them.
+ *
+ * `claims` is what a byte floor can never buy. A model that invented a number
+ * cannot produce a quote that is really in a file, and a substring test is a
+ * fact about the filesystem rather than a second model's opinion -- the same
+ * rule the rest of the validators follow.
+ */
+export const TriageSourceSchema = z
+  .object({
+    path: z.string().min(1),
+    role: z.enum(["idea", "experimental_log", "both", "discarded"]),
+    why: z.string().default(""),
+  })
+  .passthrough();
+
+export const TriageClaimSchema = z
+  .object({
+    /** What the synthesized document asserts. */
+    statement: z.string().min(1),
+    /** The file the statement came from, workspace-relative. */
+    source_path: z.string().min(1),
+    /** Text copied verbatim from that file, which the validator re-reads. */
+    quote: z.string().min(1),
+  })
+  .passthrough();
+
+export const TriageReportSchema = z
+  .object({
+    mode: z.enum(["synthesized", "supplied"]),
+    /** Workspace-relative path to the idea document downstream stages read. */
+    idea_path: z.string().min(1),
+    experimental_log_path: z.string().min(1),
+    materials_considered: z.number().int().nonnegative().default(0),
+    sources: z.array(TriageSourceSchema).min(1),
+    claims: z.array(TriageClaimSchema).default([]),
+    /** Questions the materials could not answer, carried forward honestly. */
+    unresolved: z.array(z.string()).default([]),
+  })
+  .passthrough();
+export type TriageReport = z.infer<typeof TriageReportSchema>;

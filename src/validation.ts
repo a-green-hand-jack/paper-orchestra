@@ -8,8 +8,9 @@ import {
   FigureInfoSchema,
   OutlineSchema,
   PlottingResultsSchema,
+  TriageReportSchema,
 } from "./artifacts.js";
-import { walkFiles } from "./files.js";
+import { assertInside, walkFiles } from "./files.js";
 import {
   ANONYMITY_OPTIONS,
   bibKeys,
@@ -638,6 +639,161 @@ function noUnresolvedMarkers(workspace: string, manuscriptRel: string): Check {
   return pass(name, "no placeholders or deferral markers");
 }
 
+/** Where a triage-cited path is allowed to live. */
+function triageReadableRoots(workspace: string): string[] {
+  const p = paths(workspace);
+  return [p.source, p.brainInput];
+}
+
+/**
+ * Every path triage cites must exist among the materials.
+ *
+ * Modelled on `bibliographyProvenance`: the controller knows what was imported,
+ * so a reference it cannot resolve was invented. Without this, `sources` and
+ * `claims` could name plausible-sounding files that were never there.
+ */
+function triageProvenance(workspace: string): Check {
+  const name = "triage_provenance";
+  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+  if (!parsed.ok) return parsed.check;
+  const report = parsed.value;
+
+  const roots = triageReadableRoots(workspace);
+  const cited = [
+    ...report.sources.map((entry) => entry.path),
+    ...report.claims.map((claim) => claim.source_path),
+  ];
+  const unresolved: string[] = [];
+  for (const rel of [...new Set(cited)]) {
+    let abs: string;
+    try {
+      abs = assertInside(workspace, rel);
+    } catch {
+      unresolved.push(`${rel} (escapes the workspace)`);
+      continue;
+    }
+    if (!existsSync(abs)) {
+      unresolved.push(`${rel} (does not exist)`);
+      continue;
+    }
+    if (!roots.some((root) => abs === root || abs.startsWith(`${root}/`))) {
+      unresolved.push(`${rel} (outside source/ and .brain/input/)`);
+    }
+  }
+
+  if (unresolved.length > 0) {
+    return fail(
+      name,
+      `expected every path in triage.json to name a file among the imported materials; ` +
+        `these do not: ${unresolved.slice(0, 8).join(", ")}. Cite only files you actually read.`,
+    );
+  }
+  return pass(name, `${cited.length} cited path(s), all present`);
+}
+
+/** Whitespace-normalized, so a re-wrapped quote still matches its source. */
+function flatten(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Every claim's quote must really appear in the file it names.
+ *
+ * This is the answer to "how is a bad synthesis caught", and it is why a byte
+ * floor is not: `{}` clears a floor, and a fluent invented paragraph clears any
+ * length check. A model that fabricated a number cannot produce a quote that is
+ * actually in a file, and a substring test is a fact about the filesystem
+ * rather than a second model's opinion -- the same standard the rest of the
+ * validators hold to.
+ */
+function triageGrounding(workspace: string): Check {
+  const name = "triage_grounding";
+  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+  if (!parsed.ok) return parsed.check;
+  const report = parsed.value;
+
+  if (report.mode === "supplied") {
+    return pass(name, "documents were supplied, so there is nothing to ground");
+  }
+  if (report.claims.length === 0) {
+    return fail(
+      name,
+      "expected triage.json to carry at least one claim quoting the material it came from, " +
+        "found none. Each claim needs a statement, the file it came from, and text copied " +
+        "verbatim from that file.",
+    );
+  }
+
+  const ungrounded: string[] = [];
+  for (const claim of report.claims) {
+    let abs: string;
+    try {
+      abs = assertInside(workspace, claim.source_path);
+    } catch {
+      ungrounded.push(`${claim.source_path} (escapes the workspace)`);
+      continue;
+    }
+    const body = readIfExists(abs);
+    if (body === null) {
+      ungrounded.push(`${claim.source_path} (does not exist)`);
+      continue;
+    }
+    if (!flatten(body).includes(flatten(claim.quote))) {
+      ungrounded.push(`"${claim.quote.slice(0, 60)}" is not in ${claim.source_path}`);
+    }
+  }
+
+  if (ungrounded.length > 0) {
+    return fail(
+      name,
+      `expected every claim's quote to appear verbatim in the file it names; ` +
+        `${ungrounded.slice(0, 5).join("; ")}. Copy the text rather than paraphrasing it.`,
+    );
+  }
+  return pass(name, `${report.claims.length} claim(s) grounded in the materials`);
+}
+
+/**
+ * The synthesized documents must have the shape the later stages assume.
+ *
+ * A modest structural floor, in the spirit of `outlineCoverage`: the outline
+ * stage reads headed sections out of the idea document, and the writer quotes
+ * numbers out of the log, so an idea with no structure or a log with no figures
+ * at all is a synthesis that will fail later and more expensively. Grounding
+ * does the substantive work; this only rules out the empty shell.
+ */
+function triageCoverage(workspace: string, minHeadings = 2): Check {
+  const name = "triage_coverage";
+  const parsed = parseArtifact(workspace, ARTIFACTS.triageReport, TriageReportSchema, name);
+  if (!parsed.ok) return parsed.check;
+  if (parsed.value.mode === "supplied") {
+    return pass(name, "documents were supplied by the author");
+  }
+
+  const idea = readIfExists(join(workspace, ARTIFACTS.synthesizedIdea));
+  const log = readIfExists(join(workspace, ARTIFACTS.synthesizedLog));
+  if (idea === null) return fail(name, `expected ${ARTIFACTS.synthesizedIdea} to exist`);
+  if (log === null) return fail(name, `expected ${ARTIFACTS.synthesizedLog} to exist`);
+
+  const headings = (idea.match(/^#{1,6}\s+\S/gm) ?? []).length;
+  if (headings < minHeadings) {
+    return fail(
+      name,
+      `expected the synthesized idea to carry at least ${minHeadings} markdown headings ` +
+        `(problem, approach, contributions), found ${headings}`,
+    );
+  }
+  if (!/\d/.test(log)) {
+    return fail(
+      name,
+      "expected the synthesized experimental log to report at least one measured number; " +
+        "it contains no digits. If the materials hold no results, say so in `unresolved` " +
+        "rather than writing a log without them.",
+    );
+  }
+  return pass(name, `${headings} headings in the idea, numbers present in the log`);
+}
+
 /**
  * Validate one stage's artifacts.
  *
@@ -646,6 +802,16 @@ function noUnresolvedMarkers(workspace: string, manuscriptRel: string): Check {
  */
 export function validateStage(workspace: string, stage: StageId, scope: Scope): Check[] {
   switch (stage) {
+    case "triage":
+      return [
+        artifactExists(workspace, ARTIFACTS.synthesizedIdea, 400),
+        artifactExists(workspace, ARTIFACTS.synthesizedLog, 400),
+        schemaValid(workspace, ARTIFACTS.triageReport, TriageReportSchema),
+        triageProvenance(workspace),
+        triageGrounding(workspace),
+        triageCoverage(workspace),
+      ];
+
     case "outline":
       return [
         artifactExists(workspace, ARTIFACTS.outline, 32),
@@ -735,5 +901,8 @@ export const validators = {
   figureRender,
   templateCompatibility,
   anonymityPreserved,
+  triageProvenance,
+  triageGrounding,
+  triageCoverage,
   noUnresolvedMarkers,
 };
