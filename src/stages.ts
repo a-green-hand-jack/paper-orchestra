@@ -7,6 +7,7 @@
  * rather than in a stage object, so adding an attribute never touches the plan.
  */
 export const STAGES = [
+  "triage",
   "outline",
   "literature",
   "plotting",
@@ -37,6 +38,7 @@ export function nextStage(id: StageId): StageId | null {
  * outside the code and can be edited without a rebuild.
  */
 export const COMMANDS: Record<StageId, string> = {
+  triage: "0-po-triage",
   outline: "1-po-outline",
   literature: "2-po-literature",
   plotting: "3-po-plotting",
@@ -46,6 +48,7 @@ export const COMMANDS: Record<StageId, string> = {
 
 /** Human-readable stage titles for `status` output and checkpoint subjects. */
 export const TITLES: Record<StageId, string> = {
+  triage: "Triage",
   outline: "Outline",
   literature: "Literature review",
   plotting: "Plotting",
@@ -58,6 +61,9 @@ export const TITLES: Record<StageId, string> = {
  * `timeout_multiplier` so a slow provider does not require patching source.
  */
 export const TIMEOUTS_MS: Record<StageId, number> = {
+  // Above outline's: triage may have to read across a whole directory before
+  // it can write anything.
+  triage: 15 * 60_000,
   outline: 10 * 60_000,
   literature: 30 * 60_000,
   plotting: 25 * 60_000,
@@ -71,6 +77,7 @@ export const TIMEOUTS_MS: Record<StageId, number> = {
  * `paper-orchestra resume`, which is deliberate rather than an infinite retry.
  */
 export const REMEDIATION_ATTEMPTS: Record<StageId, number> = {
+  triage: 1,
   outline: 1,
   literature: 1,
   // Image generations are independent Codex turns, so a third attempt can
@@ -88,6 +95,9 @@ export const REMEDIATION_ATTEMPTS: Record<StageId, number> = {
  * human gate there buys nothing the validators do not already give.
  */
 export const COLLABORATIVE_GATES: readonly StageId[] = [
+  // Triage is the highest-leverage model call in the plan -- every later stage
+  // reads its output -- so it is the one a human most wants to see.
+  "triage",
   "outline",
   "literature",
   "section_writing",

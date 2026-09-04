@@ -124,11 +124,12 @@ describe("locks", () => {
 describe("resume selection", () => {
   it("starts at the first stage of a fresh run", async () => {
     const { workspace } = await prepared();
-    expect(resumeStage(readRunState(workspace))).toBe("outline");
+    expect(resumeStage(readRunState(workspace))).toBe("triage");
   });
 
   it("skips completed stages and stops at the first unfinished one", async () => {
     const { workspace } = await prepared();
+    updateStage(workspace, "triage", (s) => ({ ...s, status: "completed" }));
     updateStage(workspace, "outline", (s) => ({ ...s, status: "completed" }));
     updateStage(workspace, "literature", (s) => ({ ...s, status: "completed" }));
     expect(resumeStage(readRunState(workspace))).toBe("plotting");
@@ -136,6 +137,7 @@ describe("resume selection", () => {
 
   it("resumes a failed stage rather than stepping past it", async () => {
     const { workspace } = await prepared();
+    updateStage(workspace, "triage", (s) => ({ ...s, status: "completed" }));
     updateStage(workspace, "outline", (s) => ({ ...s, status: "completed" }));
     updateStage(workspace, "literature", (s) => ({ ...s, status: "failed" }));
     expect(resumeStage(readRunState(workspace))).toBe("literature");

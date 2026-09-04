@@ -84,7 +84,23 @@ export function readRunState(workspace: string): RunState {
   if (!existsSync(file)) {
     throw new StateError(`no run state at ${file}; is this a paper-orchestra workspace?`);
   }
-  const parsed = RunStateSchema.safeParse(readJson(file));
+  const raw = readJson(file) as { schema_version?: unknown };
+
+  // Check the version BEFORE the schema. A run.json from an older plan fails
+  // parsing twice over -- the literal schema_version, and StagesSchema
+  // requiring a key for every stage -- and surfaces as "is invalid", which
+  // reads like a corrupt file rather than an older one.
+  if (typeof raw.schema_version === "string" && raw.schema_version !== RUN_SCHEMA_VERSION) {
+    throw new StateError(
+      `run state at ${file} is ${raw.schema_version}, but this version reads ` +
+        `${RUN_SCHEMA_VERSION}. The plan gained a "triage" stage, so an older run cannot be ` +
+        "resumed in place: its outline was written without one, and inventing the missing " +
+        "stage entry would make the run's own provenance record assert a stage that never " +
+        "ran. The work is preserved on the run branch; start a new run for further writing.",
+    );
+  }
+
+  const parsed = RunStateSchema.safeParse(raw);
   if (!parsed.success) {
     throw new StateError(`run state at ${file} is invalid: ${parsed.error.message}`);
   }

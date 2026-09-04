@@ -20,7 +20,7 @@ describe("agent-callable CLI result", () => {
       run_id: readRunState(workspace).run_id,
       run_state: "gate_waiting",
       current_stage: "outline",
-      next_stage: "outline",
+      next_stage: "triage",
       validation_failures: [],
       artifacts: { latex: null, final_pdf: null },
     });

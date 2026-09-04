@@ -12,10 +12,14 @@ import {
 } from "../src/stages.js";
 
 describe("the fixed writing plan", () => {
-  it("is exactly the five PaperOrchestra stages in order", () => {
+  // This assertion is a tripwire against a SILENT reorder, not a freeze on the
+  // plan's length: triage was added ahead of outline deliberately, and updating
+  // the expectation here is the intended way to record that.
+  it("is exactly the six PaperOrchestra stages in order", () => {
     // Locked deliberately: the plan IS this order, and a silent reordering
     // would change what every checkpoint trailer means.
     expect([...STAGES]).toEqual([
+      "triage",
       "outline",
       "literature",
       "plotting",
@@ -40,8 +44,9 @@ describe("the fixed writing plan", () => {
   });
 
   it("numbers stages from one", () => {
-    expect(stageNumber("outline")).toBe(1);
-    expect(stageNumber("refinement")).toBe(5);
+    expect(stageNumber("triage")).toBe(1);
+    expect(stageNumber("outline")).toBe(2);
+    expect(stageNumber("refinement")).toBe(STAGES.length);
   });
 
   it("recognizes only real stage ids", () => {
