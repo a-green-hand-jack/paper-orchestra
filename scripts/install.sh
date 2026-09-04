@@ -66,12 +66,34 @@ npm install --silent --no-fund --no-audit >/dev/null
 info "building..."
 npm run build --silent >/dev/null
 
-info "linking globally..."
-# `npm link` writes into npm's global prefix. When that is a root-owned
-# directory the failure is a wall of EACCES, so say what to do about it.
-if ! npm link --silent >/dev/null 2>&1; then
+# `npm link` leaves a symlink pointing at $SRC. From a clone that is what you
+# want -- your edits are live. From the piped install $SRC is a temporary clone
+# that `trap cleanup EXIT` removes moments later, and the verification below
+# runs BEFORE the trap: the script printed a version and then deleted the thing
+# it had just linked, leaving a dangling global command on the path the README
+# recommends to new users.
+#
+# `npm install -g "$SRC"` does NOT fix it -- npm symlinks a local directory
+# just as `npm link` does, verified by resolving the installed binary back to
+# the source tree. Packing first is what produces a real copy: the tarball is
+# built from the `files` list, so it also installs exactly what a published
+# package would.
+if [ -n "${TMPDIR_CLONE:-}" ]; then
+  info "packaging..."
+  TARBALL="$SRC/$(npm pack --silent)"
+  [ -f "$TARBALL" ] || die "npm pack did not produce a tarball"
+  info "installing globally..."
+  INSTALL_CMD="npm install -g $TARBALL"
+else
+  info "linking globally..."
+  INSTALL_CMD="npm link"
+fi
+
+# Writes into npm's global prefix. When that is root-owned the failure is a wall
+# of EACCES, so say what to do about it.
+if ! $INSTALL_CMD --silent >/dev/null 2>&1; then
   PREFIX="$(npm config get prefix)"
-  red "npm link failed writing to $PREFIX"
+  red "$INSTALL_CMD failed writing to $PREFIX"
   red ""
   red "Either give npm a writable prefix (recommended):"
   red "    npm config set prefix ~/.npm-global"
