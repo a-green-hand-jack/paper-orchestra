@@ -185,5 +185,4 @@ Hence avoid relying only on color as the discriminative feature in plots (such a
 * DO NOT change `\usepackage[capitalize]{cleveref}` into `\usepackage[capitalize]{cleverref}`, as there's no `cleverref.sty`.
 * Keep the existing packages in the template unchanged.
 * For consistent compilation across environments, all figures will reside in the `figures` directory. Always include the `figures/` prefix in your `\includegraphics` command. Failing to include this prefix (e.g., using `figure_1.png` instead of `figures/figure_1.png`) will result in figure loading errors during the build process.
-* Always use the following author information placeholder in your writeup:
-    * Ambitious AI Researcher, AI Research Institute, 123 AI Avenue, ML City, researcher@institute.ai
+* Do not write an author block. The template is loaded with `\usepackage[review]{cvpr}`, which renders "Anonymous CVPR submission" and the paper ID for you. Leave `\author` alone.

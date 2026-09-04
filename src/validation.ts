@@ -11,11 +11,15 @@ import {
 } from "./artifacts.js";
 import { walkFiles } from "./files.js";
 import {
+  ANONYMITY_OPTIONS,
   bibKeys,
   citedKeys,
   documentClass,
+  finalCopyCommands,
   includedGraphics,
+  packageOptions,
   unresolvedMarkers,
+  usedPackages,
 } from "./latex.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
@@ -468,6 +472,75 @@ function templateCompatibility(workspace: string, manuscriptRel: string): Check 
   return pass(name, `${support.length} support file(s), documentclass ${actualClass ?? "unset"}`);
 }
 
+/**
+ * The manuscript must not weaken the anonymity its template configured.
+ *
+ * Anonymity is the template's job, not the model's: CVPR renders "Anonymous
+ * CVPR submission" only under `\\usepackage[review]{cvpr}` (`cvpr.sty:59`,
+ * `:290-297`), and ICLR anonymizes by default until `\iclrfinalcopy` is called
+ * (`iclr2025_conference.sty:28-31`). Both are invisible to
+ * `templateCompatibility`, which compares only the `\documentclass` name and
+ * discards its option list.
+ *
+ * The check compares against `template/template.tex` rather than a per-venue
+ * table, because a user-supplied template directory carries no metadata to
+ * consult -- the benchmark author kits, for instance, ship no
+ * `template-metadata.json` at all. Comparing states the invariant directly: an
+ * anonymity option the template passed has to survive, and a camera-ready
+ * switch the template did not use must not appear. A template with no
+ * anonymity mechanism (Nature Portfolio is single-anonymous, so real names are
+ * correct there) passes without assertion.
+ */
+function anonymityPreserved(workspace: string, manuscriptRel: string): Check {
+  const name = "anonymity_preserved";
+  const p = paths(workspace);
+  const tex = readIfExists(join(workspace, manuscriptRel));
+  if (tex === null) return fail(name, `expected ${manuscriptRel} to exist`);
+
+  const templateMain = readIfExists(join(p.template, "template.tex"));
+  if (templateMain === null) {
+    return pass(name, "no template.tex to compare against, so no configured anonymity mode");
+  }
+
+  for (const pkg of usedPackages(templateMain)) {
+    const required = (packageOptions(templateMain, pkg) ?? []).filter((option) =>
+      ANONYMITY_OPTIONS.includes(option),
+    );
+    if (required.length === 0) continue;
+
+    const actual = packageOptions(tex, pkg);
+    if (actual === null) {
+      return fail(
+        name,
+        `expected the manuscript to load the venue style as ` +
+          `\\usepackage[${required.join(",")}]{${pkg}}, which is what renders the ` +
+          `anonymous title block; the manuscript does not load ${pkg} at all`,
+      );
+    }
+    const dropped = required.filter((option) => !actual.includes(option));
+    if (dropped.length > 0) {
+      return fail(
+        name,
+        `expected \\usepackage{${pkg}} to keep the option(s) ${dropped.join(", ")} that the ` +
+          `template passes; without them the style file prints an author block instead of the ` +
+          `anonymous one. Restore \\usepackage[${required.join(",")}]{${pkg}}`,
+      );
+    }
+  }
+
+  const templateSwitches = finalCopyCommands(templateMain);
+  const added = finalCopyCommands(tex).filter((command) => !templateSwitches.includes(command));
+  if (added.length > 0) {
+    return fail(
+      name,
+      `expected the manuscript not to call ${added.join(", ")}; the template does not, and that ` +
+        `switch turns off the anonymous title block. Remove it`,
+    );
+  }
+
+  return pass(name, "anonymity mode matches the template");
+}
+
 function workspaceVenue(workspace: string): string {
   return basename(workspace);
 }
@@ -618,6 +691,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         citationFloorCheck(workspace, ARTIFACTS.rawDraft, scope),
         figureCoverage(workspace, scope, ARTIFACTS.rawDraft),
         templateCompatibility(workspace, ARTIFACTS.rawDraft),
+        anonymityPreserved(workspace, ARTIFACTS.rawDraft),
         // Compile here rather than only at refinement: a draft that cannot
         // build is far cheaper to fix now than after a refinement pass has
         // rewritten it.
@@ -633,6 +707,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         citationFloorCheck(workspace, ARTIFACTS.finalTex, scope),
         figureCoverage(workspace, scope, ARTIFACTS.finalTex),
         templateCompatibility(workspace, ARTIFACTS.finalTex),
+        anonymityPreserved(workspace, ARTIFACTS.finalTex),
         noUnresolvedMarkers(workspace, ARTIFACTS.finalTex),
       ];
   }
@@ -659,5 +734,6 @@ export const validators = {
   figureCoverage,
   figureRender,
   templateCompatibility,
+  anonymityPreserved,
   noUnresolvedMarkers,
 };

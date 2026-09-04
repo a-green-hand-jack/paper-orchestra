@@ -108,6 +108,62 @@ export function usedPackages(tex: string): string[] {
   return [...found].sort();
 }
 
+/**
+ * Options a manuscript passes to one `\usepackage`, or null when the package is
+ * not loaded at all. An empty array means the package is loaded bare.
+ *
+ * `usedPackages` deliberately discards the option list, which is where the
+ * anonymity switch of several venues lives: CVPR anonymizes only under
+ * `\usepackage[review]{cvpr}`, and `documentClass` matches an option list only
+ * to throw it away. Without this, no check could see the difference between a
+ * double-blind submission and one carrying an author block.
+ */
+export function packageOptions(tex: string, pkg: string): string[] | null {
+  const pattern = /\\(?:usepackage|RequirePackage)\s*(?:\[([^\]]*)\]\s*)?\{([^}]+)\}/g;
+  let options: string[] | null = null;
+  for (const match of tex.matchAll(pattern)) {
+    const names = (match[2] ?? "").split(",").map((name) => name.trim());
+    if (!names.includes(pkg)) continue;
+    const parsed = (match[1] ?? "")
+      .split(",")
+      .map((option) => option.trim())
+      .filter((option) => option.length > 0);
+    // A package loaded more than once contributes the union of its options,
+    // which is what LaTeX itself does.
+    options = options ? [...new Set([...options, ...parsed])] : parsed;
+  }
+  return options;
+}
+
+/**
+ * Package options that turn a venue style file's anonymous mode on.
+ *
+ * Kept as a named set rather than comparing every option, so the check states
+ * what it is about. Broader template drift is `templateCompatibility`'s job.
+ */
+export const ANONYMITY_OPTIONS: readonly string[] = ["review", "anonymous", "blind", "doubleblind"];
+
+/**
+ * Commands that switch a style file OUT of anonymous mode.
+ *
+ * ICLR's `\iclrfinalcopy` is the camera-ready switch: without it the title
+ * block renders "Anonymous authors" and ignores `\author` entirely
+ * (`iclr2025_conference.sty:28-31`, `:87-101`). A manuscript that adds one has
+ * de-anonymized itself even though the template never asked for it.
+ */
+export const FINAL_COPY_COMMANDS: readonly string[] = ["\\iclrfinalcopy", "\\cvprfinalcopy"];
+
+/** Final-copy switches the manuscript calls outside of a comment. */
+export function finalCopyCommands(tex: string): string[] {
+  const withoutComments = tex.replace(/(^|[^\\])%.*$/gm, "$1");
+  return FINAL_COPY_COMMANDS.filter((command) => {
+    // `command` holds one real backslash; a regex needs it doubled. The
+    // trailing guard keeps `\iclrfinalcopyx` from matching `\iclrfinalcopy`.
+    const escaped = command.replace(/\\/g, "\\\\");
+    return new RegExp(`${escaped}(?![a-zA-Z])`).test(withoutComments);
+  });
+}
+
 /** Rough word count of body prose, used for page-budget checks. */
 export function wordCount(tex: string): number {
   const withoutComments = tex.replace(/(^|[^\\])%.*$/gm, "$1");

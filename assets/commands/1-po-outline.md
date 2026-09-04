@@ -207,8 +207,10 @@ You MUST NOT:
 - Insert metadata such as author names, emails, affiliations, or phrases like "corresponding author".
 
 #### Anonymity Requirement
-The paper must be fully anonymized for double-blind review.  
-Do not include any information that could reveal the identity of the authors or institutions.
+Introduce no author, affiliation, institution, or acknowledgement information, and
+do not alter whatever author block the template already contains. Anonymity is the
+template's responsibility, not yours: each venue's style file decides whether and
+how identities are rendered, and the venue's own `guidelines.md` states its policy.
 
 #### Allowed Sources
 You may use only:
