@@ -525,15 +525,21 @@ function templateCompatibility(workspace: string, manuscriptRel: string): Check 
   const tex = readIfExists(join(workspace, manuscriptRel));
   if (tex === null) return fail(name, `expected ${manuscriptRel} to exist`);
 
-  const templateFiles = walkFiles(p.template);
-  const supportExtensions = [".sty", ".bst", ".cls"];
-  const support = templateFiles.filter((rel) => supportExtensions.includes(extname(rel)));
-  if (support.length === 0) {
-    return fail(
-      name,
-      `expected the template directory to supply at least one .sty/.bst/.cls file; found none`,
-    );
-  }
+  // Support files are counted for the report, not required. A template that
+  // relies on the TeX installation instead of shipping its own style is
+  // ordinary -- `\documentclass{article}` with standard packages carries none
+  // at all, and 7 of the 273 inputs measured for template discovery ship no
+  // .sty/.bst/.cls anywhere. Requiring one failed those runs at
+  // `section_writing`, after most of the model spend, for something that is not
+  // a defect.
+  //
+  // Whether the dependencies actually resolve is proved by `latex_assembly`,
+  // which runs a real four-pass build: a template missing a class file it needs
+  // fails there with TeX's own diagnosis, which is stronger evidence than a
+  // count of files in a directory.
+  const support = walkFiles(p.template).filter((rel) =>
+    [".sty", ".bst", ".cls"].includes(extname(rel)),
+  );
 
   const templateMain = readIfExists(join(p.template, "template.tex"));
   const expectedClass = templateMain ? documentClass(templateMain) : null;

@@ -81,7 +81,7 @@ export const ScopeSchema = z.object({
   /** Selected immutable adapter id or the user-supplied template path label. */
   template_id: z.string().min(1).optional(),
   /** Whether the user chose the template or the classifier chose it from the topic. */
-  template_selection: z.enum(["automatic", "explicit"]).optional(),
+  template_selection: z.enum(["automatic", "explicit", "discovered"]).optional(),
   /** Short, locked explanation of the template decision. */
   template_rationale: z.string().min(1).max(500).optional(),
   network_policy: z.enum(["online", "offline"]),

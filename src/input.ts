@@ -280,7 +280,24 @@ export interface ImportResult {
  * used to print a list of skips and exit 0, leaving the failure to surface
  * later as an outline agent reading a path that does not exist.
  */
-export function importDirectory(from: string, to: string): ImportResult {
+export interface ImportOptions {
+  /**
+   * Input-relative paths to leave behind.
+   *
+   * Used to keep the discovered template out of `source/`. The exclusion is
+   * load-bearing rather than tidy: `suppliedBibliography` and
+   * `suppliedFigures` decide whether the author handed us a bibliography or
+   * figures by looking for `source/references.bib` and `source/figures/`, so a
+   * venue's stub left among the materials would impersonate the author's own.
+   */
+  readonly exclude?: ReadonlySet<string>;
+}
+
+export function importDirectory(
+  from: string,
+  to: string,
+  options: ImportOptions = {},
+): ImportResult {
   if (!existsSync(from)) {
     throw new UnsafePathError(`input directory does not exist: ${from}`);
   }
@@ -306,6 +323,10 @@ export function importDirectory(from: string, to: string): ImportResult {
   let bytes = 0;
 
   for (const rel of candidates) {
+    if (options.exclude?.has(rel)) {
+      note(rel, "belongs to the template");
+      continue;
+    }
     if (isSensitive(rel)) {
       note(rel, "sensitive");
       continue;
@@ -372,6 +393,57 @@ export function importDirectory(from: string, to: string): ImportResult {
 }
 
 /** Name the directories contributing most files, so a cap error is actionable. */
+/**
+ * Copy an explicit set of files into the workspace `template/` tree.
+ *
+ * Separate from `importDirectory` because the input is a mapping rather than a
+ * directory: the caller has already decided which files belong to the template
+ * and where each one goes, and several of them come from directories that are
+ * not the template's. The safety treatment is the same -- `assertInside` on
+ * every destination, then mode 0444 -- because the result is digest-locked and
+ * read-only exactly like an imported tree.
+ *
+ * A basename collision is refused rather than resolved. Two claimed files
+ * landing on one destination would mean one silently wins, and which one won
+ * would decide how the paper compiles.
+ */
+export function importTemplateFiles(
+  from: string,
+  to: string,
+  layout: ReadonlyMap<string, string>,
+): ImportResult {
+  const root = resolve(from);
+  const taken = new Map<string, string>();
+  for (const [rel, destination] of layout) {
+    const owner = taken.get(destination);
+    if (owner) {
+      throw new UserFacingError(
+        `the template's ${rel} and ${owner} would both be installed as ` +
+          `template/${destination}. Rename one, or pass --template <dir> to supply the ` +
+          "template directly.",
+      );
+    }
+    taken.set(destination, rel);
+  }
+
+  ensureDir(to);
+  const written: string[] = [];
+  let bytes = 0;
+  for (const [rel, destination] of layout) {
+    const target = assertInside(to, destination);
+    ensureDir(dirname(target));
+    copyFileSync(join(root, rel), target);
+    written.push(destination);
+    try {
+      bytes += statSync(target).size;
+    } catch {
+      // A file we just copied; a stat failure is not worth failing the import.
+    }
+  }
+  makeReadOnly(to, written);
+  return { files: written.sort(), skipped: [], skippedByReason: {}, bytes };
+}
+
 function largestDirectories(from: string, candidates: readonly string[]): string {
   const counts: Record<string, number> = {};
   for (const rel of candidates) {

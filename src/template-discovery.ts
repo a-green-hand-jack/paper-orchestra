@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 
 import { UserFacingError } from "./errors.js";
 import { walkFiles } from "./files.js";
@@ -411,4 +411,39 @@ export function discoverTemplate(input: string): TemplateDiscovery | null {
     candidates,
     dedicatedDirectory: isDedicatedDirectory(root, best.path),
   };
+}
+
+/**
+ * Where each claimed file lands inside the workspace `template/` tree.
+ *
+ * Fragments keep their path relative to the main file, because the template
+ * `\input`s them by that path and flattening would break the reference.
+ * Everything else is flattened to the root, because `compileLatex` scrubs
+ * `TEXINPUTS` and runs `pdflatex` with the build directory as its working
+ * directory -- a `.sty` left in a subdirectory is staged faithfully and then
+ * not found. The three layouts in the corpus need both rules: one keeps the
+ * whole kit in one directory, one puts the style file in a sibling `texmf/`,
+ * and one has the class file three levels down inside a vendored source tree.
+ *
+ * The main file is renamed to `template.tex`. That name is not cosmetic:
+ * `anonymityPreserved` and `templateCompatibility` both read
+ * `template/template.tex`, and both fall back to a vacuous `pass` when it is
+ * absent -- so a template whose main file were left as `main.tex` would turn
+ * the de-anonymisation guard off while still reporting a green check.
+ * `adaptVenueKit` normalises official kits the same way and for the same reason.
+ */
+export function templateLayout(discovery: TemplateDiscovery): Map<string, string> {
+  const home = dirname(discovery.main);
+  const layout = new Map<string, string>();
+  for (const rel of discovery.templateFiles) {
+    if (rel === discovery.main) {
+      layout.set(rel, "template.tex");
+      continue;
+    }
+    const relativeToMain = relative(home, rel);
+    const isFragment =
+      extname(rel).toLowerCase() === ".tex" && !relativeToMain.startsWith("..");
+    layout.set(rel, isFragment ? relativeToMain : basename(rel));
+  }
+  return layout;
 }
