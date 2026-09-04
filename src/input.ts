@@ -29,23 +29,54 @@ import { authoredFiles, depthOf } from "./salience.js";
  * history permanently. Matched against the basename, case-insensitively.
  */
 const SENSITIVE = [
-  /^\.env($|\.)/i,
+  /^\.env$/i,
+  /^\.env\.(local|development|production|test)$/i,
   /^\.npmrc$/i,
   /^\.netrc$/i,
   /^auth\.json$/i,
   /(^|[._-])(id_rsa|id_ed25519|id_ecdsa|id_dsa)($|[._-])/i,
-  /\.(pem|key|p12|pfx|jks|keystore)$/i,
-  // Delimiter-bounded rather than a bare substring. An unanchored
-  // /(token|secret|...)/ discards `tokenizer_notes.md` and
-  // `secrets_rotation_design.md` as credentials -- real false positives on a
-  // notes repository, and invisible ones, because a skipped file is only ever
-  // reported as a line of prose. Every name the test table asserts is still
-  // caught: `slack-token.md`, `my_api_key.txt`, `db_credentials.json`.
-  /(^|[._-])(tokens?|secrets?|credentials?|passwords?|apikeys?|api[_-]?keys?)($|[._-])/i,
+  /\.(pem|p12|pfx|jks|keystore)$/i,
 ];
+
+/**
+ * Deliberately NOT here: a word list over filenames.
+ *
+ * This used to also match `(tokens?|secrets?|credentials?|passwords?|apikeys?)`
+ * bounded by delimiters, on the theory that a delimiter-bounded word is
+ * specific enough. Measured against 63 tasks of a real corpus, it discarded 6
+ * files, and every one of them was research material:
+ *
+ *   token_efficiency_main.jpg          one of the author's seven figures
+ *   token_efficiency_analysis_lcp.jpg  another of them
+ *   train_token_amber.{py,sh}          that task's training scripts
+ *   eval_token_amber.{py,sh}           its evaluation scripts
+ *
+ * In machine learning, "token" is what a model reads, not what authenticates
+ * one. The same is true of "secret" in cryptography papers and "password" in
+ * usable-security papers -- the words a filter treats as credentials are the
+ * subject matter of the fields this tool writes for.
+ *
+ * The lesson generalises past this one list: guessing a file's MEANING from its
+ * name has no stopping point, and each new pattern buys one true positive and
+ * an unknown number of silent, unreported losses. Deciding what the materials
+ * contain is the triage stage's job -- it reads them.
+ *
+ * What is left is not guessing. `.pem`, `id_rsa` and `.env` are credential
+ * FORMATS, not words that suggest a topic; nothing in a paper's materials is
+ * shaped like a PEM private key by accident. `.key` is gone from the extension
+ * list for the same reason the word list is: a `.key` file is a Keynote
+ * presentation as often as it is a key.
+ *
+ * An `.example`, `.sample` or `.template` suffix is exempt: those files exist
+ * to be committed and hold placeholders, and three tasks in the corpus lost
+ * `code/.env.example`, which is the only record of what configuration the
+ * experiment needs.
+ */
+const PLACEHOLDER_SUFFIXES = new Set([".example", ".sample", ".template", ".dist"]);
 
 export function isSensitive(relPath: string): boolean {
   const name = basename(relPath);
+  if (PLACEHOLDER_SUFFIXES.has(extname(name).toLowerCase())) return false;
   return SENSITIVE.some((re) => re.test(name));
 }
 
@@ -55,71 +86,6 @@ export function isSensitive(relPath: string): boolean {
  * caches in them, and copying an unknown binary into a digested, read-only tree
  * is never what the user meant.
  */
-const ALLOWED_EXTENSIONS = new Set([
-  ".md",
-  ".txt",
-  ".tex",
-  ".bib",
-  ".sty",
-  ".cls",
-  ".bst",
-  ".json",
-  ".csv",
-  ".tsv",
-  ".yaml",
-  ".yml",
-  ".pdf",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".svg",
-  ".eps",
-]);
-
-const ALLOWED_NAMES = new Set(["Makefile", "makefile", "latexmkrc", ".latexmkrc"]);
-
-/**
- * Text formats a research directory carries that are not paper material.
- *
- * Kept as a second tier rather than folded into `ALLOWED_EXTENSIONS` so the
- * distinction stays legible: the first tier is what a manuscript is built from,
- * this one is what the experimental record is described in. A benchmark task
- * whose materials are a research overview plus a training repository is 60%
- * `.py` by file count, and that is where the experimental setup lives.
- */
-const TEXT_EXTENSIONS = new Set([
-  ".py",
-  ".ipynb",
-  ".r",
-  ".jl",
-  ".sh",
-  ".bash",
-  ".zsh",
-  ".log",
-  ".jsonl",
-  ".ndjson",
-  ".rst",
-  ".org",
-  ".toml",
-  ".cfg",
-  ".ini",
-  ".c",
-  ".h",
-  ".cc",
-  ".cpp",
-  ".hpp",
-  ".go",
-  ".rs",
-  ".java",
-  ".sql",
-  ".xml",
-  ".html",
-  ".css",
-  ".js",
-  ".ts",
-]);
-
 /**
  * Directories that are never research material.
  *
@@ -164,9 +130,17 @@ export function isNoiseDir(name: string): boolean {
   return NOISE_DIRS.has(name) || name.startsWith(WORKSPACE_DIR_PREFIX);
 }
 
-/** Per-file ceilings. Text is capped low; a figure or PDF legitimately is not. */
-const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_BINARY_FILE_BYTES = 64 * 1024 * 1024;
+/**
+ * One per-file ceiling, for every kind of file.
+ *
+ * There were two, chosen by whether the extension looked binary -- 2 MiB for
+ * text and 64 MiB otherwise. That distinction required classifying the file
+ * first, and classifying is what this module is getting out of the business of
+ * doing. A 40 MiB CSV of measurements is as legitimate as a 40 MiB figure, and
+ * the ceiling's actual job is to keep one pathological file out of a
+ * digest-locked tree, which is a question about size alone.
+ */
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
  * Whole-import ceilings.
@@ -215,49 +189,6 @@ export function looksLikeText(path: string): boolean {
   } finally {
     if (handle !== null) closeSync(handle);
   }
-}
-
-export function isImportable(relPath: string): boolean {
-  const name = basename(relPath);
-  if (ALLOWED_NAMES.has(name)) return true;
-  const extension = extname(name).toLowerCase();
-  if (NEVER_IMPORT_EXTENSIONS.has(extension)) return false;
-  return ALLOWED_EXTENSIONS.has(extension) || TEXT_EXTENSIONS.has(extension);
-}
-
-/** Whether an unknown extension may be admitted by sniffing its content. */
-function mayBeSniffed(relPath: string): boolean {
-  const extension = extname(basename(relPath)).toLowerCase();
-  return !NEVER_IMPORT_EXTENSIONS.has(extension) && !isBinaryMaterial(relPath);
-}
-
-/**
- * Extensions that are never research material, whatever their bytes look like.
- *
- * The sniff tier exists for *unknown* extensions. Without this list it would
- * also admit build artifacts and archives whose leading bytes happen to decode
- * as text -- an empty `.pyc`, a text-shaped `.dat` -- and "the sample looked
- * like text" is not a reason to import a compiled object. Checked before the
- * sniff, so the decision never depends on file content for a format we can
- * already name.
- */
-const NEVER_IMPORT_EXTENSIONS = new Set([
-  ".so", ".pyc", ".pyo", ".pyd", ".whl", ".egg", ".exe", ".dll", ".dylib",
-  ".a", ".o", ".obj", ".class", ".jar", ".war",
-  ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar",
-  ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
-  ".pkl", ".pickle", ".npy", ".npz", ".pt", ".pth", ".ckpt", ".safetensors",
-  ".h5", ".hdf5", ".onnx", ".pb", ".tflite",
-  ".woff", ".woff2", ".ttf", ".otf",
-  ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", ".wav", ".flac",
-  ".iso", ".dmg", ".deb", ".rpm",
-]);
-
-/** Extensions whose content is not text and must not be sniffed. */
-function isBinaryMaterial(relPath: string): boolean {
-  return [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".eps"].includes(
-    extname(relPath).toLowerCase(),
-  );
 }
 
 export interface ImportResult {
@@ -334,21 +265,14 @@ export function importDirectory(
 
     const abs = join(from, rel);
     const size = statSync(abs).size;
-    const binary = isBinaryMaterial(rel);
-    const cap = binary ? MAX_BINARY_FILE_BYTES : MAX_TEXT_FILE_BYTES;
-    if (size > cap) {
-      note(rel, `too large (${size} bytes, cap ${cap})`);
+    if (size > MAX_FILE_BYTES) {
+      note(rel, `too large (${size} bytes, cap ${MAX_FILE_BYTES})`);
       continue;
     }
 
-    if (!isImportable(rel)) {
-      // Unknown extension, or none at all: admit it if it reads as text. This
-      // is what lets README/LICENSE/Dockerfile through without a name list.
-      if (!mayBeSniffed(rel) || !looksLikeText(abs)) {
-        note(rel, "not importable");
-        continue;
-      }
-    }
+    // No third test. What the author handed over is what `source/` records;
+    // whether a given file is worth reading is decided later, by something
+    // that can actually read it.
 
     keep.push(rel);
     bytes += size;
@@ -521,6 +445,11 @@ export interface BrainInputResult {
   readonly files: string[];
   /** Files that could not be normalized, with the reason. */
   readonly skipped: string[];
+  /**
+   * Files present in `source/` whose bytes are not text, so no readable copy
+   * exists. Not a failure and not hidden -- the inventory names them.
+   */
+  readonly unreadable: string[];
 }
 
 /**
@@ -543,6 +472,7 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
   ensureDir(p.brainInput);
   const produced: string[] = [];
   const skipped: string[] = [];
+  const unreadable: string[] = [];
 
   for (const rel of walkFiles(p.source)) {
     const abs = join(p.source, rel);
@@ -557,14 +487,22 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
       }
       continue;
     }
-    if (isBinaryMaterial(rel)) continue;
+    // Mirrored only if the bytes really are text. This is the one place a
+    // readability judgement belongs, it is made from content rather than from a
+    // name, and being left out here is not being hidden: `materialsInventory`
+    // lists every file in `source/` and marks the ones it could not mirror, so
+    // the agent knows a `runs.npy` exists and that it cannot read it.
+    if (!looksLikeText(abs)) {
+      unreadable.push(rel);
+      continue;
+    }
 
     const target = assertInside(p.brainInput, rel);
     ensureDir(dirname(target));
     copyFileSync(abs, target);
     produced.push(target);
   }
-  return { files: produced.map((path) => relative(workspace, path)), skipped };
+  return { files: produced.map((path) => relative(workspace, path)), skipped, unreadable };
 }
 
 /** Extensions a supplied figure can arrive as. */
@@ -676,19 +614,42 @@ export function materialsFitWhole(workspace: string): boolean {
  */
 export function materialsInventory(workspace: string, maxEntries = 200): string {
   const p = paths(workspace);
-  const files = walkFiles(p.brainInput)
-    .filter((rel) => !rel.startsWith(`synthesized${sep}`) && rel !== "synthesized")
-    .map((rel) => ({ rel, bytes: statSync(join(p.brainInput, rel)).size }));
 
-  if (files.length === 0) return "(no normalized material found)";
+  // Walked over `source/`, not over the mirrored tree. `source/` is what the
+  // author gave us; `.brain/input/` is what happens to be readable. Listing
+  // only the latter told the agent that the unreadable files did not exist,
+  // which is the one thing an inventory must never do -- a `runs.npy` holding
+  // the results then goes unmentioned rather than being reported as a gap.
+  const mirrored = new Set(walkFiles(p.brainInput, { onUnsafe: "skip" }));
+  const readable = (rel: string): boolean => {
+    if (mirrored.has(rel)) return true;
+    // A PDF is mirrored as markdown beside its own path.
+    const asMarkdown = join(dirname(rel), `${basename(rel, extname(rel))}.md`);
+    return mirrored.has(asMarkdown);
+  };
 
-  const header = `${files.length} file(s) under .brain/input/`;
+  const files = walkFiles(p.source, { onUnsafe: "skip" }).map((rel) => ({
+    rel,
+    bytes: statSync(join(p.source, rel)).size,
+    readable: readable(rel),
+  }));
+
+  if (files.length === 0) return "(no imported material found)";
+
+  const unreadable = files.filter((f) => !f.readable).length;
+  const note = (f: { rel: string; bytes: number; readable: boolean }): string =>
+    `  ${f.rel}  (${f.bytes} bytes${f.readable ? "" : ", binary -- no text copy"})`;
+
+  const header =
+    `${files.length} file(s) under source/, mirrored for reading under .brain/input/` +
+    (unreadable > 0
+      ? `. ${unreadable} of them are not text, so no readable copy exists -- expected for ` +
+        "images and data blobs, and not a problem by itself. If one of them holds something " +
+        "the paper needs and you cannot read it, say so in `unresolved` rather than guessing."
+      : ".");
+
   if (files.length <= maxEntries) {
-    return [
-      header,
-      "",
-      ...files.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
-    ].join("\n");
+    return [header, "", ...files.map(note)].join("\n");
   }
 
   const byDir = new Map<string, { count: number; bytes: number }>();
@@ -699,7 +660,7 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
   }
   const largest = [...files].sort((a, b) => b.bytes - a.bytes).slice(0, 40);
   return [
-    `${header}, too many to list individually. Directory summary:`,
+    `${header} Too many to list individually. Directory summary:`,
     "",
     ...[...byDir.entries()]
       .sort((a, b) => b[1].count - a[1].count)
@@ -707,7 +668,7 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
     "",
     "Largest files:",
     "",
-    ...largest.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
+    ...largest.map(note),
     "",
     "Use glob and read to explore the rest.",
   ].join("\n");
@@ -733,17 +694,17 @@ export function materialSurvey(rawMaterials: string, budgetChars: number): strin
     skipDir: isNoiseDir,
     onUnsafe: "skip",
   }).filter((rel) => {
+    // This survey is quoted into a prompt, so it wants text and only text --
+    // decided by reading the bytes, which is also the only test that works for
+    // a format nobody listed.
     if (isSensitive(rel)) return false;
-    if (isBinaryMaterial(rel)) return false;
-    const extension = extname(rel).toLowerCase();
-    if (NEVER_IMPORT_EXTENSIONS.has(extension)) return false;
     const abs = join(root, rel);
     try {
-      if (statSync(abs).size > MAX_TEXT_FILE_BYTES) return false;
+      if (statSync(abs).size > MAX_FILE_BYTES) return false;
     } catch {
       return false;
     }
-    return isImportable(rel) || looksLikeText(abs);
+    return looksLikeText(abs);
   });
 
   if (candidates.length === 0) return "(no readable material found)";

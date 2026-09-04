@@ -46,10 +46,15 @@ import type { Check, Scope } from "./state/schema.js";
 const COLUMN_OVERFLOW_PT = 10;
 
 function pass(name: string, detail: string): Check {
-  return { name, passed: true, detail };
+  return { name, passed: true, detail, advisory: false };
 }
+/** A finding worth reporting and worth trying to fix, but not worth dying for. */
+function advise(name: string, detail: string): Check {
+  return { name, passed: false, detail, advisory: true };
+}
+
 function fail(name: string, detail: string): Check {
-  return { name, passed: false, detail };
+  return { name, passed: false, detail, advisory: false };
 }
 
 function readIfExists(path: string): string | null {
@@ -682,27 +687,40 @@ function latexAssembly(workspace: string): Check {
     );
   }
 
-  // Content wider than its column is what produces visible layout damage: a
-  // table 41pt too wide for a CVPR column spilled across the gutter and landed
-  // on top of the References heading on a real run. Small overfulls are endemic
-  // in real papers and invisible in print, so only a spill a reader would
-  // actually see is a defect -- a floor that fails a run should protect
-  // something.
-  const spills = report.overfull_boxes.filter((box) => box.points >= COLUMN_OVERFLOW_PT);
-  if (spills.length > 0) {
-    const worst = spills[0] as { points: number; lines: string };
-    return fail(
-      name,
-      `expected all content to fit its column, but ${spills.length} block(s) overflow; ` +
-        `the worst is ${Math.round(worst.points)}pt too wide at line(s) ${worst.lines}. ` +
-        `In a two-column layout an overflowing table or figure prints on top of the ` +
-        `neighbouring column. Either span both columns with the starred float ` +
-        `environment (table*/figure*), or reduce the content: fewer columns, ` +
-        `abbreviated headers, or a smaller font via \\small or \\resizebox.`,
-    );
-  }
-
   return pass(name, `${report.source} compiled to ${report.pages ?? "?"} page(s)`);
+}
+
+/**
+ * Content wider than its column, reported but never fatal.
+ *
+ * Real layout damage exists: a table 41pt too wide for a CVPR column spilled
+ * across the gutter and printed on top of the References heading on a real run.
+ * So this is worth saying, and worth one remediation attempt.
+ *
+ * What it is not worth is discarding the paper. Overfull boxes are ordinary in
+ * LaTeX -- a long URL, a wide table, an unbreakable inline formula -- and on a
+ * five-task sample this check, when fatal, destroyed two complete manuscripts:
+ * one over twenty blocks in a 28-page life-sciences paper, and one over a
+ * single block 19pt too wide. A human reviewer would have accepted both and
+ * nudged the table. Measuring the overflow is a fact; deciding it makes the
+ * work worthless was a judgement this threshold had no standing to make.
+ */
+function columnOverflow(workspace: string): Check {
+  const name = "column_overflow";
+  const parsed = parseArtifact(workspace, ARTIFACTS.buildReport, BuildReportSchema, name);
+  if (!parsed.ok) return pass(name, "no build report to inspect yet");
+  const spills = parsed.value.overfull_boxes.filter((box) => box.points >= COLUMN_OVERFLOW_PT);
+  if (spills.length === 0) return pass(name, "every block fits its column");
+
+  const worst = spills[0] as { points: number; lines: string };
+  return advise(
+    name,
+    `${spills.length} block(s) overflow their column; the worst is ` +
+      `${Math.round(worst.points)}pt too wide at line(s) ${worst.lines}. An overflowing ` +
+      `table or figure can print on top of neighbouring content. Either span both columns ` +
+      `with the starred float environment (table*/figure*), or reduce the content: fewer ` +
+      `columns, abbreviated headers, or a smaller font via \\small or \\resizebox.`,
+  );
 }
 
 /** A finished manuscript must contain no placeholders or deferral markers. */
@@ -966,6 +984,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         // build is far cheaper to fix now than after a refinement pass has
         // rewritten it.
         latexAssembly(workspace),
+        columnOverflow(workspace),
       ];
 
     case "refinement":
@@ -973,6 +992,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         artifactExists(workspace, ARTIFACTS.finalTex, 512),
         artifactExists(workspace, ARTIFACTS.finalPdf, 1024),
         latexAssembly(workspace),
+        columnOverflow(workspace),
         citationIntegrity(workspace, ARTIFACTS.finalTex),
         citationFloorCheck(workspace, ARTIFACTS.finalTex, scope),
         figureCoverage(workspace, scope, ARTIFACTS.finalTex),
@@ -994,6 +1014,7 @@ export function validateRun(
 
 export const validators = {
   latexAssembly,
+  columnOverflow,
   artifactExists,
   schemaValid,
   outlineCoverage,

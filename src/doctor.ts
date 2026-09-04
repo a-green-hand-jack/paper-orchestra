@@ -21,7 +21,9 @@ async function version(binary: string, args: readonly string[]): Promise<string 
 }
 
 function check(name: string, passed: boolean, detail: string): Check {
-  return { name, passed, detail };
+  // Environment requirements are never advisory: a missing pdflatex is not
+  // something a run can proceed past.
+  return { name, passed, detail, advisory: false };
 }
 
 /**

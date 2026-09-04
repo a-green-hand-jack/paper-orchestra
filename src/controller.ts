@@ -268,18 +268,18 @@ async function runStage(
     say(options, `>> ${TITLES[stage]} (${stage})  materials read whole, no model call`);
 
     const checks = validateStage(workspace, stage, state.scope);
-    const failed = checks.filter((check) => !check.passed);
+    const blockers = blocking(checks);
     reportChecks(options, checks);
-    if (failed.length > 0) {
+    if (blockers.length > 0) {
       updateStage(workspace, stage, (s) => ({
         ...s,
         status: "failed",
         attempts: s.attempts + 1,
-        error: failed.map((c) => `${c.name}: ${c.detail}`).join("; "),
+        error: blockers.map((c) => `${c.name}: ${c.detail}`).join("; "),
       }));
       throw new UserFacingError(
         `stage "${stage}" failed validation: ` +
-          failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+          blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
       );
     }
 
@@ -320,18 +320,18 @@ async function runStage(
     say(options, `   published ${published} supplied figure(s)`);
 
     const checks = validateStage(workspace, stage, state.scope);
-    const failed = checks.filter((check) => !check.passed);
+    const blockers = blocking(checks);
     reportChecks(options, checks);
-    if (failed.length > 0) {
+    if (blockers.length > 0) {
       updateStage(workspace, stage, (s) => ({
         ...s,
         status: "failed",
         attempts: s.attempts + 1,
-        error: failed.map((c) => `${c.name}: ${c.detail}`).join("; "),
+        error: blockers.map((c) => `${c.name}: ${c.detail}`).join("; "),
       }));
       throw new UserFacingError(
         `stage "${stage}" failed validation: ` +
-          failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+          blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
       );
     }
 
@@ -450,11 +450,20 @@ async function runStage(
   const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
   const notes = (await lastAssistantText(runtime, sessionId)).split("\n")[0]?.slice(0, 200) ?? "";
 
-  if (failed.length > 0) {
+  const blockers = blocking(checks);
+  if (blockers.length > 0) {
     updateStage(workspace, stage, (s) => ({ ...s, usage, notes }));
     throw new UserFacingError(
       `stage "${stage}" failed validation after ${budget} remediation attempt(s): ` +
-        failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+        blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
+    );
+  }
+  const remaining = checks.filter((check) => !check.passed);
+  if (remaining.length > 0) {
+    say(
+      options,
+      `   ${remaining.length} advisory finding(s) remain: ` +
+        remaining.map((check) => check.name).join(", "),
     );
   }
 
@@ -487,8 +496,21 @@ async function runStage(
 
 function reportChecks(options: ControllerOptions, checks: readonly Check[]): void {
   for (const check of checks) {
-    if (!check.passed) say(options, `   FAIL ${check.name}: ${check.detail}`);
+    if (check.passed) continue;
+    say(options, `   ${check.advisory ? "WARN" : "FAIL"} ${check.name}: ${check.detail}`);
   }
+}
+
+/**
+ * The failures that end a stage.
+ *
+ * Every failed check is handed to remediation, but only a blocking one decides
+ * that the stage did not happen. Otherwise a finished, compiling, fully cited
+ * manuscript is thrown away over a table that is 19pt too wide -- which is what
+ * used to happen, twice in a five-task sample.
+ */
+function blocking(checks: readonly Check[]): Check[] {
+  return checks.filter((check) => !check.passed && !check.advisory);
 }
 
 /**
@@ -1029,14 +1051,14 @@ async function runPlottingGeneration(
 
   const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
   const checks = validateStage(workspace, stage, state.scope);
-  const failed = checks.filter((check) => !check.passed);
+  const blockers = blocking(checks);
   reportChecks(options, checks);
 
-  if (failed.length > 0) {
+  if (blockers.length > 0) {
     updateStage(workspace, stage, (s) => ({ ...s, status: "failed", usage }));
     throw new UserFacingError(
       `stage "${stage}" failed validation: ` +
-        failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+        blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
     );
   }
 

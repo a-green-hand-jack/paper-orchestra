@@ -459,22 +459,26 @@ program
       : validateRun(workspace, state.scope.plan, state.scope);
 
     const failed = checks.filter((check) => !check.passed);
+    const blockers = failed.filter((check) => !check.advisory);
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify({ checks, failed: failed.length }, null, 2)}\n`);
     } else {
       for (const check of checks) {
-        process.stdout.write(`${check.passed ? "pass" : "FAIL"}  ${check.name}\n`);
+        const label = check.passed ? "pass" : check.advisory ? "warn" : "FAIL";
+        process.stdout.write(`${label}  ${check.name}\n`);
         if (!check.passed) process.stdout.write(`      ${check.detail}\n`);
       }
       process.stdout.write(`\n${checks.length - failed.length}/${checks.length} passed\n`);
     }
 
-    if (failed.length > 0) {
+    if (blockers.length > 0) {
       // Exit 2 rather than 1 so a script can distinguish "validation failed"
-      // from "the command could not run".
+      // from "the command could not run". Advisory findings are printed as
+      // `warn` and do not change the exit status: they are things to look at,
+      // not reasons to call the run broken.
       throw new ValidationFailedError(
-        `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
+        `${blockers.length} check(s) failed: ${blockers.map((c) => c.name).join(", ")}`,
       );
     }
   });

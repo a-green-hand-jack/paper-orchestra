@@ -166,5 +166,20 @@ export const CheckSchema = z.object({
   name: z.string(),
   passed: z.boolean(),
   detail: z.string(),
+  /**
+   * A failed check that must not end the run.
+   *
+   * Some things are worth telling the model to fix without being worth
+   * throwing a finished manuscript away for. Column overflow is the case that
+   * forced this: overfull boxes are endemic in real LaTeX, and a fixed points
+   * threshold was deciding that a complete, compiling, fully cited paper was
+   * unacceptable -- it killed two of five runs on a corpus sample, one of them
+   * over a single block 19pt too wide.
+   *
+   * An advisory failure still goes into the remediation prompt, so the model
+   * gets its chance; it simply does not turn "the paper has a wide table" into
+   * "there is no paper".
+   */
+  advisory: z.boolean().default(false),
 });
 export type Check = z.infer<typeof CheckSchema>;
