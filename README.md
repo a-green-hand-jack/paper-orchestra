@@ -12,7 +12,7 @@ been replaced by a standalone OpenCode-native agent in TypeScript. The writing
 capability is PaperOrchestra's; the runtime is not.
 
 <div align="center">
-  <img src="assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
+  <img src="src/assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
 </div>
 
 ## What is different from upstream
@@ -313,8 +313,8 @@ import: `.env*`, key files and token-shaped filenames never enter the workspace.
 
 - `src/` — the agent: controller, stages, validators, retrieval, LaTeX and
   figure execution
-- `assets/commands/` — the stage prompts, hand-edited and authoritative
-- `templates/` — conference LaTeX templates; add one as a new subdirectory
+- `src/assets/commands/` — the stage prompts, hand-edited and authoritative
+- `src/templates/` — conference LaTeX templates; add one as a new subdirectory
 - `tests/` — unit and integration tests (`npm test`)
 
 ## Citation

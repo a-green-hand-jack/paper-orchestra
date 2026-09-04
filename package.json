@@ -10,12 +10,10 @@
     "paper-orchestra": "./dist/cli.js"
   },
   "files": [
-    "dist",
-    "assets",
-    "templates"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-runtime-assets.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -16,9 +16,12 @@ import { templateAdapter, TEMPLATE_ADAPTERS, type TemplateAdapter } from "./venu
 /** Locate the packaged `templates/` directory, however the package is installed. */
 export function templateRoot(): string {
   const here = dirname(fileURLToPath(import.meta.url));
+  // Beside the compiled modules: `src/templates/` is the source and the build
+  // copies it to `dist/templates/`. See `assetRoot` for the same reasoning.
   for (const candidate of [
+    resolve(here, "templates"),
+    resolve(here, "..", "src", "templates"),
     resolve(here, "..", "templates"),
-    resolve(here, "..", "..", "templates"),
   ]) {
     if (existsSync(candidate)) return candidate;
   }
