@@ -9,8 +9,7 @@ synthesis, generated figures, and a compiled PDF.
 
 **This fork is a rewrite.** The original Python/Conda multi-agent pipeline has
 been replaced by a standalone OpenCode-native agent in TypeScript. The writing
-capability is PaperOrchestra's; the runtime is not. See
-[MIGRATION.md](MIGRATION.md) for the module-by-module map and the reasoning.
+capability is PaperOrchestra's; the runtime is not.
 
 <div align="center">
   <img src="assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
@@ -108,8 +107,6 @@ never rewritten, never added to — and the manuscript may only cite keys it
 defines. A bibliography is a decision you have already made, so a run that has
 one is free.
 
-A worked example lives in `examples/`.
-
 ### Common variations
 
 ```bash
@@ -143,10 +140,6 @@ paper-orchestra templates list --ccf-a
 | `--research-cutoff <yyyy-mm>` | Treat nothing published after this as prior work |
 | `--until <stage>` | Stop after a stage, locking a shorter plan |
 | `-o, --output <dir>` | Workspace directory (default: `./po-run-<timestamp>`) |
-
-See [docs/templates.md](docs/templates.md) for checksum-pinned CVPR/ICLR 2026
-installers, all CCF-A venue identities, external-kit normalization, and the
-Nature, Science, and mathematics paths.
 
 ### Other commands
 
@@ -322,7 +315,6 @@ import: `.env*`, key files and token-shaped filenames never enter the workspace.
   figure execution
 - `assets/commands/` — the stage prompts, hand-edited and authoritative
 - `templates/` — conference LaTeX templates; add one as a new subdirectory
-- `examples/` — a worked CVPR sample
 - `tests/` — unit and integration tests (`npm test`)
 
 ## Citation
