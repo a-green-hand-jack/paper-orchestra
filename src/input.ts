@@ -286,9 +286,9 @@ export interface ImportOptions {
    *
    * Used to keep the discovered template out of `source/`. The exclusion is
    * load-bearing rather than tidy: `suppliedBibliography` and
-   * `suppliedFigures` decide whether the author handed us a bibliography or
-   * figures by looking for `source/references.bib` and `source/figures/`, so a
-   * venue's stub left among the materials would impersonate the author's own.
+   * `suppliedFiguresDir` decide whether the author handed us a bibliography or
+   * figures by searching the material tree, so a venue's stub left among the
+   * materials would impersonate the author's own.
    */
   readonly exclude?: ReadonlySet<string>;
 }
@@ -610,15 +610,6 @@ export function suppliedFiguresDir(workspace: string): string | null {
     (a, b) => depthOf(a) - depthOf(b) || a.localeCompare(b),
   )[0] as string;
   return join(SOURCE_DIR, best);
-}
-
-/** Figure assets supplied by the author, used when plotting is disabled. */
-export function suppliedFigures(workspace: string): string[] {
-  const dir = suppliedFiguresDir(workspace);
-  if (dir === null) return [];
-  return readdirSync(join(workspace, dir))
-    .filter((name) => FIGURE_EXTENSIONS.has(extname(name).toLowerCase()))
-    .sort();
 }
 
 /**

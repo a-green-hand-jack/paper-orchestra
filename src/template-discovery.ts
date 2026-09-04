@@ -4,6 +4,11 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 import { UserFacingError } from "./errors.js";
 import { walkFiles } from "./files.js";
 import { isNoiseDir } from "./input.js";
+// The author/vendor boundary lives in one place. Template discovery needs the
+// same judgement the bibliography and figure searches need, and for the same
+// reason: a vendored dependency can contain a complete paper, a bibliography,
+// and a directory of figures. Two copies of this rule would drift.
+import { depthOf, underForeignDir, underNestedPackage } from "./salience.js";
 import { INTERNAL_DIRS } from "./paths.js";
 
 /**
@@ -42,34 +47,6 @@ const SUPPORT_EXTENSION_FOR = {
   bibliographystyle: ".bst",
 } as const;
 
-/**
- * Directory names whose contents are somebody else's source, not this paper's
- * template. A vendored dependency can easily contain a complete paper.
- */
-const FOREIGN_DIRS = new Set([
-  "code", "src", "vendor", "third_party", "thirdparty", "external", "deps",
-  "submodules", "examples", "example", "tests", "test", "docs",
-]);
-
-/**
- * Files that mark a directory as the root of a software package.
- *
- * A candidate inside a NESTED package is that package's asset, not this
- * paper's template. A vendored dependency ships whatever it likes -- one of
- * this corpus's inputs vendors an entire paper-writing tool, complete with its
- * own library of venue templates, and those templates score almost exactly
- * like the real one because they are also empty templates named `template.tex`.
- *
- * Only nested packages count. The input root having a manifest is the normal
- * case -- users point us at their research repository -- so penalising that
- * would penalise almost every real input.
- */
-const PACKAGE_MANIFESTS = new Set([
-  "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "package.json",
-  "cargo.toml", "go.mod", "pom.xml", "build.gradle", "gemfile", "cmakelists.txt",
-  "pubspec.yaml", "composer.json",
-]);
-
 /** Beyond this the two leading candidates are too close to choose between. */
 const DECISIVE_MARGIN = 2;
 
@@ -90,11 +67,11 @@ export interface TemplateDiscovery {
    *
    * The exclusion is the point, not an optimization. Several routing decisions
    * read the material tree by filesystem convention -- `suppliedBibliography`
-   * looks for `source/references.bib`, `suppliedFigures` for `source/figures/`
-   * -- so a venue's stub bibliography or example figure left among the
-   * materials would impersonate the author's own. A stub bibliography reaching
-   * `source/references.bib` makes the run skip paid retrieval and cite the
-   * venue's example entries, with no error anywhere.
+   * searches it for a `.bib`, `suppliedFiguresDir` for a figures directory --
+   * so a venue's stub bibliography or example figure left among the materials
+   * would impersonate the author's own. A stub bibliography reaching the
+   * material tree makes the run skip paid retrieval and cite the venue's
+   * example entries, with no error anywhere.
    */
   readonly templateFiles: readonly string[];
   /** Ranked candidates, best first, for reporting. */
@@ -140,35 +117,6 @@ export function proseDensity(body: string): number {
     .replace(/[\s{}[\]$&_^~#\\]+/g, " ")
     .trim();
   return prose.length / Math.max(sections.length, 1);
-}
-
-function depthOf(rel: string): number {
-  return rel.split(sep).length - 1;
-}
-
-function underForeignDir(rel: string): boolean {
-  return dirname(rel).split(sep).some((part) => FOREIGN_DIRS.has(part.toLowerCase()));
-}
-
-/**
- * Is the candidate inside a package nested within the input?
- *
- * Walks the ancestors between the candidate and the input root, exclusive of
- * the root itself, looking for a manifest.
- */
-function underNestedPackage(root: string, rel: string): boolean {
-  const parts = dirname(rel).split(sep).filter((part) => part && part !== ".");
-  for (let depth = 1; depth <= parts.length; depth += 1) {
-    const dir = join(root, ...parts.slice(0, depth));
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      continue;
-    }
-    if (entries.some((entry) => PACKAGE_MANIFESTS.has(entry.toLowerCase()))) return true;
-  }
-  return false;
 }
 
 /**

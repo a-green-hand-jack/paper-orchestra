@@ -25,11 +25,11 @@ import { walkFiles } from "./files.js";
 /**
  * Directory names whose contents are somebody else's source.
  *
- * Shared with template discovery, which needs the same judgement for the same
- * reason: a vendored dependency can contain a complete paper, a bibliography,
- * and a directory of figures.
+ * A vendored dependency can contain a complete paper, a bibliography, and a
+ * directory of figures. Callers reach this through `underForeignDir` rather
+ * than the set itself, so the membership rule stays here.
  */
-export const FOREIGN_DIRS: ReadonlySet<string> = new Set([
+const FOREIGN_DIRS: ReadonlySet<string> = new Set([
   "code", "src", "vendor", "third_party", "thirdparty", "external", "deps",
   "submodules", "examples", "example", "tests", "test", "docs",
 ]);
@@ -51,7 +51,7 @@ export const FOREIGN_DIRS: ReadonlySet<string> = new Set([
  * an earlier attempt at this did, silently adopting a 60-entry example
  * bibliography as the paper's own.
  */
-export const PACKAGE_MANIFESTS: ReadonlySet<string> = new Set([
+const PACKAGE_MANIFESTS: ReadonlySet<string> = new Set([
   "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "package.json",
   "cargo.toml", "go.mod", "pom.xml", "build.gradle", "gemfile", "cmakelists.txt",
   "pubspec.yaml", "composer.json",
@@ -82,11 +82,6 @@ export function underNestedPackage(root: string, rel: string): boolean {
   return false;
 }
 
-/** Is this path the author's own, rather than a vendored dependency's? */
-export function isAuthored(root: string, rel: string): boolean {
-  return !underForeignDir(rel) && !underNestedPackage(root, rel);
-}
-
 /** Directory depth, used to prefer what the author left where they would look for it. */
 export function depthOf(rel: string): number {
   return rel.split(sep).length - 1;
@@ -100,7 +95,9 @@ export function depthOf(rel: string): number {
  * to answer because of one odd entry is worse than one that passes over it.
  */
 export function authoredFiles(root: string): string[] {
-  return walkFiles(root, { onUnsafe: "skip" }).filter((rel) => isAuthored(root, rel));
+  return walkFiles(root, { onUnsafe: "skip" }).filter(
+    (rel) => !underForeignDir(rel) && !underNestedPackage(root, rel),
+  );
 }
 
 /**
@@ -124,34 +121,5 @@ export function findAuthoredFile(
     }
     return depthOf(a) - depthOf(b) || a.localeCompare(b);
   });
-  return matches[0] as string;
-}
-
-/**
- * The author's directory whose basename satisfies `predicate`, or null.
- *
- * Derived from the file walk rather than a directory walk of its own, so an
- * empty directory is never returned: a `figures/` holding nothing is not a
- * supply of figures, and answering "yes" for it would publish zero figures
- * while reporting that the author provided some.
- */
-export function findAuthoredDirectory(
-  root: string,
-  predicate: (basename: string) => boolean,
-): string | null {
-  const dirs = new Set<string>();
-  for (const rel of authoredFiles(root)) {
-    let dir = dirname(rel);
-    while (dir && dir !== ".") {
-      dirs.add(dir);
-      dir = dirname(dir);
-    }
-  }
-  const matches = [...dirs].filter((dir) => {
-    const base = dir.split(sep).pop();
-    return base !== undefined && predicate(base.toLowerCase());
-  });
-  if (matches.length === 0) return null;
-  matches.sort((a, b) => depthOf(a) - depthOf(b) || a.localeCompare(b));
   return matches[0] as string;
 }
