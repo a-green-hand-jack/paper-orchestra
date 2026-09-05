@@ -304,6 +304,24 @@ WS={shlex.quote(WORKSPACE)}
 SUB=/workspace/submission
 mkdir -p "$SUB"
 
+# The template's contributions go FIRST, so that anything the run also
+# produces overwrites them rather than the other way round. Order is
+# load-bearing: a venue author kit ships its own placeholder references.bib,
+# and when the template occupies a directory of its own the attribution step
+# correctly claims that stub as part of the template. Copied last, it landed on
+# top of the bibliography the run had just retrieved -- the manuscript then
+# cited 51 real sources against a stub defining none, and the grader's
+# "every cited key exists in references.bib" test failed on 20 keys while
+# PaperOrchestra's own checks all passed, because inside the workspace the
+# bibliography was correct.
+if [ -d "$WS/template" ]; then
+  ( cd "$WS/template" && find . -type f ! -name 'template.tex' -print0 \
+    | while IFS= read -r -d '' f; do
+        mkdir -p "$SUB/$(dirname "$f")"
+        cp "$f" "$SUB/$f"
+      done )
+fi
+
 if [ -f "$WS/.brain/manuscript/final_paper.tex" ]; then
   cp "$WS/.brain/manuscript/final_paper.tex" "$SUB/main.tex"
 elif [ -f "$WS/.brain/manuscript/raw_draft.tex" ]; then
@@ -313,21 +331,18 @@ else
   echo "PO_SUBMIT: the run produced no manuscript" >&2
 fi
 
-[ -f "$WS/.brain/raw/references.bib" ] && cp "$WS/.brain/raw/references.bib" "$SUB/references.bib"
+# After the template sweep, and unconditionally: this is the bibliography the
+# manuscript was written against.
+if [ -f "$WS/.brain/raw/references.bib" ]; then
+  cp "$WS/.brain/raw/references.bib" "$SUB/references.bib"
+else
+  echo "PO_SUBMIT: the run produced no references.bib" >&2
+fi
 
 if [ -d "$WS/.brain/manuscript/figures" ]; then
   mkdir -p "$SUB/figures"
   find "$WS/.brain/manuscript/figures" -maxdepth 1 -type f ! -name 'info.json' \
     -exec cp {{}} "$SUB/figures/" \;
-fi
-
-# Everything the template contributes except its own placeholder main file.
-if [ -d "$WS/template" ]; then
-  ( cd "$WS/template" && find . -type f ! -name 'template.tex' -print0 \
-    | while IFS= read -r -d '' f; do
-        mkdir -p "$SUB/$(dirname "$f")"
-        cp "$f" "$SUB/$f"
-      done )
 fi
 
 chmod -R u+w "$SUB"
