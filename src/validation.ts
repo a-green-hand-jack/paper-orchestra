@@ -29,6 +29,7 @@ import { plannedCitationCount } from "./queries.js";
 import type { Outline } from "./artifacts.js";
 import type { StageId } from "./stages.js";
 import type { Check, Scope } from "./state/schema.js";
+import { validateResearch } from "./research.js";
 
 /**
  * Validators return data, never throw.
@@ -980,6 +981,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
   switch (stage) {
     case "triage":
       return [
+        validateResearch(workspace),
         artifactExists(workspace, ARTIFACTS.materialsMap, 32),
         schemaValid(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema),
         materialsProvenance(workspace),
@@ -989,6 +991,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "outline":
       return [
+        validateResearch(workspace),
         artifactExists(workspace, ARTIFACTS.outline, 32),
         schemaValid(workspace, ARTIFACTS.outline, OutlineSchema),
         outlineCoverage(workspace),
@@ -996,6 +999,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "literature":
       return [
+        validateResearch(workspace),
         artifactExists(workspace, ARTIFACTS.references, 16),
         artifactExists(workspace, ARTIFACTS.citationMap, 2),
         artifactExists(workspace, ARTIFACTS.outlineV1, 32),
@@ -1029,6 +1033,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "section_writing":
       return [
+        validateResearch(workspace),
         tableCoverage(workspace, ARTIFACTS.rawDraft),
         artifactExists(workspace, ARTIFACTS.rawDraft, 512),
         citationIntegrity(workspace, ARTIFACTS.rawDraft),
@@ -1045,6 +1050,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "refinement":
       return [
+        validateResearch(workspace),
         tableCoverage(workspace, ARTIFACTS.finalTex),
         manuscriptReadiness(workspace),
         artifactExists(workspace, ARTIFACTS.finalTex, 512),

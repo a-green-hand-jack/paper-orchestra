@@ -15,6 +15,18 @@
  * indistinguishable from a hang in headless mode.
  */
 export type PermissionAction = "allow" | "deny" | "ask";
+import type { StageId } from "./stages.js";
+
+export function stageArtifactPermissions(stage: StageId): Array<{ permission: "edit"; pattern: string; action: "deny" }> {
+  const owners: Record<string, StageId> = {
+    ".brain/raw/materials.json": "triage",
+    ".brain/raw/outline.json": "outline",
+    ".brain/raw/outline_v1.json": "literature",
+    ".brain/raw/updated_template.tex": "literature",
+  };
+  return Object.entries(owners).filter(([, owner]) => owner !== stage)
+    .map(([pattern]) => ({ permission: "edit", pattern, action: "deny" }));
+}
 
 export interface PermissionPosture {
   readonly [key: string]: PermissionAction | Record<string, PermissionAction>;
@@ -39,6 +51,9 @@ export function permissionsFor(mode: "autonomous" | "collaborative"): Permission
       ".brain/raw/query_plan.json": "deny",
       ".brain/raw/build.json": "deny",
       ".brain/raw/data_analysis.json": "deny",
+      ".brain/requests.json": "allow",
+      ".brain/operation-results.json": "deny",
+      ".brain/raw/operations/**": "deny",
       ".brain/raw/plotting_results.json": "deny",
       ".brain/manuscript/figures/**": "deny",
       ".brain/manuscript/review.json": "deny",

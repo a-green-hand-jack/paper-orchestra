@@ -14,7 +14,9 @@ import {
   usageDelta,
   waitForIdle,
 } from "./opencode.js";
-import { buildRemediationPrompt, buildStagePrompt } from "./prompts.js";
+import { buildRemediationPrompt, buildStagePrompt, OPERATION_REQUEST_CONTRACT } from "./prompts.js";
+import { beginBudgetRun, endBudgetRun, checkBudget, consumeBudget, readBudget } from "./budget.js";
+import { executeOperations, type OperationHandlers } from "./operations.js";
 import { permissionsFor } from "./permissions.js";
 import { watchPermissionAsks } from "./opencode.js";
 import { installRuntimeAssets } from "./assets.js";
@@ -33,7 +35,7 @@ import { CitationMapSchema, OutlineSchema } from "./artifacts.js";
 import { assertInside, digestFile, digestValue, readJson, writeJsonAtomic } from "./files.js";
 import { retrieveForLiterature, UnmetLiteratureError } from "./literature-controller.js";
 import { preflightRun } from "./preflight.js";
-import { manuscriptReadiness, reviewManuscript } from "./manuscript-review.js";
+import { manuscriptReadiness, reviewManuscript, reviewRepairTargets } from "./manuscript-review.js";
 import { analyzeSourceTables, exportSubmission, publishTables } from "./presentation.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
@@ -59,7 +61,7 @@ import {
   suppliedBibliography,
   toSuppliedCandidates,
 } from "./bibliography.js";
-import { ensureGraphicxPackage, includedGraphics } from "./latex.js";
+import { ensureGraphicxPackage } from "./latex.js";
 
 export interface ControllerOptions {
   readonly workspace: string;
@@ -71,6 +73,9 @@ export interface ControllerOptions {
    */
   readonly allowLkmSpend?: boolean;
   readonly onEvent?: (line: string) => void;
+  /** Shared by nested figure/writer sessions within one controller invocation. */
+  readonly operationTurns?: Partial<Record<StageId, number>>;
+  readonly operationActive?: Set<string>;
 }
 
 const GATE_POLL_MS = 500;
@@ -116,14 +121,16 @@ export async function runController(options: ControllerOptions): Promise<RunStat
   // given a workspace-derived path together with a `cwd` inside the workspace,
   // at which point the relative path resolves against the wrong base and every
   // code-route figure fails to open its own script.
-  const resolved: ControllerOptions = { ...options, workspace: resolve(options.workspace) };
+  const resolved: ControllerOptions = { ...options, workspace: resolve(options.workspace),
+    operationTurns: {}, operationActive: new Set() };
   // Taken before any state is read or written: a second controller on this
   // workspace would interleave checkpoints and race state writes.
   const runLock = acquireRunLock(resolved.workspace);
   try {
+    beginBudgetRun(resolved.workspace);
     return await drive(resolved, runLock);
   } finally {
-    runLock.release();
+    try { endBudgetRun(resolved.workspace); } finally { runLock.release(); }
   }
 }
 
@@ -165,6 +172,8 @@ async function drive(
     for (;;) {
       const stage = resumeStage(readRunState(workspace));
       if (!stage) break;
+      checkBudget(workspace);
+      writeJsonAtomic(join(workspace, ".brain/requests.json"), []);
       activeStage = runStage(runtime, options, stage, sessions, abort.signal);
       if (tui) {
         state = await Promise.race([
@@ -252,7 +261,11 @@ async function runStage(
   const { workspace } = options;
   let state = readRunState(workspace);
   // Claim the stage before any provider, capability, or session setup. If one
-  const priorError = state.stages[stage].error;
+  let priorError = state.stages[stage].error;
+  if (priorError) {
+    const currentFailures = validateStage(workspace, stage, state.scope).filter((check) => !check.passed);
+    if (currentFailures.length) priorError = currentFailures.map((check) => `${check.name}: ${check.detail}`).join("; ");
+  }
   // of those fails, the persisted failure belongs to this stage rather than
   // overwriting the previously completed stage named by current_stage.
   updateRunState(workspace, (current) => ({
@@ -327,6 +340,7 @@ async function runStage(
   // cross-stage memory, so a new session loses nothing that matters.
   const sessionId = await createSession(runtime, {
     title: `paper-orchestra ${stage}`,
+    stage,
   });
   sessions[stage] = sessionId;
   writeSessionState(workspace, { serverUrl: runtime.serverUrl, sessions });
@@ -382,7 +396,8 @@ async function runStage(
 
   await prompt(runtime, {
     sessionId,
-    text: buildStagePrompt(workspace, stage, state.scope, extra) + (priorError
+    text: buildStagePrompt(workspace, stage, state.scope, extra) +
+      "\nRead .brain/writer-continuation.json if present; handle open canonical targets, including table presentation sidecars. Resolved review findings need no repair." + (priorError
       ? `\n\nRESUMING AN EXISTING ATTEMPT. Inspect its existing output first and repair the following failure. ` +
         `Preserve correct work instead of rewriting the whole stage.\n${priorError}` : ""),
     model,
@@ -444,7 +459,7 @@ async function runStage(
 
     await prompt(runtime, {
       sessionId,
-      text: buildRemediationPrompt(stage, failed),
+      text: buildRemediationPrompt(stage, failed) + "\nRead .brain/writer-continuation.json for structured repair assignments. Only independent review can resolve findings.",
       model,
     });
     await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
@@ -556,6 +571,7 @@ export async function resolveGate(
   }
 
   updateRunState(options.workspace, (c) => ({ ...c, status: "gate_waiting" }));
+  endBudgetRun(options.workspace);
   say(
     options,
     `   gate: waiting for approval - run \`paper-orchestra approve ${options.workspace}\``,
@@ -566,6 +582,7 @@ export async function resolveGate(
     signal?.throwIfAborted();
     const current = readRunState(options.workspace);
     if (current.status !== "gate_waiting") {
+      beginBudgetRun(options.workspace);
       say(options, "   gate: approved");
       return current;
     }
@@ -720,6 +737,7 @@ async function visuallyReviewFigure(
     sessionId: input.sessionId,
     timeoutMs: input.timeoutMs,
     signal: input.signal,
+    model: input.model,
   });
   return parseVisualReview(await lastAssistantText(runtime, input.sessionId));
 }
@@ -730,6 +748,8 @@ async function runPlottingGeneration(
   sessions: Record<string, string>,
   signal: AbortSignal,
   initial: RunState,
+  targetIds?: readonly string[],
+  repairInstructions?: string,
 ): Promise<RunState> {
   const stage: StageId = "plotting";
   const { workspace } = options;
@@ -747,7 +767,8 @@ async function runPlottingGeneration(
     );
   }
 
-  const planned = parsed.data.plotting_plan;
+  const planned = parsed.data.plotting_plan.filter((spec) => !targetIds || targetIds.includes(spec.figure_id));
+  if (targetIds && planned.length !== targetIds.length) throw new UserFacingError("Unknown canonical figure target");
   const routed = planned.map((spec) => ({ spec, route: resolveFigureRoute(spec) }));
   const codeCount = routed.filter((entry) => entry.route === "code").length;
   const imageCount = routed.length - codeCount;
@@ -772,11 +793,11 @@ async function runPlottingGeneration(
       `${codeCount} code route, ${imageCount} text-to-image route`,
   );
 
-  const sessionId = await createSession(runtime, { title: `paper-orchestra ${stage}` });
+  const sessionId = await createSession(runtime, { title: `paper-orchestra ${stage}`, stage });
   sessions[stage] = sessionId;
   writeSessionState(workspace, { serverUrl: runtime.serverUrl, sessions });
 
-  state = updateStage(workspace, stage, (s) => ({
+  if (!targetIds) state = updateStage(workspace, stage, (s) => ({
     ...s,
     status: "running",
     attempts: s.attempts + 1,
@@ -786,7 +807,7 @@ async function runPlottingGeneration(
     session_id: sessionId,
     model,
   }));
-  updateRunState(workspace, (c) => ({ ...c, current_stage: stage, status: "running" }));
+  if (!targetIds) updateRunState(workspace, (c) => ({ ...c, current_stage: stage, status: "running" }));
 
   const before = await sessionUsage(runtime, sessionId);
   const figuresDir = join(p.brainManuscript, "figures");
@@ -795,20 +816,27 @@ async function runPlottingGeneration(
   // Supplied figures still publish: generation ADDS to what the author gave,
   // it does not replace it. A run may legitimately supply a hand-drawn
   // architecture diagram and generate its result plots.
-  const supplied = publishSuppliedFigures(workspace);
+  const supplied = targetIds ? 0 : publishSuppliedFigures(workspace);
   const info = FigureInfoSchema.parse(readJson(join(workspace, ARTIFACTS.figuresInfo)) ?? []);
-  const results: Array<Record<string, unknown>> = [];
   const previous = existsSync(join(workspace, ARTIFACTS.plottingResults))
     ? readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults)) : [];
+  const results: Array<Record<string, unknown>> = targetIds
+    ? previous.filter((record) => !targetIds.includes(String(record.figure_id))) : [];
+  if (targetIds) {
+    const names = new Set(previous.filter((record) => targetIds.includes(String(record.figure_id)))
+      .map((record) => basename(String(record.image_path ?? ""))));
+    for (let index = info.length - 1; index >= 0; index--) if (names.has(info[index]!.name)) info.splice(index, 1);
+  }
   // Older controller-written manuscript feedback lacked the per-figure round field.
   for (const record of previous) {
+    if (targetIds && !targetIds.includes(String(record.figure_id))) continue;
     if (Array.isArray(record.critic_history)) record.critic_history.forEach((review, index) => {
       if (review.origin === "manuscript_review" && review.round === undefined) review.round = index;
     });
   }
 
   for (const { spec, route } of routed) {
-    const cached = previous.find((result) => result.figure_id === spec.figure_id &&
+    const cached = !targetIds && previous.find((result) => result.figure_id === spec.figure_id &&
       result.plan_sha256 === digestValue(spec) && typeof result.image_path === "string");
     if (cached) {
       const image = assertInside(p.brainManuscript, String(cached.image_path));
@@ -835,16 +863,20 @@ async function runPlottingGeneration(
     let failure = "";
     let caption = "";
     let provenance: Record<string, unknown> | null = null;
+    let metadata: unknown;
     const priorFigure = previous.find((result) => result.figure_id === spec.figure_id &&
       (result.plan_sha256 === digestValue(spec) ||
         (result.description === spec.objective && result.aspect_ratio === spec.aspect_ratio)));
     const criticHistory: Array<Record<string, unknown>> = Array.isArray(priorFigure?.critic_history)
-      ? priorFigure.critic_history as Array<Record<string, unknown>> : [];
+      ? [...priorFigure.critic_history as Array<Record<string, unknown>>] : [];
+    if (repairInstructions) criticHistory.push({ round: criticHistory.length, passed: false,
+      suggestions: repairInstructions, origin: "operation_request" });
 
     for (let attempt = 0; attempt < budget; attempt += 1) {
+      checkBudget(workspace);
       if (attempt > 0) {
         say(options, `   ${spec.figure_id}: retrying (${failure})`.slice(0, 180));
-        state = updateStage(workspace, stage, (s) => ({
+        if (!targetIds) state = updateStage(workspace, stage, (s) => ({
           ...s,
           remediations: s.remediations + 1,
         }));
@@ -866,14 +898,16 @@ async function runPlottingGeneration(
             : `The code-generated figure \`${spec.figure_id}\` failed: ${failure}\n\n` +
               "Return a complete corrected script in one ```python block and the caption as before.";
         await prompt(runtime, { sessionId, text: generationPrompt, model });
-        await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+        await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal, model });
         const answer = await lastAssistantText(runtime, sessionId);
         const rendered = await renderFigure({
           figureId: spec.figure_id,
           code: answer,
           workDir: join(p.brainTmp, "figures", spec.figure_id, `attempt-${attempt}`),
           dataFiles,
+          spec,
         });
+        metadata = rendered.metadata;
         caption = extractCaption(answer) || spec.title || spec.objective;
         provenance = {
           provider: "opencode",
@@ -913,6 +947,7 @@ async function runPlottingGeneration(
             "short descriptive labels only, not equations: formal definitions belong in the accompanying " +
             "caption and Methods. Never invent a mathematical relationship to fill a box.";
         }
+        consumeBudget(workspace, "image");
         try {
           const generated = await generateTextImage({
             figureId: spec.figure_id,
@@ -932,6 +967,13 @@ async function runPlottingGeneration(
       }
 
       if (!imagePath || failure) continue;
+      if (metadata) {
+        await prompt(runtime, { sessionId, model, text: "Write only Caption: followed by an evidence-grounded caption for " +
+          spec.figure_id + ". Use the actual rendered axes, scales, signed ranges, labels and source hashes below; " +
+          "do not infer an absolute-value log plot from symlog.\n" + JSON.stringify(metadata) });
+        await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal, model });
+        caption = extractCaption(await lastAssistantText(runtime, sessionId)) || caption;
+      }
       const review = await visuallyReviewFigure(runtime, options, {
         sessionId,
         model,
@@ -968,6 +1010,9 @@ async function runPlottingGeneration(
         caption,
         aspect_ratio: spec.aspect_ratio,
         critic_history: criticHistory,
+        quantities: spec.quantities ?? [],
+        data_sources: dataFiles.map((file, index) => ({ path: spec.data_source[index], sha256: digestFile(file.path) })),
+        ...(metadata ? { runtime_metadata: metadata } : {}),
         ...(provenance ? { generation_provenance: provenance } : {}),
         image_path: join("figures", basename(target)),
         plan_sha256: digestValue(spec),
@@ -994,6 +1039,12 @@ async function runPlottingGeneration(
 
   writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), results);
   writeJsonAtomic(join(workspace, ARTIFACTS.figuresInfo), info);
+
+  if (targetIds) {
+    const missing = targetIds.filter((id) => !results.some((record) => record.figure_id === id && record.image_path));
+    if (missing.length) throw new UserFacingError(`Targeted figure repair failed: ${missing.join(", ")}`);
+    return readRunState(workspace);
+  }
 
   const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
   const checks = validateStage(workspace, stage, state.scope);
@@ -1039,49 +1090,31 @@ async function runPlottingGeneration(
 async function repairReviewedFigures(runtime: Runtime, options: ControllerOptions,
   sessions: Record<string, string>, signal: AbortSignal, sourceRel: string): Promise<void> {
   const { workspace } = options;
-  if (!readRunState(workspace).scope.use_plotting) return;
-  const review = readJson<{ findings: Array<{severity: string; location: string; problem: string; action: string}> }>(join(workspace, ".brain/manuscript/review.json"));
-  const source = readFileSync(join(workspace, sourceRel), "utf8").replace(/(?<!\\)%[^\n]*/g, "");
-  const graphics = [...source.matchAll(/\\begin\{figure\*?\}([\s\S]*?)\\end\{figure\*?\}/g)]
-    .map((match) => includedGraphics(match[1]!)[0]);
-  const records = readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults));
-  let changed = false;
-  const repaired = new Set<(typeof review.findings)[number]>();
-  for (const finding of review.findings) {
-    if (finding.severity !== "blocking" || !/redraw|regenerate (?:the )?(?:figure|diagram|image)|correct (?:the )?geometry|successful visual correction/i.test(finding.action)) continue;
-    const number = /figure\s+(\d+)/i.exec(finding.location)?.[1];
-    const image = number ? graphics[Number(number) - 1] : undefined;
-    const diagrams = records.filter((item) => item.render_route === "text_to_image");
-    const record = records.find((item) => typeof item.image_path === "string" && finding.problem.includes(basename(item.image_path))) ??
-      (image ? records.find((item) => typeof item.image_path === "string" && basename(item.image_path) === basename(image)) :
-        diagrams.length === 1 && /conceptual|diagram|schematic|triad/i.test(finding.problem) ? diagrams[0] : undefined);
-    if (!record) continue;
-    record.image_sha256 = null;
-    const history = Array.isArray(record.critic_history) ? record.critic_history : [];
-    record.critic_history = [...history, { round: history.length, passed: false,
-      suggestions: `${finding.problem} ${finding.action}`, origin: "manuscript_review" }];
-    changed = true;
-    repaired.add(finding);
-  }
-  if (!changed) return;
-  writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), records);
-  say(options, "   regenerating figures with blocking full-manuscript feedback");
-  try {
-    await runPlottingGeneration(runtime, options, sessions, signal, readRunState(workspace));
-  } catch (error) {
-    updateStage(workspace, "refinement", (stage) => ({ ...stage, status: "failed", error: String(error) }));
-    throw error;
-  }
-  updateRunState(workspace, (state) => ({ ...state, current_stage: "refinement", status: "running" }));
-  for (const finding of review.findings) {
-    if (repaired.has(finding)) {
-      finding.action = "The controller has regenerated the affected image using this feedback. Inspect the current " +
-        "files listed in figures/info.json and include the corresponding generated image with includegraphics. " +
-        "Update the caption to describe that current image. Do not replace it with a LaTeX picture, TikZ, or an undisplayed artifact. " +
-        "The controller will review the newly compiled manuscript again; this is not a visual approval.";
+  const targets = reviewRepairTargets(workspace);
+  const regenerated: string[] = [];
+  if (targets.figures.length && readRunState(workspace).scope.use_plotting) {
+    const review = readJson<{ findings: Array<{target_id: string; status: string; problem: string; action: string}> }>(join(workspace, ".brain/manuscript/review.json"));
+    const records = readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults));
+    for (const record of records) {
+      if (!targets.figures.includes(String(record.figure_id))) continue;
+      const history = Array.isArray(record.critic_history) ? record.critic_history : [];
+      record.critic_history = [...history, { round: history.length, passed: false, origin: "manuscript_review",
+        suggestions: review.findings.filter((f) => f.status !== "resolved" && f.target_id === record.figure_id)
+          .map((f) => `${f.problem} ${f.action}`).join("\n") }];
     }
+    writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), records);
+    await runPlottingGeneration(runtime, options, sessions, signal, readRunState(workspace), targets.figures);
+    regenerated.push(...targets.figures);
   }
-  writeJsonAtomic(join(workspace, ".brain/manuscript/review.json"), review);
+  // A structured continuation is a repair assignment, never an approval. Only
+  // reviewManuscript may close findings in the independent issue ledger.
+  writeJsonAtomic(join(workspace, ".brain/writer-continuation.json"), {
+    source: sourceRel, status: "open", writer: targets.writer,
+    tables: targets.tables.map((target_id) => ({ target_id, operation: "revise",
+      instructions: "Edit only this table's entry in .brain/manuscript/table_presentation.json; controller regenerates before build." })),
+    figures: targets.figures.map((target_id) => ({ target_id, status: regenerated.includes(target_id) ? "awaiting_independent_review" : "blocked",
+      instructions: "Inspect current figure and runtime metadata; align caption with actual axes/labels. This is not approval." })),
+  });
 }
 
 export function extractCaption(answer: string): string {
@@ -1174,7 +1207,7 @@ export function runSuppliedFiguresForTest(workspace: string): number {
 async function waitForIdleOrPermissionAsk(
   runtime: Runtime,
   options: ControllerOptions,
-  wait: { sessionId: string; timeoutMs: number; signal?: AbortSignal },
+  wait: { sessionId: string; timeoutMs: number; signal?: AbortSignal; model?: ModelRef | null; skipOperations?: boolean },
 ): Promise<{ startedWork: boolean }> {
   const watcher = watchPermissionAsks(runtime);
   try {
@@ -1192,8 +1225,110 @@ async function waitForIdleOrPermissionAsk(
           `allow it in src/permissions.ts rather than answering interactively.`,
       );
     }
+    if (!wait.skipOperations) await continueOperations(runtime, options, wait);
     return outcome.result;
   } finally {
     watcher.stop();
+  }
+}
+
+async function continueOperations(runtime: Runtime, options: ControllerOptions,
+  wait: { sessionId: string; timeoutMs: number; signal?: AbortSignal; model?: ModelRef | null }): Promise<void> {
+  const { workspace } = options;
+  const state = readRunState(workspace);
+  const stage = state.current_stage;
+  if (!stage) return;
+  const turns = options.operationTurns ?? {};
+  const active = options.operationActive ?? new Set<string>();
+  const signal = wait.signal ?? new AbortController().signal;
+  const model = wait.model === undefined ? stageModel(state, stage) : wait.model;
+  const manuscriptStage = (): StageId => {
+    if (!["section_writing", "refinement"].includes(stage)) throw new UserFacingError("Manuscript operations require writing/refinement stage");
+    const selected = stage === "refinement" && existsSync(join(workspace, ARTIFACTS.finalTex)) ? "refinement" : "section_writing";
+    if (!existsSync(join(workspace, MANUSCRIPT_SOURCE[selected]!))) throw new UserFacingError("Write the manuscript source before requesting build/review/revision");
+    return selected;
+  };
+  const handlers: OperationHandlers = {
+    retrieve: async ({ request }) => {
+      if (!state.scope.plan.includes("literature") || !state.stages.outline.completed_at ||
+          state.scope.network_policy === "offline" || !options.allowLkmSpend || !request.parameters.query)
+        throw new UserFacingError("Retrieval requires a completed outline, literature scope, network/spend authorization and query");
+      const count = await retrieveForLiterature(options, readRunState(workspace), [request.parameters.query]);
+      return { outputs: [ARTIFACTS.candidates, ARTIFACTS.citationMap, ARTIFACTS.references], detail: `${count} relevant sources; inspect actual retrieval outputs` };
+    },
+    render: async ({ request }) => {
+      if (!state.scope.use_plotting || !state.stages.literature.completed_at || !request.target_id || active.has("render"))
+        throw new UserFacingError("Rendering requires completed literature, plotting enabled, canonical target and no recursive rendering");
+      active.add("render");
+      try {
+        await runPlottingGeneration(runtime, options, {}, signal, readRunState(workspace), [request.target_id], request.parameters.instructions);
+      } finally { active.delete("render"); }
+      return { outputs: [ARTIFACTS.plottingResults, ARTIFACTS.figuresInfo], detail: `Rendered ${request.target_id}; independent manuscript review still required` };
+    },
+    revise: async ({ request }) => {
+      const selected = manuscriptStage();
+      const outline = OutlineSchema.parse(readJson(join(workspace, ARTIFACTS.outlineV1)));
+      const table = outline.table_plan.find((entry) => entry.table_id === request.target_id);
+      const section = outline.section_plan.find((entry) => entry.section_id === request.target_id);
+      if (!table && !section) throw new UserFacingError("Revise requires a canonical table or section ID");
+      if (table) {
+        const sidecar = join(workspace, ".brain/manuscript/table_presentation.json");
+        if (!existsSync(sidecar) || !Object.hasOwn(readJson<Record<string, unknown>>(sidecar), table.table_id))
+          throw new UserFacingError(`Edit ${table.table_id}'s entry in .brain/manuscript/table_presentation.json before requesting revise; supported fields: caption, columns, row_labels, row_header. Numeric evidence is immutable.`);
+        publishTables(workspace);
+        return { outputs: [`.brain/manuscript/tables/${table.table_id}.tex`, `.brain/manuscript/tables/${table.table_id}.json`],
+          detail: "Regenerated verified table from current model-editable table_presentation.json. If presentation is still wrong, edit that target's sidecar entry and request again with a new ID; not review approval." };
+      }
+      const source = MANUSCRIPT_SOURCE[selected]!;
+      const continuation = { request_id: request.id, target_id: request.target_id, source, status: "open",
+        instructions: request.parameters.instructions ?? "Repair this section according to open structured review findings",
+        restrictions: "Same-session writer continuation: edit only the target section in this source; preserve other sections, evidence, bibliography, figure/table assets and canonical IDs. Do not mark findings resolved; rebuild and independently review." };
+      const output = `.brain/raw/operations/${stage}/${request.id}.json`;
+      writeJsonAtomic(join(workspace, output), continuation);
+      return { outputs: [output], detail: "Writer continuation assigned, NOT a completed source edit. Read the structured assignment and perform the restricted edit in this session before claiming repair." };
+    },
+    build: async () => {
+      const selected = manuscriptStage();
+      await buildIfManuscriptStage(options, selected);
+      const report = readJson<{ ok: boolean; errors: string[] }>(join(workspace, ARTIFACTS.buildReport));
+      if (!report.ok) throw new UserFacingError("Build failed; inspect .brain/raw/build.json");
+      return { outputs: [ARTIFACTS.buildReport, ARTIFACTS.finalPdf], detail: "Compiled actual manuscript; this is not review approval" };
+    },
+    review: async () => {
+      const selected = manuscriptStage();
+      await buildIfManuscriptStage(options, selected);
+      const review = await reviewManuscript({ runtime, workspace, sourceRel: MANUSCRIPT_SOURCE[selected]!, model,
+        timeoutMs: wait.timeoutMs, signal, onProgress: (line) => say(options, line) });
+      return { outputs: [".brain/manuscript/review.json"], detail: `Independent review complete; ready=${review.ready}. Open findings remain binding.` };
+    },
+  };
+  for (;;) {
+    checkBudget(workspace);
+    const ledger = readBudget(workspace);
+    const remaining = ledger?.limits.max_operation_calls === undefined ? 64 :
+      Math.max(0, ledger.limits.max_operation_calls - ledger.totals.operation_calls);
+    const result = await executeOperations({ workspace, stage, handlers,
+      maxExecutions: (turns[stage] ?? 0) >= 8 ? 0 : Math.min(64, remaining),
+      beforeDispatch: () => {
+        consumeBudget(workspace, "operation");
+        writeJsonAtomic(join(workspace, ".brain/requests.json"), []);
+      },
+      onEvent: (line) => say(options, line) });
+    if (!result.executed && !result.pending && !result.errors.length) return;
+    if ((turns[stage] ?? 0) >= 8) throw new UserFacingError(`Stage ${stage} exceeded 8 operation continuation turns; unresolved requests preserved`);
+    turns[stage] = (turns[stage] ?? 0) + 1;
+    // The queue belongs to the next model turn. Historical failures remain in
+    // operation-results, but omitted requests must not dispatch forever.
+    writeJsonAtomic(join(workspace, ".brain/requests.json"), []);
+    await prompt(runtime, { sessionId: wait.sessionId, model, text:
+      OPERATION_REQUEST_CONTRACT + "\n\nRead .brain/operation-results.json now. " +
+      `Executed=${result.executed}, pending=${result.pending}; operation admissions remaining=${Math.max(0, remaining - result.executed)}. ` +
+      "Read every returned output/assignment. Failed or unavailable operations did not succeed: repair requests or choose an evidence-grounded alternative, without dropping requirements. " +
+      "Native data requests do not restart this phase. Continue the interrupted task (including returning its plotting script if applicable), preserve stable IDs and correct artifacts. " +
+      "Supported parameters: read offset/length (bytes); extract none; analyze aggregation=count|min|max|mean|sum, optional group_by, value_column required except count; retrieve query; render/revise/review instructions; build none. " +
+      "retrieve requires completed outline and authorized online literature; render requires completed literature and plotting enabled; revise/build/review require manuscript writing. " +
+      "For table revision edit target entry in table_presentation.json first, then request revise. Section revise returns an explicit writer continuation, not a fake edit. " +
+      "When done leave requests.json empty; do not reissue completed requests merely to acknowledge them." });
+    await waitForIdleOrPermissionAsk(runtime, options, { ...wait, skipOperations: true });
   }
 }

@@ -1,7 +1,9 @@
 import { execa } from "execa";
-import { constants, copyFileSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { constants, copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { digestValue } from "./files.js";
 
 /**
  * Controller-owned execution of model-written matplotlib scripts.
@@ -77,6 +79,8 @@ export interface RenderRequest {
   readonly workDir: string;
   /** Controller-selected absolute inputs, staged under data/<relative name>. */
   readonly dataFiles?: readonly { path: string; name: string }[];
+  /** Canonical controller-selected specification, hashed without stripping extension fields. */
+  readonly spec?: Readonly<Record<string, unknown>>;
 }
 
 /** Pure publication filename validation; uniqueness belongs to the figure plan. */
@@ -101,6 +105,7 @@ function rejectSymlinkTraversal(path: string): void {
 }
 
 export interface RenderResult {
+  readonly metadata?: PlotRuntimeMetadata;
   readonly figureId: string;
   readonly ok: boolean;
   /** Absolute path to the produced image, null when nothing usable appeared. */
@@ -109,6 +114,51 @@ export interface RenderResult {
   /** Actionable diagnosis; interpolated into a remediation prompt verbatim. */
   readonly error: string | null;
 }
+
+export interface PlotRuntimeMetadata {
+  figure_id: string;
+  observer: "matplotlib-savefig-runtime";
+  source_sha256: string;
+  figure_sha256: string;
+  spec_sha256?: string;
+  presentation_sha256: string;
+  dataset_hashes: Record<string, string>;
+  axes: Array<{ xscale: string; yscale: string; xlabel: string; ylabel: string;
+    xscale_parameters: Record<string, number>; yscale_parameters: Record<string, number>;
+    title: string; xlim: number[]; ylim: number[];
+    collections: Array<{ label: string; x: { count: number; min: number | null; max: number | null };
+      y: { count: number; min: number | null; max: number | null } }>;
+    lines: Array<{ label: string; x: { count: number; min: number | null; max: number | null };
+      y: { count: number; min: number | null; max: number | null } }> }>;
+}
+
+// Observe the actual Figure at save time, including figures closed by the script.
+// This is measurement in the existing bounded process, not adversarial attestation.
+const PLOT_OBSERVER = `
+import json as _po_json, os as _po_os
+import numpy as _po_np
+from matplotlib.figure import Figure as _po_Figure
+_po_save = _po_Figure.savefig
+def _po_range(values):
+    values = _po_np.ma.asarray(values, dtype=float).compressed()
+    finite = values[_po_np.isfinite(values)]
+    return dict(count=int(values.size), min=float(finite.min()) if finite.size else None, max=float(finite.max()) if finite.size else None)
+def _po_scale(axis):
+    transform = axis.get_transform()
+    return {key: float(getattr(transform, key)) for key in ('base', 'linthresh', 'linscale') if hasattr(transform, key)}
+def _po_savefig(self, fname, *args, **kwargs):
+    result = _po_save(self, fname, *args, **kwargs)
+    if isinstance(fname, (str, _po_os.PathLike)):
+        target = _po_os.path.abspath(fname)
+        if _po_os.path.dirname(target) == _po_os.getcwd() and target.lower().endswith('.pdf'):
+            axes = []
+            for ax in self.axes:
+                axes.append(dict(xscale=ax.get_xscale(), yscale=ax.get_yscale(), xscale_parameters=_po_scale(ax.xaxis), yscale_parameters=_po_scale(ax.yaxis), xlabel=ax.get_xlabel(), ylabel=ax.get_ylabel(), title=ax.get_title(), xlim=list(ax.get_xlim()), ylim=list(ax.get_ylim()), lines=[dict(label=line.get_label(), x=_po_range(line.get_xdata(orig=False)), y=_po_range(line.get_ydata(orig=False))) for line in ax.lines], collections=[dict(label=item.get_label(), x=_po_range(item.get_offsets()[:, 0]), y=_po_range(item.get_offsets()[:, 1])) for item in ax.collections if item.get_offsets() is not None]))
+            with open(target + '.runtime.json', 'w') as output:
+                _po_json.dump(dict(axes=axes), output, allow_nan=False)
+    return result
+_po_Figure.savefig = _po_savefig
+`;
 
 /**
  * Strip a markdown code fence, if the model wrapped its answer in one.
@@ -256,6 +306,9 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
       mkdirSync(dirname(target), { recursive: true });
       copyFileSync(file.path, target, constants.COPYFILE_EXCL);
     }
+    const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+    const dataset_hashes = Object.fromEntries((request.dataFiles ?? []).map((file) =>
+      [`data/${file.name}`, sha256(readFileSync(join(workDir, "data", file.name)))]));
 
     const scriptPath = join(workDir, `${figureId}.py`);
     const { writeFileSync } = await import("node:fs");
@@ -269,7 +322,7 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
         "socket.getaddrinfo = _paper_orchestra_network_disabled",
         "socket.socket.connect = _paper_orchestra_network_disabled",
         "socket.socket.connect_ex = _paper_orchestra_network_disabled",
-      ].join("\n"),
+      ].join("\n") + "\n" + PLOT_OBSERVER,
       "utf8",
     );
     writeFileSync(scriptPath, code, "utf8");
@@ -365,7 +418,13 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
       };
     }
 
-    return { figureId, ok: true, imagePath: best, bytes, error: null };
+    const observed = JSON.parse(readFileSync(`${best}.runtime.json`, "utf8")) as Pick<PlotRuntimeMetadata, "axes">;
+    if (!Array.isArray(observed.axes) || !observed.axes.length) throw new Error("No runtime axes metadata captured for the rendered PDF");
+    const metadata: PlotRuntimeMetadata = { figure_id: figureId, observer: "matplotlib-savefig-runtime",
+      source_sha256: sha256(code), figure_sha256: sha256(readFileSync(best)), dataset_hashes, axes: observed.axes,
+      presentation_sha256: digestValue(observed.axes),
+      ...(request.spec ? { spec_sha256: digestValue(request.spec) } : {}) };
+    return { figureId, ok: true, imagePath: best, bytes, error: null, metadata };
   } catch (error) {
     return {
       figureId, ok: false, imagePath: null, bytes: 0,

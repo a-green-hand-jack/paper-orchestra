@@ -10,10 +10,12 @@
     "paper-orchestra": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run test:docker",
+    "test:docker": "node scripts/docker-e2e.mjs",
     "build": "tsc -p tsconfig.json && node scripts/copy-runtime-assets.mjs",
     "typecheck": "tsc --noEmit"
   },

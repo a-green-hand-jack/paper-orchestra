@@ -3,6 +3,9 @@ import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk/v2"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { UserFacingError } from "./errors.js";
 import type { ModelRef, Usage } from "./state/schema.js";
+import type { StageId } from "./stages.js";
+import { stageArtifactPermissions } from "./permissions.js";
+import { checkBudget, consumePromptBudget, recordBudgetFailure, recordSessionUsage } from "./budget.js";
 
 /** A running OpenCode server plus a client bound to the workspace. */
 export interface Runtime {
@@ -102,12 +105,13 @@ export async function stopTui(tui: AttachedTui): Promise<void> {
  */
 export async function createSession(
   runtime: Runtime,
-  options: { title: string; agent?: string },
+  options: { title: string; agent?: string; stage?: StageId },
 ): Promise<string> {
   const session = await unwrap(
     runtime.client.session.create({
       directory: runtime.directory,
       title: options.title,
+      ...(options.stage ? { permission: stageArtifactPermissions(options.stage) } : {}),
       ...(options.agent ? { agent: options.agent } : {}),
     }),
     "session.create",
@@ -133,6 +137,7 @@ export interface PromptOptions {
  * done, which is the whole point of a validator-driven controller.
  */
 export async function prompt(runtime: Runtime, options: PromptOptions): Promise<void> {
+  consumePromptBudget(runtime.directory, options.sessionId);
   const parts: Array<Record<string, unknown>> = [{ type: "text", text: options.text }];
   for (const file of options.files ?? []) {
     parts.push({
@@ -143,21 +148,26 @@ export async function prompt(runtime: Runtime, options: PromptOptions): Promise<
     });
   }
 
-  await unwrap(
-    runtime.client.session.promptAsync({
-      sessionID: options.sessionId,
-      directory: runtime.directory,
-      parts: parts as never,
-      ...(options.agent ? { agent: options.agent } : {}),
-      ...(options.model
-        ? {
-            model: { providerID: options.model.providerID, modelID: options.model.modelID },
-            ...(options.model.variant ? { variant: options.model.variant } : {}),
-          }
-        : {}),
-    }),
-    "session.promptAsync",
-  );
+  try {
+    await unwrap(
+      runtime.client.session.promptAsync({
+        sessionID: options.sessionId,
+        directory: runtime.directory,
+        parts: parts as never,
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.model
+          ? {
+              model: { providerID: options.model.providerID, modelID: options.model.modelID },
+              ...(options.model.variant ? { variant: options.model.variant } : {}),
+            }
+          : {}),
+      }),
+      "session.promptAsync",
+    );
+  } catch (error) {
+    recordBudgetFailure(runtime.directory, options.sessionId, "session.promptAsync failed; admission retained because dispatch may have occurred", true);
+    throw error;
+  }
 }
 
 type StatusKind = "idle" | "busy" | "retry" | "unknown";
@@ -165,27 +175,21 @@ type StatusKind = "idle" | "busy" | "retry" | "unknown";
 /**
  * Read one session's status.
  *
- * On error this reports `busy`, never `idle`: treating a failed status read as
- * "finished" would let the controller validate a half-written workspace and
- * call it a pass.
+ * API failures are explicit, never mistaken for idle or hidden until timeout.
  */
 async function readStatus(runtime: Runtime, sessionId: string): Promise<StatusKind> {
-  try {
-    const statuses = await unwrap(
-      runtime.client.session.status({ directory: runtime.directory }),
-      "session.status",
-    );
-    const entry = (statuses as Record<string, { type?: string } | undefined>)[sessionId];
-    // An absent key means idle in some server versions; an explicit
-    // `{type:"idle"}` in others. Accept both.
-    if (entry === undefined) return "idle";
-    if (entry.type === "busy") return "busy";
-    if (entry.type === "retry") return "retry";
-    if (entry.type === "idle") return "idle";
-    return "unknown";
-  } catch {
-    return "busy";
-  }
+  const statuses = await unwrap(
+    runtime.client.session.status({ directory: runtime.directory }),
+    "session.status",
+  );
+  const entry = (statuses as Record<string, { type?: string } | undefined>)[sessionId];
+  // An absent key means idle in some server versions; an explicit
+  // `{type:"idle"}` in others. Accept both.
+  if (entry === undefined) return "idle";
+  if (entry.type === "busy") return "busy";
+  if (entry.type === "retry") return "retry";
+  if (entry.type === "idle") return "idle";
+  return "unknown";
 }
 
 const POLL_INTERVAL_MS = 250;
@@ -223,32 +227,68 @@ export async function waitForIdle(
   options: WaitOptions,
 ): Promise<WaitResult> {
   const deadline = Date.now() + options.timeoutMs;
-  const startDeadline = Date.now() + (options.startedWithinMs ?? 30_000);
+  const startDeadline = Math.min(deadline, Date.now() + (options.startedWithinMs ?? 30_000));
 
   let observedBusy = false;
-  while (Date.now() < startDeadline) {
-    options.signal?.throwIfAborted();
-    const status = await readStatus(runtime, options.sessionId);
-    if (status === "busy" || status === "retry") {
-      observedBusy = true;
-      break;
+  let lastUsageRead = Date.now();
+  let lastBudgetCheck = 0;
+  const capture = async (terminal = false): Promise<void> => {
+    await sessionUsage(runtime, options.sessionId, terminal);
+    lastUsageRead = Date.now();
+  };
+  const pollBudget = async (): Promise<void> => {
+    if (Date.now() - lastUsageRead >= 10_000) await capture();
+    if (Date.now() - lastBudgetCheck >= 1_000) {
+      checkBudget(runtime.directory);
+      lastBudgetCheck = Date.now();
     }
-    await sleep(BUSY_POLL_INTERVAL_MS);
+  };
+  try {
+    while (Date.now() < startDeadline) {
+      options.signal?.throwIfAborted();
+      await pollBudget();
+      const status = await readStatus(runtime, options.sessionId);
+      if (status === "busy" || status === "retry") {
+        observedBusy = true;
+        break;
+      }
+      await sleep(BUSY_POLL_INTERVAL_MS);
+    }
+
+    if (!observedBusy) {
+      await capture(true);
+      return { startedWork: false };
+    }
+
+    while (Date.now() < deadline) {
+      options.signal?.throwIfAborted();
+      await pollBudget();
+      const status = await readStatus(runtime, options.sessionId);
+      if (status === "idle") {
+        await capture(true);
+        return { startedWork: true };
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+
+    throw new UserFacingError(
+      `OpenCode session ${options.sessionId} did not go idle within ` +
+        `${Math.round(options.timeoutMs / 1000)}s`,
+    );
+  } catch (error) {
+    // Stop additional work before taking the final usage snapshot. Do not
+    // replace the original cap/API/timeout error with a telemetry failure.
+    let abortFailure = "";
+    try {
+      await unwrap(runtime.client.session.abort({ sessionID: options.sessionId, directory: runtime.directory }), "session.abort");
+    } catch {
+      abortFailure = "; session.abort also failed, runtime must be closed to stop execution";
+    }
+    try { await capture(); } catch { /* Original failure remains authoritative. */ }
+    recordBudgetFailure(runtime.directory, options.sessionId, `waitForIdle stopped${abortFailure}`);
+    if (abortFailure) throw new UserFacingError(`${error instanceof Error ? error.message : String(error)}${abortFailure}`);
+    throw error;
   }
-
-  if (!observedBusy) return { startedWork: false };
-
-  while (Date.now() < deadline) {
-    options.signal?.throwIfAborted();
-    const status = await readStatus(runtime, options.sessionId);
-    if (status === "idle") return { startedWork: true };
-    await sleep(POLL_INTERVAL_MS);
-  }
-
-  throw new UserFacingError(
-    `OpenCode session ${options.sessionId} did not go idle within ` +
-      `${Math.round(options.timeoutMs / 1000)}s`,
-  );
 }
 
 /**
@@ -258,7 +298,7 @@ export async function waitForIdle(
  * between two snapshots. Reading the whole transcript is O(messages), which is
  * itself a reason to keep sessions per-stage.
  */
-export async function sessionUsage(runtime: Runtime, sessionId: string): Promise<Usage> {
+export async function sessionUsage(runtime: Runtime, sessionId: string, failOnAssistantError = false): Promise<Usage> {
   const usage: Usage = {
     model_calls: 0,
     input_tokens: 0,
@@ -268,6 +308,7 @@ export async function sessionUsage(runtime: Runtime, sessionId: string): Promise
     cache_write_tokens: 0,
     cost: 0,
     transcript_messages: 0,
+    unknown_cost_messages: 0,
   };
 
   let messages: unknown;
@@ -276,18 +317,24 @@ export async function sessionUsage(runtime: Runtime, sessionId: string): Promise
       runtime.client.session.messages({ sessionID: sessionId, directory: runtime.directory }),
       "session.messages",
     );
-  } catch {
-    // Telemetry must never fail a stage that otherwise succeeded.
-    return usage;
+  } catch (error) {
+    recordBudgetFailure(runtime.directory, sessionId, "session.messages usage unavailable; cost and tokens unknown", true);
+    throw error;
   }
 
-  const list = Array.isArray(messages) ? messages : [];
+  if (!Array.isArray(messages)) {
+    recordBudgetFailure(runtime.directory, sessionId, "session.messages returned invalid usage data", true);
+    throw new UserFacingError("OpenCode session.messages returned invalid usage data");
+  }
+  const list = messages;
   usage.transcript_messages = list.length;
+  let lastAssistantError: string | null = null;
 
   for (const entry of list) {
     const info = (entry as { info?: Record<string, unknown> }).info ?? entry;
     const record = info as {
       role?: string;
+      error?: { name?: string; data?: { statusCode?: number; isRetryable?: boolean; message?: string } };
       cost?: number;
       tokens?: {
         input?: number;
@@ -297,6 +344,29 @@ export async function sessionUsage(runtime: Runtime, sessionId: string): Promise
       };
     };
     if (record.role !== "assistant") continue;
+    if (record.error) {
+      const status = record.error.data?.statusCode;
+      const text = record.error.data?.message ?? "";
+      const category = /rate.?limit|quota/i.test(text) ? "rate-limit" :
+        /auth|unauthorized|invalid.grant/i.test(text) ? "authentication" :
+          /context|token.limit/i.test(text) ? "context-limit" :
+            /timeout|timed.out/i.test(text) ? "timeout" : "provider-error";
+      lastAssistantError = `${record.error.name ?? "unknown provider error"} (${category}` +
+        (Number.isInteger(status) && status! >= 100 && status! <= 599 ? `, HTTP ${status}` : "") +
+        `, retryable=${record.error.data?.isRetryable === true})`;
+    } else lastAssistantError = null;
+    // These five token fields are required by the SDK's AssistantMessage.
+    // Missing telemetry cannot be used as zero consumption under a hard cap.
+    for (const value of [record.tokens?.input, record.tokens?.output, record.tokens?.reasoning, record.tokens?.cache?.read, record.tokens?.cache?.write]) {
+      if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
+        recordBudgetFailure(runtime.directory, sessionId, "session.messages token usage missing or invalid", true);
+        throw new UserFacingError("OpenCode session.messages returned missing or invalid token figures; refusing unaccounted execution");
+      }
+    }
+    if (record.cost !== undefined && (!Number.isFinite(record.cost) || record.cost < 0)) {
+      recordBudgetFailure(runtime.directory, sessionId, "session.messages cost invalid", true);
+      throw new UserFacingError("OpenCode session.messages returned invalid cost figures");
+    }
     usage.model_calls += 1;
     usage.input_tokens += record.tokens?.input ?? 0;
     usage.output_tokens += record.tokens?.output ?? 0;
@@ -304,6 +374,12 @@ export async function sessionUsage(runtime: Runtime, sessionId: string): Promise
     usage.cache_read_tokens += record.tokens?.cache?.read ?? 0;
     usage.cache_write_tokens += record.tokens?.cache?.write ?? 0;
     usage.cost += record.cost ?? 0;
+    if (record.cost === undefined || record.cost === 0) usage.unknown_cost_messages! += 1;
+  }
+  recordSessionUsage(runtime.directory, sessionId, usage);
+  if (failOnAssistantError && lastAssistantError) {
+    recordBudgetFailure(runtime.directory, sessionId, `assistant failed: ${lastAssistantError}`);
+    throw new UserFacingError(`OpenCode session ${sessionId} assistant failed: ${lastAssistantError}; outputs and usage preserved`);
   }
   return usage;
 }
@@ -320,6 +396,7 @@ export function usageDelta(before: Usage, after: Usage): Usage {
     cache_write_tokens: at(before.cache_write_tokens, after.cache_write_tokens),
     cost: Math.max(0, after.cost - before.cost),
     transcript_messages: after.transcript_messages,
+    unknown_cost_messages: at(before.unknown_cost_messages ?? 0, after.unknown_cost_messages ?? 0),
   };
 }
 

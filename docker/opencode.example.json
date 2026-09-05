@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "acceptance": {
+      "npm": "@ai-sdk/openai-compatible@3.0.44",
+      "name": "Acceptance endpoint",
+      "env": ["PO_MODEL_KEY"],
+      "options": {
+        "baseURL": "https://YOUR-PROVIDER.example/v1",
+        "apiKey": "{env:PO_MODEL_KEY}"
+      },
+      "models": {
+        "YOUR-MODEL": {
+          "name": "YOUR-MODEL",
+          "limit": { "context": 128000, "output": 16000 },
+          "modalities": { "input": ["text", "image"], "output": ["text"] }
+        }
+      }
+    }
+  }
+}

@@ -22,7 +22,11 @@ The controller supplies review JSON with this shape:
   "pdf_sha256": "sha256 of the reviewed PDF",
   "ready": false,
   "summary": "Content and rendered-page assessment",
-  "findings": [{"severity": "blocking", "location": "Section 4, page 5, Table 2",
+  "findings": [{"id": "finding_tab_main_units", "category": "numeric",
+    "target_type": "table", "target_id": "tab_main",
+    "evidence": ["Table 2 omits units recorded in the linked result evidence"],
+    "owner": "writer", "verification": "Rebuild and inspect Table 2 units against the source",
+    "status": "open", "severity": "blocking", "location": "Section 4, page 5, Table 2",
     "problem": "Metric units are missing", "action": "Add the recorded units"}],
   "reviewed_pages": 8
 }
@@ -31,9 +35,21 @@ Severity is `blocking` or `advisory`. Hashes bind review to the reviewed files;
 the controller checks freshness and supplies real rendered-page review. You must
 not edit the review, forge its hashes, or change `ready` to pass a gate.
 
+New findings carry all fields above. Category is `compile`, `numeric`, `figure`,
+`citation`, `layout`, `requirement`, or `editorial`; target_type is `figure`,
+`table`, `section`, `manuscript`, or `source`. Owner is `controller` or `writer`;
+status is `open`, `resolved`, or `blocked`. IDs are stable across revisions.
+Use exact figure/table/section IDs or workspace paths for manuscript/source
+targets. Legacy reviews may lack these added fields; act on their existing
+severity/location/problem/action without fabricating controller verification.
+
 ## Revision
 
-Address each finding at its stated location, prioritizing blocking findings.
+Address open/blocked writer findings at their stated locations, prioritizing blocking findings.
+For controller-owned work, submit a typed operation in `.brain/requests.json`
+with the exact target_id and evidence input paths, then stop the turn. Continue
+only after reading `.brain/operation-results.json`. A request is not resolution;
+the controller assigns stable finding IDs and verifies dependencies and rechecks.
 Improve the argument, method completeness, experimental explanation, literature
 positioning, figures/tables, and brief compliance as required by the findings.
 Repair page-level clipping, overlap, unreadable figures, awkward breaks and
@@ -53,6 +69,13 @@ arithmetic. Never invent an experiment, datum, citation or author declaration.
 Check image-provider and model names against `.brain/raw/plotting_results.json`,
 not the outline's proposed generation prompt. If the exact image model was not
 reported by the executor, preserve that uncertainty rather than asserting a version.
+
+Read figure quantity metadata, transformations, units, axis types and supplied
+mathematics before revising interpretation. Do not guess missing equations or
+replace source-to-claim ID links with unsupported source-confirmation wording.
+Do not impose exhaustive scientific proof beyond the user's contract. Conceptual
+work may have no measurements when materials records an explicit reason; do not
+repair that by inventing experiments or claiming an untested proposal was tested.
 
 If a finding requires genuinely missing experiments or unavailable permissions,
 do not silently ignore it or claim resolution. State the supported research

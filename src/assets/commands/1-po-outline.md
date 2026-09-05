@@ -12,7 +12,7 @@ The template provides formatting and structure, never research prose.
 
 ## Requirements And Research
 
-Record `requirements` as objects with `requirement`, `source` (one of `cli`,
+Record `requirements` as objects with stable `id`, `requirement`, `source` (one of `cli`,
 `brief`, `template`, `inferred`), and `verification` strings. Explicit locked CLI
 options win over the brief, which wins over inferred preferences. Follow applicable
 venue rules, page limits, anonymity and required sections. Record conflicts rather
@@ -33,6 +33,20 @@ of actual workspace-relative files), and `limitations` (array of strings). Conne
 the method implementation, experiment configuration and results. Distinguish
 supported contributions from hypotheses and missing evidence. Do not plan new
 experiments or invent evaluations against literature-only baselines.
+
+Reuse the materials' stable claim `id`, `status`, `reason`, `method_ids`,
+`experiment_ids`, `evidence_ids`, and `provenance`, not only claim text and paths.
+Do not mint replacement claim IDs or imply that naming a source establishes a
+claim. Every section has a stable `section_id` and references the relevant
+`claim_ids`. Those claim IDs already imply their evidence; add `evidence_ids`
+only for additional direct evidence, not to repeat the claim's full list.
+Tables and figures also reference their `claim_ids`; figure quantities contribute
+their own evidence IDs without repeating them in the enclosing figure list.
+The controller follows the typed links and unions their evidence and source
+provenance. Referenced materials claims need not be copied into `research_claims`
+unless adding detail. Existing claim IDs and research outcomes remain unchanged.
+Evidence IDs refer to methods/results, never invented entities. Do not use unread,
+computable, unreadable or missing evidence as established results.
 
 ## Citation Plan
 
@@ -91,6 +105,17 @@ experimental images. Its `generation_prompt` must specify only supported modules
 connections, labels and visual hierarchy. Use a W:H aspect ratio such as `16:9`.
 If automatic plotting is disabled, leave `plotting_plan` empty and plan around
 supplied figures. Missing figure inputs must not turn into invented evidence.
+
+Numeric plots also require `quantities`: objects with `quantity`, nonempty
+`evidence_ids`, `source_path` (included in `data_source`), `selector` (exact field),
+`units`, `transformation` (`identity` for direct values, otherwise the actual
+source-backed calculation), `axis` (`x`, `y`, `z`, `color`, `size`, `label`), and
+`axis_type` (`linear`, `log`, `categorical`, `datetime`, `none`). Bind each plotted
+quantity, including dependent axes, to recorded evidence. If supplied mathematics
+governs a plot, include `expected_math` and `math_source: {source_path, locator,
+quote?}`. Never guess an equation from a title, trend, variable name or visual
+appearance. A missing equation or operand calls for a typed read/extract/analyze
+request and stopping the turn, not a plausible replacement function.
 
 ## Tables
 
@@ -187,7 +212,7 @@ checks direct numeric field provenance, not a generalized formal proof of the re
 
 ## Sections And Output
 
-Preserve `section_plan` as an array of `{section_title, subsections}`. Each
+Preserve `section_plan` as an array of `{section_id, section_title, claim_ids, evidence_ids, subsections}`. Each
 subsection has a string `subsection_title` plus `content_bullets` and `citation_hints`
 arrays of strings. Reference precise evidence, planned figure/table IDs and claims in
 the bullets. Include adequate method details, actual experimental setup and

@@ -15,13 +15,39 @@ export const AspectRatioSchema = z.string().regex(/^\d+:\d+$/, "expected W:H, e.
 
 export const FigureRouteSchema = z.enum(["auto", "code", "text_to_image"]);
 
+export const ResearchIdSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/);
+export const ResearchStatusSchema = z.enum(["read", "unread", "unreadable", "excluded", "computable", "missing"]);
+export const ResearchProvenanceSchema = z.object({
+  source_path: z.string().min(1),
+  /** Exact field, line range, page, or code symbol; never a fabricated citation. */
+  locator: z.string().min(1),
+  quote: z.string().min(1).optional(),
+}).strict();
+const ResearchLinks = {
+  claim_ids: z.array(ResearchIdSchema).optional(),
+  evidence_ids: z.array(ResearchIdSchema).optional(),
+};
+export const FigureQuantitySchema = z.object({
+  quantity: z.string().min(1),
+  evidence_ids: z.array(ResearchIdSchema).min(1),
+  source_path: z.string().min(1),
+  selector: z.string().min(1),
+  units: z.string().min(1),
+  transformation: z.string().min(1),
+  axis: z.enum(["x", "y", "z", "color", "size", "label"]),
+  axis_type: z.enum(["linear", "log", "categorical", "datetime", "none"]),
+  /** Only mathematics supplied by the research, not an inferred plotting equation. */
+  expected_math: z.string().min(1).optional(),
+  math_source: ResearchProvenanceSchema.optional(),
+}).strict();
+
 export const PlotSpecSchema = z
   .object({
     /**
      * Required and non-empty: it becomes a filename via `.replace()` in
      * `plotting_agent.py:258`, which throws on null.
      */
-    figure_id: z.string().min(1, "figure_id is used as a filename and cannot be empty"),
+    figure_id: ResearchIdSchema,
     title: z.string().default(""),
     plot_type: z.enum(["plot", "diagram"]).default("plot"),
     /** Selected by the outline agent; `auto` is resolved deterministically by the controller. */
@@ -35,6 +61,8 @@ export const PlotSpecSchema = z
      * it, so it has to be a path that exists.
      */
     data_source: z.array(z.string()).default([]),
+    ...ResearchLinks,
+    quantities: z.array(FigureQuantitySchema).optional(),
     objective: z.string().default(""),
     /** Provider-ready visual brief for the text-to-image route. */
     generation_prompt: z.string().default(""),
@@ -84,22 +112,42 @@ export const SectionSubsectionSchema = z.preprocess(
 
 export const SectionPlanEntrySchema = z
   .object({
+    section_id: ResearchIdSchema.optional(),
+    ...ResearchLinks,
     section_title: z.string().min(1),
     subsections: z.array(SectionSubsectionSchema).default([]),
   })
   .passthrough();
 
 export const WritingRequirementSchema = z.object({
+  id: ResearchIdSchema.optional(),
   requirement: z.string().min(1),
   source: z.enum(["cli", "brief", "template", "inferred"]),
   verification: z.string().min(1),
 }).passthrough();
 
 export const ResearchClaimSchema = z.object({
+  id: ResearchIdSchema.optional(),
+  status: ResearchStatusSchema.optional(),
+  reason: z.string().min(1).optional(),
+  method_ids: z.array(ResearchIdSchema).optional(),
+  experiment_ids: z.array(ResearchIdSchema).optional(),
+  evidence_ids: z.array(ResearchIdSchema).optional(),
+  provenance: z.array(ResearchProvenanceSchema).optional(),
   claim: z.string().min(1),
   evidence_paths: z.array(z.string().min(1)).min(1),
   limitations: z.array(z.string()).default([]),
 }).passthrough();
+export const GeneratedResearchClaimSchema = ResearchClaimSchema.extend({
+  id: ResearchIdSchema,
+  status: ResearchStatusSchema,
+  reason: z.string().trim().min(1),
+  method_ids: z.array(ResearchIdSchema),
+  experiment_ids: z.array(ResearchIdSchema),
+  evidence_ids: z.array(ResearchIdSchema).min(1),
+  provenance: z.array(ResearchProvenanceSchema).min(1),
+});
+export type ResearchClaim = z.infer<typeof GeneratedResearchClaimSchema>;
 
 export const TABLE_VERIFICATION_HELP = 'For heterogeneous rows, use row.cell_verification aligned with values, excluding the row label. Example for two columns: {"values":[40.7070301858,null],"cell_verification":[{"selector":"text:alpha_z coefficients:","operation":"direct","index":2,"decimals":10},null]}. Each non-null cell specification replaces the column default; null inherits it. Fix metadata or identify the actual source evidence; never change recorded values just to satisfy checking or drop required research outcomes.';
 
@@ -127,6 +175,7 @@ export type ColumnVerification = z.infer<typeof ColumnVerificationSchema>;
 
 /** Ordered values align with columns; null denotes an unavailable measurement, never zero. */
 export const TableSpecSchema = z.object({
+  ...ResearchLinks,
   table_id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
   title: z.string().min(1),
   caption: z.string().min(1),
@@ -160,21 +209,40 @@ export const TableSpecSchema = z.object({
 });
 export type TableSpec = z.infer<typeof TableSpecSchema>;
 
+export const ReviewFindingSchema = z.object({
+  // Optional only for shipped persisted reviews. New reviewers use the full schema below.
+  id: ResearchIdSchema.optional(),
+  category: z.enum(["compile", "numeric", "figure", "citation", "layout", "requirement", "editorial"]).optional(),
+  target_type: z.enum(["figure", "table", "section", "manuscript", "source"]).optional(),
+  target_id: z.string().min(1).optional(),
+  evidence: z.array(z.string().min(1)).optional(),
+  owner: z.enum(["controller", "writer"]).optional(),
+  verification: z.string().min(1).optional(),
+  status: z.enum(["open", "resolved", "blocked"]).optional(),
+  severity: z.enum(["blocking", "advisory"]),
+  location: z.string().min(1),
+  problem: z.string().min(1),
+  action: z.string().min(1),
+});
+export const GeneratedReviewFindingSchema = ReviewFindingSchema.required().extend({
+  evidence: z.array(z.string().min(1)).min(1),
+});
+export type ReviewFinding = z.infer<typeof ReviewFindingSchema>;
+export type GeneratedReviewFinding = z.infer<typeof GeneratedReviewFindingSchema>;
+
 export const ManuscriptReviewSchema = z.object({
   version: z.literal(1),
   manuscript_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   ready: z.boolean(),
   summary: z.string(),
-  findings: z.array(z.object({
-    severity: z.enum(["blocking", "advisory"]),
-    location: z.string().min(1),
-    problem: z.string().min(1),
-    action: z.string().min(1),
-  })),
+  findings: z.array(ReviewFindingSchema),
   reviewed_pages: z.number().int().nonnegative(),
 });
 export type ManuscriptReview = z.infer<typeof ManuscriptReviewSchema>;
+export const GeneratedManuscriptReviewSchema = ManuscriptReviewSchema.extend({
+  findings: z.array(GeneratedReviewFindingSchema),
+});
 
 export const OutlineSchema = z
   .object({
@@ -343,6 +411,8 @@ export const FigureInfoSchema = z.array(
     .object({
       name: z.string().min(1),
       caption: z.string().default(""),
+      ...ResearchLinks,
+      quantities: z.array(FigureQuantitySchema).optional(),
     })
     .passthrough(),
 );
@@ -410,6 +480,8 @@ export type BuildReport = z.infer<typeof BuildReportSchema>;
  */
 export const MaterialEntrySchema = z
   .object({
+    id: ResearchIdSchema.optional(),
+    status: ResearchStatusSchema.optional(),
     /** Workspace-relative path to a file worth reading. */
     path: z.string().min(1),
     /** What this file offers, in the author's terms: "main benchmark results". */
@@ -426,6 +498,8 @@ export const MaterialEntrySchema = z
  */
 export const MaterialFactSchema = z
   .object({
+    id: ResearchIdSchema.optional(),
+    result_ids: z.array(ResearchIdSchema).optional(),
     statement: z.string().min(1),
     /** The file the statement came from, workspace-relative. */
     source_path: z.string().min(1),
@@ -434,8 +508,40 @@ export const MaterialFactSchema = z
   })
   .passthrough();
 
+const ResearchEntityFields = {
+  id: ResearchIdSchema,
+  description: z.string().min(1),
+  status: ResearchStatusSchema,
+  reason: z.string().min(1),
+  provenance: z.array(ResearchProvenanceSchema),
+};
+export const ResearchMethodSchema = z.object({ ...ResearchEntityFields }).passthrough();
+export const ResearchExperimentSchema = z.object({
+  ...ResearchEntityFields,
+  method_ids: z.array(ResearchIdSchema).min(1),
+  run_ids: z.array(z.string().min(1)),
+  settings: z.record(z.unknown()),
+}).passthrough();
+export const ResearchResultSchema = z.object({
+  ...ResearchEntityFields,
+  kind: z.enum(["measured", "derived", "conceptual"]),
+  method_ids: z.array(ResearchIdSchema),
+  experiment_ids: z.array(ResearchIdSchema),
+  units: z.string().min(1),
+  derivation: z.string().min(1).optional(),
+}).passthrough();
+export type ResearchMethod = z.infer<typeof ResearchMethodSchema>;
+export type ResearchExperiment = z.infer<typeof ResearchExperimentSchema>;
+export type ResearchResult = z.infer<typeof ResearchResultSchema>;
+
 export const MaterialsMapSchema = z
   .object({
+    research_contract_version: z.literal(1).optional(),
+    methods: z.array(ResearchMethodSchema).default([]),
+    experiments: z.array(ResearchExperimentSchema).default([]),
+    results: z.array(ResearchResultSchema).default([]),
+    /** Required by validation when there are no recorded measurements/experiments. */
+    no_measurements_reason: z.string().min(1).optional(),
     /** How many files were looked at, so `reading` can be read as a selection. */
     materials_considered: z.number().int().nonnegative().default(0),
     /**
@@ -452,9 +558,22 @@ export const MaterialsMapSchema = z
     requirements: z.array(WritingRequirementSchema).default([]),
     coverage: z.array(z.object({
       path: z.string().min(1),
-      status: z.enum(["read", "unread", "unreadable", "excluded", "computable", "missing"]),
+      status: ResearchStatusSchema,
       reason: z.string().min(1),
     }).passthrough()).default([]),
   })
   .passthrough();
 export type MaterialsMap = z.infer<typeof MaterialsMapSchema>;
+
+/** Strict generation boundary; MaterialsMapSchema remains the legacy reader. */
+export const GeneratedMaterialsMapSchema = MaterialsMapSchema.extend({
+  research_contract_version: z.literal(1),
+  methods: z.array(ResearchMethodSchema),
+  experiments: z.array(ResearchExperimentSchema),
+  results: z.array(ResearchResultSchema),
+  reading: z.array(MaterialEntrySchema.extend({ id: ResearchIdSchema, status: ResearchStatusSchema })).min(1),
+  facts: z.array(MaterialFactSchema.extend({ id: ResearchIdSchema, result_ids: z.array(ResearchIdSchema).min(1) })),
+  research_claims: z.array(GeneratedResearchClaimSchema),
+  requirements: z.array(WritingRequirementSchema.extend({ id: ResearchIdSchema })),
+});
+export type GeneratedMaterialsMap = z.infer<typeof GeneratedMaterialsMapSchema>;

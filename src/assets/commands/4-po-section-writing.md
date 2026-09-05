@@ -20,6 +20,14 @@ recorded ablations when available, never fabricate them. State limitations and
 research boundaries accurately. Do not undertake or promise new experiments.
 Missing critical evidence remains a blocker, not an invitation to invent details.
 
+Follow stable claim IDs through outline `claim_ids`/`evidence_ids` to materials
+methods, experiments, results and exact source provenance. Do not replace those
+relationships with vague "the source confirms" wording. Conceptual original
+research may have no measurements: respect `no_measurements_reason`, describe
+the supplied proposal/derivation honestly and do not demand exhaustive proof or
+fabricate evaluations. Missing readable evidence or necessary computation should
+be a typed read/extract/analyze request, not a prose claim that a tool ran.
+
 Use only exact citation-map keys and claims supported by the recorded source
 content. Do not invent authors, affiliations, funding, ethics approvals or other
 declarations. Follow the locked CLI choices, brief and applicable venue rules for
@@ -65,6 +73,14 @@ with readable sizing and honest captions. Conceptual GPT diagrams are illustrati
 of the method, not measurements. Numeric charts must reflect actual results.
 Do not assert content absent from an image. Keep figures and tables near their
 discussion, with appendices placed according to the venue rules.
+
+Read quantity metadata in the figure plan and `figures/info.json` when present:
+selectors, transformations, units, axis types, linked evidence and supplied
+`expected_math`/`math_source`. Match captions and interpretation to the actual
+bindings and rendered figure. Never guess an equation or silently reinterpret a
+log axis, transformed quantity or unit. Request controller regeneration when an
+artifact is wrong; stop the turn and inspect operation-results.json before using
+the replacement. Do not edit controller-owned figure metadata to claim a repair.
 
 ## LaTeX
 

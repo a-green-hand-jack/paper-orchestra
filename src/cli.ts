@@ -26,11 +26,16 @@ import { discoverTemplate } from "./template-discovery.js";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { runResult } from "./automation.js";
+import { DEFAULT_BUDGET_LIMITS, readBudget } from "./budget.js";
+import { BudgetLimitsSchema } from "./state/schema.js";
 
 let jsonErrors = false;
 let activeWorkspace: string | null = null;
 
 function jsonLine(value: Record<string, unknown>): void {
+  if (value.type === "result" && typeof value.workspace === "string") {
+    value = { ...value, budget: readBudget(value.workspace) };
+  }
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
@@ -223,6 +228,12 @@ program
     false,
   )
   .option("--max-lkm-calls <n>", "ceiling on literature retrieval calls", "40")
+  .option("--max-total-tokens <n>", "whole-run token ceiling, including reasoning/cache", String(DEFAULT_BUDGET_LIMITS.max_total_tokens))
+  .option("--max-total-cost <usd>", "whole-run known model cost ceiling in USD; unreported bills remain unknown, not free", String(DEFAULT_BUDGET_LIMITS.max_total_cost))
+  .option("--max-model-calls <n>", "whole-run controller prompt admissions (not assistant turns)", String(DEFAULT_BUDGET_LIMITS.max_model_calls))
+  .option("--max-image-calls <n>", "whole-run image admissions; does not authorize spend", String(DEFAULT_BUDGET_LIMITS.max_image_calls))
+  .option("--max-operation-calls <n>", "whole-run operation admissions; does not authorize execution", String(DEFAULT_BUDGET_LIMITS.max_operation_calls))
+  .option("--max-run-minutes <n>", "whole-run active minutes, excluding pauses", String(DEFAULT_BUDGET_LIMITS.max_run_minutes))
   .option(
     "--target-citations <n>",
     "override the adaptive citation target (default: infer from the paper's needs)",
@@ -247,6 +258,15 @@ program
     }
 
     const defaultModel = options.model ? parseModelRef(options.model as string) : null;
+    const budgetResult = BudgetLimitsSchema.safeParse({
+      max_total_tokens: Number(options.maxTotalTokens),
+      max_total_cost: Number(options.maxTotalCost),
+      max_model_calls: Number(options.maxModelCalls),
+      max_image_calls: Number(options.maxImageCalls),
+      max_operation_calls: Number(options.maxOperationCalls),
+      max_run_minutes: Number(options.maxRunMinutes),
+    });
+    if (!budgetResult.success) fail(`invalid run budget: ${budgetResult.error.message}`);
 
     // Read here rather than in `prepare`, so a missing or unreadable brief
     // fails before a workspace exists to half-prepare.
@@ -301,6 +321,7 @@ program
       timeoutMultiplier: multiplier,
       until: (options.until as StageId | undefined) ?? null,
       maxLkmCalls: Number(options.maxLkmCalls),
+      budgetLimits: budgetResult.data,
       ...(options.targetCitations === undefined ? {} : { targetCitations: Number(options.targetCitations) }),
     });
 
@@ -311,6 +332,7 @@ program
         workspace: resolve(workspace),
         run_id: state.run_id,
         plan: state.scope.plan,
+        budget: readBudget(workspace),
         template: {
           id: state.scope.template_id ?? state.scope.venue,
           selection: state.scope.template_selection ?? "explicit",
@@ -327,6 +349,7 @@ program
       );
       process.stdout.write(`  plan      ${state.scope.plan.join(" -> ")}\n`);
       process.stdout.write(`  model     ${formatModelRef(state.default_model)}\n`);
+      process.stdout.write(`  budget    ${JSON.stringify(budgetResult.data)} (limits only, not spend authorization)\n`);
       process.stdout.write(`  source    ${state.source_digest.slice(0, 12)}\n`);
       process.stdout.write(`  template  ${state.template_digest.slice(0, 12)}\n`);
       process.stdout.write(`  brain     ${result.brainInputs.length} normalized input(s)\n`);
@@ -504,8 +527,9 @@ program
 program
   .command("doctor")
   .description("Check the environment a run depends on")
-  .action(async () => {
-    const { checks, probes, ok } = await runDoctor();
+  .option("--model <provider/model>", "Check a selected custom model configuration without requiring a built-in auth-store entry")
+  .action(async (options) => {
+    const { checks, probes, ok } = await runDoctor(options.model ? parseModelRef(options.model) : undefined);
     for (const check of checks) {
       process.stdout.write(`${check.passed ? "ok  " : "FAIL"}  ${check.name}: ${check.detail}\n`);
     }
@@ -524,9 +548,11 @@ async function main(): Promise<void> {
     if (error instanceof UserFacingError) {
       if (jsonErrors) {
         let runState: string | null = null;
+        let budget: ReturnType<typeof readBudget> = null;
         if (activeWorkspace) {
           try {
             runState = readRunState(activeWorkspace).status;
+            budget = readBudget(activeWorkspace);
           } catch {
             // Preparation may have failed before a state file existed.
           }
@@ -538,6 +564,7 @@ async function main(): Promise<void> {
             exit_status: error.exitCode,
             workspace: activeWorkspace,
             run_state: runState,
+            budget,
             validation_failures: [error.message],
             error: error.message,
           })}\n`,

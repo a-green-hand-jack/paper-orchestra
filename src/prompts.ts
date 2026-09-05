@@ -6,6 +6,43 @@ import { COMMANDS, type StageId } from "./stages.js";
 import type { Scope } from "./state/schema.js";
 import type { Check } from "./state/schema.js";
 
+/** Shared with controller-owned reviewer prompts; implementations live in operations.ts. */
+export const OPERATION_REQUEST_CONTRACT = `## Controller Operations
+When evidence or an artifact needed for this turn is unavailable, you may write
+.brain/requests.json as a JSON array of typed operations, not a prose request:
+[{"id":"req_read_results","operation":"read","inputs":["source/results.json"],"parameters":{}}]
+Each entry has id (unique stable request ID), operation, optional target_id,
+inputs (workspace-relative path strings), and parameters (an object containing
+only operation-specific arguments). operation is exactly read, extract, analyze,
+retrieve, render, revise, build, or review. Reuse target IDs from the research,
+figure/table/section plan or review finding; do not guess missing IDs or files.
+read/extract/analyze are native evidence operations. retrieve/render/build/review
+are registered controller operations; revise is dispatched to the responsible
+writer. Requests do not grant network, execution, budget or write permissions.
+After writing requests.json, STOP THE TURN. Do not also submit a plotting script,
+continue writing dependent content, or claim the operations succeeded. The controller
+returns .brain/operation-results.json; on continuation, read its actual outcomes
+and output paths before resuming. Failed/blocked work remains unresolved. Never
+write operation-results.json yourself or treat a prose tool claim as evidence.
+Use only the operation parameters documented by the controller, not invented APIs.`;
+
+export const REVIEW_FINDING_CONTRACT = `Emit full structured findings, each with:
+id (stable filename-safe ID), category (compile|numeric|figure|citation|layout|requirement|editorial),
+target_type (figure|table|section|manuscript|source), target_id (existing artifact ID,
+or exact workspace-relative path for manuscript/source), evidence (nonempty string
+array of concrete observations and evidence locations), owner (controller|writer),
+verification (specific observable recheck), status (open|resolved|blocked),
+severity (blocking|advisory), location, problem, and action (nonempty strings).
+Preserve existing IDs for the same issue; the controller normalizes stable IDs and
+verifies artifact dependencies. Assign generation, retrieval, build and evidence-tool
+work to controller; manuscript prose/layout edits to writer. Do not mark a finding
+resolved merely because a request was submitted or prose claims it was fixed.
+Check the user's actual contract, anonymity, source fidelity and rendered content,
+not an invented requirement for exhaustive scientific proof. Original conceptual
+research may have no measurements; distinguish a supplied proposal or derivation
+from a tested result. Never require fabricated experiments or external publications
+proving every detail of an original result. Required evidence gaps remain blockers.`;
+
 /**
  * Substitute only the named placeholders.
  *
@@ -156,7 +193,7 @@ export function buildStagePrompt(
 ): string {
   const body = substitute(loadCommand(workspace, stage), placeholdersFor(stage, scope, extra));
   const outputs = STAGE_OUTPUTS[stage];
-  const inputs = [...stageInputs(workspace, stage, scope), ...ifPresent(workspace, ".brain/raw/data_analysis.json"),
+  const inputs = [...stageInputs(workspace, stage, scope), ...ifPresent(workspace, ".brain/operation-results.json"), ...ifPresent(workspace, ".brain/raw/data_analysis.json"),
     ...ifPresent(workspace, ".brain/manuscript/table_presentation.json")];
   const citationKeys = extra.citation_keys?.trim();
 
@@ -167,6 +204,7 @@ export function buildStagePrompt(
   if (stage === "plotting") {
     return [
       body,
+      OPERATION_REQUEST_CONTRACT,
       "",
       "---",
       "",
@@ -181,7 +219,7 @@ export function buildStagePrompt(
       extra.data_files?.trim() || "No runtime mapping supplied. Do not guess copied paths or invent replacement data.",
       "",
       "Rules:",
-      "- Return the script IN YOUR REPLY, in one ```python fenced block. Do not write",
+      "- Unless submitting an operation request and stopping, return the script IN YOUR REPLY, in one ```python fenced block. Do not write",
       "  it to a file: the controller executes what you return and writes every",
       "  artifact itself, from what actually rendered.",
       "- After the fenced block, give the figure's caption on a line beginning",
@@ -197,6 +235,7 @@ export function buildStagePrompt(
 
   return [
     body,
+    OPERATION_REQUEST_CONTRACT,
     "",
     "---",
     "",
@@ -207,7 +246,7 @@ export function buildStagePrompt(
     "Read only these paths:",
     ...inputs.map((path) => `- \`${path}\``),
     "",
-    "Write exactly these paths:",
+    "Write these stage outputs (or submit `.brain/requests.json` and stop for controller results):",
     ...outputs.map((path) => `- \`${path}\``),
     ...(["section_writing", "refinement"].includes(stage) ? [
       "You may additionally write `.brain/manuscript/table_presentation.json` for presentation-only table corrections.",
@@ -242,6 +281,11 @@ export function buildStagePrompt(
     "  Templates supply style and structure only. Write independent prose from raw research evidence.",
     "- Read source and extracted results before making claims. Do not run new experiments,",
     "  invent measurements, or hide missing evidence. State supported limitations accurately.",
+    "- Preserve stable materials method/experiment/result/claim IDs and explicit provenance links.",
+    "  Outline sections, tables and figures bind claim_ids to evidence_ids, not vague source wording.",
+    "  A path or citation alone does not prove a claim; inspect its actual content and scope.",
+    "  Original conceptual work need not have measurements. Record an explicit no_measurements_reason",
+    "  instead of fabricating experiments or demanding exhaustive proof beyond the user's contract.",
     "- A raw research folder and optional brief are sufficient inputs; author metadata is not assumed.",
     "  When author metadata is absent, produce an anonymous review manuscript. In generated TeX only,",
     "  replace placeholder author blocks with a template-compatible anonymous author block and remove",
@@ -284,6 +328,7 @@ export function buildRemediationPrompt(stage: StageId, failed: readonly Check[])
   );
   return [
     `Stage \`${stage}\` failed controller validation.`,
+    OPERATION_REQUEST_CONTRACT,
     "",
     ...failed.map((check) => `- **${check.name}**: ${check.detail}`),
     ...(citationFailure

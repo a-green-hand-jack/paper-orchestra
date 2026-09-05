@@ -23,6 +23,14 @@ workspace-relative paths into the author's permitted source or extracted results
 If `data_source` names no file, the figure is conceptual and must not assert a
 measured value.
 
+Read this figure's entry in `.brain/raw/outline.json`, including `claim_ids`,
+`evidence_ids` and `quantities`, and follow the linked methods/results in
+materials.json. Bind actual quantities, selectors, transformations, units and
+axis types before plotting. Use `expected_math` only when its `math_source`
+provides the equation; never infer a scientific formula from a label or desired
+curve. If a binding or equation is missing, request read/extract/analyze through
+`.brain/requests.json` and stop for controller results rather than guessing.
+
 These source paths are for your workspace reading tools. At execution, the
 controller copies this figure's declared `data_source` files into the script's
 work directory under `data/`. Use the controller-supplied source-to-runtime mapping
@@ -82,10 +90,11 @@ missing, report that blocker rather than inventing data or an execution path.
 
 ## Output
 
-Return the complete script in one ```python fenced block, followed by one line
+Unless submitting a typed operation request and stopping, return the complete script in one ```python fenced block, followed by one line
 beginning `Caption:` with the figure's plain-text caption (no `Figure N:` prefix).
 Describe the research evidence, not PaperOrchestra, scaffolds, workspaces or
 automatic template selection. Preserve explicitly required research provenance
 when relevant to the figure; do not invent personal declarations or author metadata.
-Do not write files with editing tools. The controller executes the script and
+Do not write rendering artifacts with editing tools. The request file is the only
+exception to reply-only output. The controller executes the script and
 writes the per-figure artifacts from what actually rendered.

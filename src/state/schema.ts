@@ -16,16 +16,61 @@ export type ModelRef = z.infer<typeof ModelRefSchema>;
 
 /** Cumulative token and cost figures, summed from assistant messages. */
 export const UsageSchema = z.object({
+  /** Assistant messages, not controller prompt admissions or provider HTTP attempts. */
   model_calls: z.number().int().nonnegative().default(0),
   input_tokens: z.number().int().nonnegative().default(0),
   output_tokens: z.number().int().nonnegative().default(0),
   reasoning_tokens: z.number().int().nonnegative().default(0),
   cache_read_tokens: z.number().int().nonnegative().default(0),
   cache_write_tokens: z.number().int().nonnegative().default(0),
-  cost: z.number().nonnegative().default(0),
+  cost: z.number().finite().nonnegative().default(0),
   transcript_messages: z.number().int().nonnegative().default(0),
+  /** Missing or zero-reported prices cannot establish that execution was free. */
+  unknown_cost_messages: z.number().int().nonnegative().optional(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
+
+export const BudgetLimitsSchema = z.object({
+  max_total_tokens: z.number().int().safe().nonnegative().optional(),
+  max_total_cost: z.number().finite().nonnegative().optional(),
+  max_model_calls: z.number().int().safe().nonnegative().optional(),
+  max_image_calls: z.number().int().safe().nonnegative().optional(),
+  max_operation_calls: z.number().int().safe().nonnegative().optional(),
+  max_run_minutes: z.number().finite().nonnegative().optional(),
+});
+export type BudgetLimits = z.infer<typeof BudgetLimitsSchema>;
+
+export const BudgetTotalsSchema = z.object({
+  prompt_admissions: z.number().int().nonnegative().default(0),
+  assistant_messages: z.number().int().nonnegative().default(0),
+  total_tokens: z.number().finite().nonnegative().default(0),
+  known_cost_usd: z.number().finite().nonnegative().default(0),
+  unknown_cost_messages: z.number().int().nonnegative().default(0),
+  /** Failed dispatch/telemetry observations whose final consumption is unknown. */
+  unknown_usage_events: z.number().int().nonnegative().default(0),
+  image_calls: z.number().int().nonnegative().default(0),
+  unreported_image_bills: z.number().int().nonnegative().default(0),
+  operation_calls: z.number().int().nonnegative().default(0),
+  active_ms: z.number().finite().nonnegative().default(0),
+});
+export const BudgetLedgerSchema = z.object({
+  version: z.literal(1),
+  run_id: z.string(),
+  limits: BudgetLimitsSchema,
+  totals: BudgetTotalsSchema,
+  stages: z.record(BudgetTotalsSchema),
+  sessions: z.record(z.object({ stage: z.string(), usage: UsageSchema })),
+  events: z.array(z.object({
+    at: z.string(), stage: z.string(), kind: z.string(),
+    session_id: z.string().optional(),
+    delta: BudgetTotalsSchema.partial(),
+    detail: z.string().optional(),
+  })),
+  /** Historical usage before this ledger existed cannot be reconstructed in full. */
+  historical_usage_unknown: z.boolean(),
+  updated_at: z.string(),
+});
+export type BudgetLedger = z.infer<typeof BudgetLedgerSchema>;
 
 export const STAGE_STATUSES = [
   "pending",
@@ -106,6 +151,8 @@ export const ScopeSchema = z.object({
    * instruction is not a thing to second-guess.
    */
   target_citations: z.number().int().nonnegative().optional(),
+  // Optional with no schema defaults: shipped scope digests must stay unchanged.
+  ...BudgetLimitsSchema.shape,
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 

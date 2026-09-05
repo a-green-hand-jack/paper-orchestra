@@ -7,6 +7,7 @@ paper_output*
 
 # Run outputs. A workspace may be created anywhere, including in the repo root.
 po-run-*/
+docker-output/
 final_paper.pdf
 
 # Node / TypeScript runtime

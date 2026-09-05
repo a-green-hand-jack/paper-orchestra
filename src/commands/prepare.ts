@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { DEFAULT_BUDGET_LIMITS, initializeBudget } from "../budget.js";
+import type { BudgetLimits } from "../state/schema.js";
 import { chmodSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { checkpoint, initGit } from "../checkpoints.js";
@@ -65,6 +67,7 @@ export interface PrepareOptions {
   readonly until?: StageId | null;
   readonly maxLkmCalls: number;
   readonly targetCitations?: number;
+  readonly budgetLimits?: BudgetLimits;
 }
 
 export interface PrepareResult {
@@ -203,6 +206,8 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
     network_policy: options.networkPolicy,
     max_lkm_calls: options.maxLkmCalls,
     target_citations: options.targetCitations,
+    ...DEFAULT_BUDGET_LIMITS,
+    ...Object.fromEntries(Object.entries(options.budgetLimits ?? {}).filter(([, value]) => value !== undefined)),
   });
 
   const digests = computeLockDigests(workspace);
@@ -229,6 +234,7 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
   const brain = await prepareBrainInput(workspace);
 
   state = writeRunState(workspace, { ...state, status: "prepared" });
+  initializeBudget(workspace);
 
   await initGit(workspace, runBranch);
   const checkpointSha = await checkpoint({

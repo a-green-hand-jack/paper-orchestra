@@ -329,7 +329,11 @@ function tableArtifacts(workspace: string) {
       rows: table.rows.map((row, index) => ({ ...row, label: presentation.row_labels?.[index] ?? row.label })) },
     presentation.row_header);
     return { table, tex, manifest: { version: 1, table_id: table.table_id,
-      plan_sha256: digestValue(table), presentation, source_hashes, numeric_verification,
+      plan_sha256: digestValue(table), presentation, presentation_sha256: digestValue(presentation),
+      source_hashes, numeric_verification,
+      numeric_cells_verified: numeric_verification.length,
+      numeric_tokens_verified: numeric_verification.reduce((total, cell) => total + cell.expected.length, 0),
+      rows: table.rows.length, columns: table.columns.length,
       tex_sha256: createHash("sha256").update(tex).digest("hex") } };
   });
 }
@@ -395,6 +399,11 @@ export function publishTables(workspace: string): number {
     writeJsonAtomic(join(dir, `${table.table_id}.json`), manifest);
   }
   return artifacts.length;
+}
+
+/** Current mechanically verified metadata, for caption writing and independent review. */
+export function tablePresentationMetadata(workspace: string) {
+  return tableArtifacts(workspace).map(({ manifest }) => manifest);
 }
 
 /** Follow ordinary input/include commands, rather than counting commented or unused files. */

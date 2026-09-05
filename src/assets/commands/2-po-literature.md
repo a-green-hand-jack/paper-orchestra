@@ -6,6 +6,13 @@ Read `.brain/raw/outline.json`, `.brain/raw/citation_map.json`,
 needed to check contributions, and `template/template.tex`. Apply the brief and
 any available template guidelines. Never use inherited finished manuscript prose.
 
+Preserve materials claim IDs, method/experiment/result relationships, provenance,
+section IDs, and figure/table `claim_ids`, `evidence_ids` and quantity metadata
+when writing `outline_v1.json`. A source path or similar abstract is not proof
+of a claim. Do not turn conceptual research into a claimed measured experiment.
+For necessary retrieval, submit the registered `retrieve` operation using the
+workspace request contract and stop; do not claim retrieval happened in prose.
+
 The controller provides {paper_count} candidate papers. {bibliography_origin}
 Bibliography mode is `{bibliography_mode}`: `seed` permits controller-managed
 gap retrieval; `closed` restricts the bibliography to the supplied collection.

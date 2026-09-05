@@ -1,0 +1,37 @@
+# Deny by default: no host output, data, Git history, HOME or dependencies.
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!scripts/
+!scripts/copy-runtime-assets.mjs
+!docker/
+!docker/entrypoint.mjs
+!docker/acceptance.mjs
+!docker/recompile.mjs
+!docker/user-command.mjs
+!docker/hf-constraints.txt
+!docker/oauth-provider.mjs
+# Sensitive names remain excluded even inside allowlisted source directories.
+**/.env*
+**/*auth*.json
+**/*.key
+**/*.pem
+**/.npmrc
+**/.netrc
+**/credentials*
+**/token
+**/stored_tokens
+**/.bohr/**
+**/.bohrium/**
+**/.huggingface/**
+**/.codex/**
+**/.cache/**
+**/secrets/**
+**/.secrets/**
+**/node_modules/**
+**/dist/**

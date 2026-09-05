@@ -426,18 +426,174 @@ contract, not a file the standalone CLI export currently creates.
 
 Inspect `submission_ready`, the independent review, the exported PDF, and the
 standalone build instructions before assessing the result. Preparation checks and
-unit tests are not an end-to-end writing pass. **No successful Gewu end-to-end
+tooling smoke checks are not an end-to-end writing pass. **No successful Gewu end-to-end
 run is claimed here**; the frozen verifier and human scientific/visual review
 still need to assess the generated manuscript.
 
-## Development checks
+## Docker Real-CLI Acceptance
+
+See [DEV.md](DEV.md) for the developer-as-user workflow, online service checks,
+narrow bohr/HF identity mounts, arbitrary CLI execution, and all six run budgets.
+User-simulation commands use **online bridge networking by default**; only the
+extra independent recompilation is forced offline.
+
+`npm test` (also `npm run test:docker`) runs the **real packaged CLI in Docker**,
+not mocks or unit tests. It builds the current working copy, runs `doctor`, then
+`write --headless --json`, `status --json`, and `validate --json`. Successful
+writing must report `submission_ready: true` and export `workspace/submission/`.
+The harness then launches a separate network-disabled, credential-free container,
+copies only that export, removes prebuilt manuscript/build products from the copy,
+and compiles `main.tex` with LaTeX/BibTeX or Biber via `latexmk`. It also checks
+the rebuilt PDF with Poppler. Failure at any required step fails acceptance;
+the first failed CLI exit code is preserved. No model response can substitute
+for these commands. A passing run is still not scientific or venue certification.
+
+### Build and Tool Checks
+
+Requires Docker with BuildKit, a working daemon, and host Node >=20. No host
+TeX, Python environment, `dist/`, or `node_modules/` is used by the image:
 
 ```bash
-npm test
+npm run test:docker -- build
+npm run test:docker -- tools
 ```
 
-This builds the TypeScript runtime and runs `tests/*.test.mjs` with Node's test
-runner. It is not a live provider-backed end-to-end manuscript evaluation.
+Both commands build `paper-orchestra:e2e`. `tools` runs installed CLI help,
+version/import checks, and the actual doctor with online networking, an empty
+HOME and **no secrets mounted**. Its doctor is expected to exit nonzero without
+authenticated providers. Neither command claims a manuscript acceptance pass.
+The initial TeX image build takes several minutes and several GB; later builds
+reuse dependency layers while rebuilding changed source.
+
+The multi-stage build uses `npm ci`, TypeScript build, `npm shrinkwrap` derived
+from the project lock, and `npm pack`; the runtime globally installs that tarball.
+The allowlisted build context excludes host datasets, outputs, Git history,
+credentials, `.env*`, auth files, and dependencies. Do not put secrets in source
+files under arbitrary names: filename exclusions are not a content scanner.
+
+Default pins are Node `22.22.0-bookworm-slim` at the digest in `Dockerfile`,
+Debian's signed `20260901T000000Z` snapshot, official npm packages
+`opencode-ai@1.18.29`, `@openai/codex@0.153.4`, and
+`@dptech-corp/bohr-cli@2.6.86`, plus container-native `huggingface_hub==1.30.0`
+installed from `https://pypi.org/simple` in `/opt/hf`. npm downloads use
+`https://registry.npmjs.org`; apt uses the dated `snapshot.debian.org` archives
+with signature verification enabled. Resolved package inventories are in the
+image at `/opt/package/{debian-packages.txt,npm-packages.json,hf-packages.txt}`. CLI version pins
+do not freeze remote model behavior. For exact reuse, retain the recorded image
+ID, rather than relying on a mutable tag or a future rebuild.
+
+### Credentials and Live Run
+
+The harness discovers only standard bohr/HF identity paths, never opens their
+contents on the host, and supports explicit paths to individual read-only runtime
+mounts. Text/image OAuth paths are always explicit. Do not pass secret values
+as environment variables, Docker build arguments, or command arguments.
+
+| Variable | Integration |
+|---|---|
+| `PO_MODEL` | Required OpenCode `provider/model[:variant]`, with text and image-input support for review |
+| `PO_TEXT_CONFIG_FILE` | Required secret-free OpenCode JSON; mounted at `/run/secrets/text-config.json` as `OPENCODE_CONFIG` |
+| `PO_MODEL_KEY_FILE` | Optional single-line key; runtime-only `PO_MODEL_KEY`, referenced as `{env:PO_MODEL_KEY}` in JSON |
+| `PO_OAUTH_PROVIDER_FILE`, `PO_TEXT_AUTH_FILE` | Optional paired mounts for the governed text OAuth route; use `docker/opencode.oauth.example.json`, no model API key required |
+| `PO_CODEX_AUTH_FILE` | Required Codex ChatGPT OAuth auth file, read-only mounted and copied into isolated tmpfs `CODEX_HOME` for safe refresh |
+| `PO_LKM_KEY_FILE` | Single-line Bohrium key; runtime-only `BOHR_ACCESS_KEY`; an alternative to a mounted bohr profile |
+| `PO_BOHR_CONFIG_DIR` | Narrow bohr configuration/auth directory; read-only mount copied into tmpfs `BOHR_CONFIG_DIR` |
+| `PO_HF_HOME` | HF identity directory; only `token` and optional `stored_tokens` are mounted, not dataset/model caches |
+| `PO_HF_TOKEN_FILE` | Overrides the active token path from `PO_HF_HOME` |
+| `PO_ALLOW_PAID` | Must equal `1`; explicitly authorizes real writing/review, image generation and LKM spending |
+
+Adapt `docker/opencode.example.json` with the approved provider's exact HTTPS
+base URL, model ID, supported context/output limits, and provider SDK. The
+template contains placeholders, not a working endpoint or credentials. Its
+provider `env` declaration allows the official OpenCode auth listing to recognize
+the runtime key. The example uses a pinned OpenAI-compatible SDK; providers
+requiring Responses or other protocols need the corresponding OpenCode SDK.
+Do not mount your full host OpenCode config/plugin tree. LKM uses bohr's official
+`https://open.bohrium.com/openapi/v2/lkm` service; Codex uses its official ChatGPT
+OAuth/image integration, not the text model's custom endpoint. Rotated OAuth
+state is discarded at container exit; maintain the host login separately.
+
+With those non-secret environment settings configured, one command starts a
+fresh build and live acceptance:
+
+```bash
+PO_ALLOW_PAID=1 npm test
+```
+
+By default it uses the existing raw-only `datasets/gewu-issue48/input` and
+`datasets/gewu-issue48/benchmark/gewu-kerr-no-assets/instruction.md`. It downloads
+no dataset and mounts no prior Gewu runs, finished papers, or repository. If the
+prepared input is missing, preparation is a separate explicit action described
+above; the harness does not fetch the full source solution. The brief prohibits
+retrieving finished papers and running new simulations.
+
+### Outputs and Bounds
+
+Default output is a fresh `docker-output/<UTC-timestamp>-<pid>/`, printed before
+building. Set `PO_OUTPUT_DIR` to select another **new dedicated directory**.
+Existing output is refused unless explicitly resuming or using `exec`:
+
+```bash
+PO_ALLOW_PAID=1 PO_OUTPUT_DIR=/absolute/path/to/previous-output npm run test:docker -- resume
+```
+
+Resume calls `paper-orchestra resume /output/workspace --headless --json` and
+preserves previous acceptance attempts. CLI digest locks and persisted scope
+remain authoritative; new run knobs do not rewrite a resumed plan. It rebuilds
+the current source, so retain the recorded image/source when exact replay matters.
+
+| Variable | Default / Bounds |
+|---|---|
+| `PO_DOCKER_IMAGE` | `paper-orchestra:e2e` |
+| `PO_DOCKER_NETWORK` | `bridge`; custom named networks or explicit `none` supported; host networking refused |
+| `PO_MATERIALS_DIR`, `PO_BRIEF_FILE` | Override only the selected raw materials and commissioning brief |
+| `PO_MAX_LKM_CALLS` | `10`, range 0-100; live seed retrieval requires a positive budget |
+| `PO_TARGET_CITATIONS` | `5`, range 5-100 |
+| `PO_RESEARCH_CUTOFF` | `2026-09` |
+| `PO_TIMEOUT_MULTIPLIER` | `1`, range 0.1-10 |
+| `PO_TIMEOUT_SECONDS` | `7200`, range 60-86400; container write deadline plus 180 seconds for diagnostics |
+| `PO_MAX_TOTAL_TOKENS` | `8000000`, CLI `--max-total-tokens` |
+| `PO_MAX_TOTAL_COST` | `100` USD known model costs, CLI `--max-total-cost` |
+| `PO_MAX_MODEL_CALLS` | `80`, CLI `--max-model-calls` |
+| `PO_MAX_IMAGE_CALLS` | `12`, CLI `--max-image-calls` |
+| `PO_MAX_OPERATION_CALLS` | `64`, CLI `--max-operation-calls` |
+| `PO_MAX_RUN_MINUTES` | `120`, CLI `--max-run-minutes` |
+
+All six limits are forwarded explicitly on fresh acceptance runs. LKM limits do
+not cap model/image spending; time and resource limits are not monetary caps.
+Unreported provider charges remain unknown, not free. Use provider-side caps for paid
+runs. The container is limited to 4 CPUs, 8 GiB RAM and 512 processes.
+
+`acceptance.json` records build/image identity, bounds, command outcomes, timing,
+status/totals and independent recompile evidence. `runtime-acceptance.json`
+records doctor/write/status/validate; `recompile-*/` contains the separate build,
+logs and `recompile-acceptance.json`. Arbitrary provider stdout/stderr is not
+copied into harness logs, to avoid credential-bearing diagnostics. The CLI's own
+workspace provenance remains under `workspace/.po-run/`; treat research outputs
+as private. Build-only success leaves acceptance `ok: false` deliberately.
+`services` and `exec` also leave manuscript `ok: false`; their own result and
+`command_ok` report success separately. They discard raw API/auth/command output,
+retaining sanitized statuses and the allowlisted Gewu dataset ID/revision only.
+
+Runtime uses the host non-root UID/GID, a read-only root filesystem, dropped
+capabilities, no-new-privileges, and disposable writable HOME/tmpfs. Only
+`/materials` and the brief are read-only research mounts; only the dedicated
+`/output` is host-writable. No host HOME, repository, root directory, Docker
+socket, ports, or host network is exposed. The model container needs outbound
+provider access; independent recompilation has no network or secrets. Containers
+reduce exposure but are not a security boundary against a compromised Docker
+daemon/kernel or permission to feed untrusted generated code privileged access.
+
+## Development Checks
+
+```bash
+npm run typecheck
+npm run build
+npm test  # real Docker acceptance, requires the explicit live settings above
+```
+
+The tracked `tests/` suite has been removed; no replacement unit-test suite is
+hidden elsewhere. Build/typecheck remain credential-free development checks.
 
 ## Project structure
 
@@ -445,7 +601,7 @@ runner. It is not a live provider-backed end-to-end manuscript evaluation.
   figure execution
 - `src/assets/commands/` — the stage prompts, hand-edited and authoritative
 - `src/templates/` — conference LaTeX templates; add one as a new subdirectory
-- `tests/` — unit and integration tests (`npm test`)
+- `docker/`, `scripts/docker-e2e.mjs` — isolated real-CLI Docker acceptance
 
 ## Citation
 

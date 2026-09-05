@@ -30,7 +30,9 @@ Inventory of what is available:
 
 ## What you must write
 
-One file: `.brain/raw/materials.json`.
+One file: `.brain/raw/materials.json`. The abbreviated example below illustrates
+the existing navigation fields; add every field required by the research contract
+below before submitting. Its example names and numbers are not evidence.
 
 ```json
 {
@@ -129,7 +131,7 @@ missing, search the inventory and open the likely result files. Never run new
 experiments or read an inherited finished manuscript, PDF or extracted equivalent.
 
 Add `research_claims`: objects with `claim`, nonempty `evidence_paths` arrays,
-and `limitations` arrays. These describe the supported research story, not a
+and `limitations` arrays, plus the structured fields below. These describe the supported research story, not a
 replacement manuscript. Add `requirements`: objects with `requirement`, `source`
 (`cli`, `brief`, `template`, `inferred`) and `verification`. Read the commissioning
 brief and template rules; preserve explicit constraints and label inferences.
@@ -139,3 +141,54 @@ Add `coverage`: objects with `path`, `status` and `reason`. Status is `read`,
 unread/skipped/oversized materials and explain what is still needed. Distinguish
 not yet read, not yet found, derivable from existing results, and genuinely absent.
 Do not claim the research is understood while key result files remain unread.
+
+## Required Research Contract
+
+Set `research_contract_version: 1`. Preserve IDs on subsequent turns; assign a
+new ID only for a genuinely new entity. IDs are globally unique, start with a
+letter, and contain only letters, digits, underscores or hyphens. Use prefixes
+such as `src_`, `method_`, `experiment_`, `result_`, `claim_`, `fact_`, `req_`.
+Never use an array index as an identity that changes when entries are reordered.
+
+- Each `reading` entry also has `id` and `status`, matching its `coverage` status.
+- Each `requirements` entry also has `id`; preserve the actual user contract.
+- Each `facts` entry also has `id` and nonempty `result_ids`, pointing to recorded
+  numeric results from the same source. Keep the existing verbatim quote fields.
+- Write `methods`, `experiments`, and `results` arrays, even when empty. Every
+  entry has `id`, `description`, `status`, `reason`, and `provenance`.
+- `provenance` is an array of `{source_path, locator, quote?}`. `source_path`
+  names an actual permitted `source/` or `.brain/input/` file (or controller-owned
+  `.brain/raw/data_analysis.json`); `locator` identifies a field, line range,
+  page or code symbol. Optional `quote` must be verbatim. Read evidence requires
+  nonempty provenance and its paths indexed as `read` in `reading` and `coverage`.
+- Each experiment additionally has nonempty `method_ids`, `run_ids` (strings;
+  empty if not recorded), and `settings` (object of recorded configuration only).
+- Each result additionally has `kind` (`measured`, `derived`, `conceptual`),
+  `method_ids`, `experiment_ids`, and `units` (use `not applicable` for conceptual
+  content or `dimensionless` when justified). Measured results link an actual
+  experiment; conceptual results may have empty `experiment_ids`. Derived
+  results also have `derivation`, identifying the supplied operation and operands.
+- Each claim additionally has `id`, `status`, `reason`, `method_ids`,
+  `experiment_ids`, nonempty `evidence_ids`, and nonempty `provenance`.
+  `evidence_ids` point to method or result IDs, not filenames or other claims.
+  Reference existing IDs rather than copying their complete source and relationship
+  lists. The controller follows result-to-experiment/method and experiment-to-method
+  links and inherits their provenance. Keep the contract fields, but list only direct
+  links and additional source observations; do not repeat every inherited path in
+  both `evidence_paths` and `provenance`. A method-only conceptual claim is valid.
+
+Status is exactly `read`, `unread`, `unreadable`, `excluded`, `computable`, or
+`missing`: inspected evidence, not yet inspected, attempted but inaccessible,
+forbidden/out of scope, derivable but not computed/verified, or genuinely absent.
+Do not label a proposed computation `read`. Request native read/extract/analyze
+operations through `.brain/requests.json` when needed, then stop the turn and
+wait for `.brain/operation-results.json`. Tool requests are not successful results.
+Unknown locations belong in `unresolved`; never invent a filename to populate
+coverage. An identified absent file may be marked `missing`, never used as evidence.
+
+When there are no recorded experiments or measured results, include a nonempty
+`no_measurements_reason`. A conceptual proposal, method or derivation is original
+research without fabricated benchmarks. Leave absent arrays empty and describe
+the actual evidential scope. Do not impose exhaustive scientific proof or an
+experimental structure beyond the user's requirements. Do not call a proposal
+tested, verified, or source-supported unless the cited content establishes that.

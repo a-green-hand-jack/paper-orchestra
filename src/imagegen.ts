@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { UserFacingError } from "./errors.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
+import { digestFile, digestValue } from "./files.js";
 
 export const IMAGE_ADAPTER_ENV = "PAPER_ORCHESTRA_IMAGE_ADAPTER";
 const IMAGE_TIMEOUT_MS = 300_000;
@@ -34,6 +35,12 @@ export interface TextToImageResult {
   readonly provenance: {
     readonly provider: string;
     readonly model: string;
+    readonly requested_model?: string | null;
+    readonly observed_model?: string | null;
+    readonly model_evidence?: string;
+    readonly figure_id?: string;
+    readonly figure_sha256?: string;
+    readonly presentation_sha256?: string;
     readonly prompt: string;
     readonly parameters: Record<string, unknown>;
   };
@@ -86,7 +93,7 @@ async function codexImageCapability(env: NodeJS.ProcessEnv): Promise<Capability>
 
     return {
       ok: true,
-      detail: `Codex built-in image generation (${CODEX_PROVIDER}/${CODEX_IMAGE_MODEL})`,
+      detail: `Codex built-in image generation (${CODEX_PROVIDER}; requested ${CODEX_IMAGE_MODEL}, actual model unverified)`,
     };
   } catch (error) {
     const code =
@@ -197,6 +204,7 @@ function codexPrompt(request: TextToImageRequest): string {
       figure_id: request.figureId,
       visual_brief: request.prompt,
       aspect_ratio: request.aspectRatio,
+      requested_model: CODEX_IMAGE_MODEL,
     }),
     "Generate exactly one publication-quality raster image matching that visual brief and aspect ratio.",
     "Do not invent equations or mathematical relationships not explicitly supplied in the visual brief. " +
@@ -250,14 +258,19 @@ async function generateWithCodex(
     bytes: statSync(output).size,
     provenance: {
       provider: CODEX_PROVIDER,
-      model: CODEX_IMAGE_MODEL,
+      model: "unverified",
+      requested_model: CODEX_IMAGE_MODEL,
+      observed_model: null,
+      model_evidence: "Requested in visual specification; image tool did not report actual model identity",
       prompt: request.prompt,
       parameters: {
         aspect_ratio: request.aspectRatio,
         auth: "chatgpt_oauth",
         executor: "codex exec",
         image_generation: "built_in",
-        model_evidence: "executor default; not reported by the image tool",
+        requested_model: CODEX_IMAGE_MODEL,
+        observed_model: null,
+        model_evidence: "unverified; not reported by the image tool",
         ...(threadId ? { thread_id: threadId } : {}),
       },
     },
@@ -325,6 +338,9 @@ async function generateWithExternalAdapter(
     provenance: {
       provider,
       model,
+      requested_model: null,
+      observed_model: model,
+      model_evidence: "external adapter reported; not independently verified",
       prompt: request.prompt,
       parameters:
         response.parameters && typeof response.parameters === "object"
@@ -364,10 +380,15 @@ export async function generateTextImage(
   if (!existsSync(imagePath) || !statSync(imagePath).isFile()) {
     throw new UserFacingError(`image generation reported ${imagePath}, but that file does not exist`);
   }
+  if (realpathSync(imagePath) !== imagePath || realpathSync(request.workDir) !== resolve(request.workDir)) {
+    throw new UserFacingError("image output must not traverse symlinks");
+  }
   const bytes = statSync(imagePath).size;
   if (bytes < MIN_FIGURE_BYTES) {
     throw new UserFacingError(`image output is only ${bytes} bytes and appears blank or truncated`);
   }
 
-  return { ...generated, imagePath, bytes };
+  return { ...generated, imagePath, bytes, provenance: { ...generated.provenance,
+    figure_id: request.figureId, figure_sha256: digestFile(imagePath),
+    presentation_sha256: digestValue({ figure_id: request.figureId, prompt: request.prompt, aspect_ratio: request.aspectRatio }) } };
 }

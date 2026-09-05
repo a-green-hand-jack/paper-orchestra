@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import type { Check } from "./state/schema.js";
+import type { Check, ModelRef } from "./state/schema.js";
 import { textToImageCapability } from "./imagegen.js";
 import { executableAvailable } from "./preflight.js";
 
@@ -59,7 +59,7 @@ async function requireBinary(name: string, binary: string, why: string): Promise
  * can still write a paper with `--use-plotting` off, and failing there would be
  * a false alarm.
  */
-export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; ok: boolean }> {
+export async function runDoctor(model?: ModelRef): Promise<{ checks: Check[]; probes: Probe[]; ok: boolean }> {
   const checks: Check[] = [];
 
   const major = Number(process.versions.node.split(".")[0] ?? "0");
@@ -88,11 +88,19 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
   checks.push(await requireBinary("pdfinfo", "pdfinfo", "refinement page-count verification"));
 
   const providers = await listOpencodeProviders();
+  let configuredModel = false;
+  if (model) {
+    try {
+      const { stdout } = await execa("opencode", ["models", model.providerID], { timeout: 30_000 });
+      configuredModel = stdout.split(/\r?\n/).some((line) => line.trim() === `${model.providerID}/${model.modelID}`);
+    } catch { /* Configuration discovery is not a paid authentication probe. */ }
+  }
   checks.push(
     check(
-      "opencode providers",
-      providers.length > 0,
-      providers.length > 0
+      model ? "selected OpenCode model configuration" : "opencode providers",
+      model ? configuredModel : providers.length > 0,
+      model ? (configuredModel ? `${model.providerID}/${model.modelID} is configured; authentication is verified on the first request`
+        : `model ${model.providerID}/${model.modelID} is not available in the active configuration`) : providers.length > 0
         ? providers.join(", ")
         : "no authenticated providers; run `opencode auth login`",
     ),
