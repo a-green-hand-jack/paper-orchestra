@@ -57,6 +57,10 @@ export const BudgetLedgerSchema = z.object({
   version: z.literal(1),
   run_id: z.string(),
   limits: BudgetLimitsSchema,
+  token_limit_increases: z.array(z.object({
+    at: z.string(), from: z.number().int().safe().nonnegative(),
+    to: z.number().int().safe().nonnegative(), used_tokens: z.number().finite().nonnegative(),
+  })).optional(),
   totals: BudgetTotalsSchema,
   stages: z.record(BudgetTotalsSchema),
   sessions: z.record(z.object({ stage: z.string(), usage: UsageSchema })),

@@ -15,7 +15,7 @@ import {
   waitForIdle,
 } from "./opencode.js";
 import { buildRemediationPrompt, buildStagePrompt, OPERATION_REQUEST_CONTRACT } from "./prompts.js";
-import { beginBudgetRun, endBudgetRun, checkBudget, consumeBudget, readBudget } from "./budget.js";
+import { beginBudgetRun, endBudgetRun, checkBudget, consumeBudget, readBudget, increaseTokenBudget } from "./budget.js";
 import { executeOperations, type OperationHandlers } from "./operations.js";
 import { permissionsFor } from "./permissions.js";
 import { watchPermissionAsks } from "./opencode.js";
@@ -72,6 +72,7 @@ export interface ControllerOptions {
    * should have to authorize spending again.
    */
   readonly allowLkmSpend?: boolean;
+  readonly maxTotalTokens?: number;
   readonly onEvent?: (line: string) => void;
   /** Shared by nested figure/writer sessions within one controller invocation. */
   readonly operationTurns?: Partial<Record<StageId, number>>;
@@ -127,6 +128,7 @@ export async function runController(options: ControllerOptions): Promise<RunStat
   // workspace would interleave checkpoints and race state writes.
   const runLock = acquireRunLock(resolved.workspace);
   try {
+    if (resolved.maxTotalTokens !== undefined) increaseTokenBudget(resolved.workspace, resolved.maxTotalTokens);
     beginBudgetRun(resolved.workspace);
     return await drive(resolved, runLock);
   } finally {

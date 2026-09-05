@@ -440,10 +440,11 @@ program
     false,
   )
   .option("--headless", "resume without attaching the OpenCode TUI", false)
+  .option("--max-total-tokens <n>", "explicitly increase this run's effective token limit without resetting usage")
   .option("--json", "newline-delimited machine-readable events and result", false)
   .action(async (
     workspace: string,
-    options: { allowLkmSpend: boolean; headless: boolean; json: boolean },
+    options: { allowLkmSpend: boolean; headless: boolean; json: boolean; maxTotalTokens?: string },
   ) => {
     jsonErrors = options.json;
     activeWorkspace = resolve(workspace);
@@ -466,6 +467,7 @@ program
       workspace,
       headless: options.headless || state.headless,
       allowLkmSpend: Boolean(options.allowLkmSpend),
+      ...(options.maxTotalTokens === undefined ? {} : { maxTotalTokens: Number(options.maxTotalTokens) }),
       ...(options.json
         ? { onEvent: (message: string) => jsonLine({ type: "event", message }) }
         : {}),

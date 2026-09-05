@@ -151,9 +151,13 @@ try {
       if (integer && !Number.isInteger(Number(knobs[name]))) throw new Error(`${name} must be an integer`);
     }
     const container = `po-acceptance-${process.pid}-${Date.now()}`;
+    if (mode === 'resume' && process.env.PO_MAX_TOTAL_TOKENS !== undefined) {
+      knobs.PO_RESUME_MAX_TOTAL_TOKENS = knobs.PO_MAX_TOTAL_TOKENS;
+    }
     const env = Object.entries(knobs).flatMap(([key, value]) => ['--env', `${key}=${value}`]);
     report.knobs = knobs;
-    report.budget_application = mode === 'run' ? 'fresh-write-flags' : mode === 'resume' ? 'persisted-scope' : 'user-argv-only';
+    report.budget_application = mode === 'run' ? 'fresh-write-flags' : mode === 'resume'
+      ? (knobs.PO_RESUME_MAX_TOTAL_TOKENS ? 'persisted-scope-with-explicit-token-increase' : 'persisted-scope') : 'user-argv-only';
     const command = live ? ['node', '/opt/acceptance/acceptance.mjs'] : ['node', '/opt/acceptance/user-command.mjs', mode, ...userCommand];
     exit = docker(live ? 'real-cli' : mode, ['run', ...isolation, `--network=${network}`, '--name', container, ...mounts, '--mount', `type=bind,src=${output},dst=/output`, ...env, image, ...command], mode === 'services' ? 300000 : Number(knobs.PO_TIMEOUT_SECONDS) * 1000 + 180000).code;
     // A timed-out Docker client does not reliably terminate its container.

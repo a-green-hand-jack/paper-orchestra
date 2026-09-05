@@ -6,7 +6,7 @@ import { digestValue, readJson, writeJsonAtomic } from "./files.js";
 import { paths } from "./paths.js";
 import { BudgetLedgerSchema, BudgetLimitsSchema, BudgetTotalsSchema, UsageSchema,
   type BudgetLedger, type BudgetLimits, type Usage } from "./state/schema.js";
-import { readRunState } from "./state/store.js";
+import { readRunState, verifyLocks } from "./state/store.js";
 
 /** Limits constrain authorized work; none of these values authorize spending. */
 export const DEFAULT_BUDGET_LIMITS = {
@@ -49,7 +49,17 @@ export function readBudget(workspace: string): BudgetLedger | null {
   }
   try {
     const ledger = BudgetLedgerSchema.parse(readJson(ledgerPath(workspace)));
-    if (ledger.run_id !== state.run_id || digestValue(ledger.limits) !== digestValue(limits)) {
+    const effectiveLimits = { ...limits };
+    let previousUsage = 0;
+    for (const increase of ledger.token_limit_increases ?? []) {
+      if (increase.from !== effectiveLimits.max_total_tokens || increase.to <= increase.from ||
+          increase.used_tokens < previousUsage || increase.used_tokens > ledger.totals.total_tokens) {
+        throw new Error("invalid token-limit increase history");
+      }
+      effectiveLimits.max_total_tokens = increase.to;
+      previousUsage = increase.used_tokens;
+    }
+    if (ledger.run_id !== state.run_id || digestValue(ledger.limits) !== digestValue(effectiveLimits)) {
       throw new Error("ledger run or limits differ from locked scope");
     }
     return ledger;
@@ -86,6 +96,28 @@ function save(workspace: string, ledger: BudgetLedger): void {
 export function initializeBudget(workspace: string): BudgetLedger | null {
   const ledger = readBudget(workspace);
   if (ledger) save(workspace, ledger);
+  return ledger;
+}
+
+/** Explicit operator increase, under the run lock. One atomic ledger write keeps
+ * the original scope and every consumption counter intact, including on crash. */
+export function increaseTokenBudget(workspace: string, limit: number): BudgetLedger {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new UserFacingError("--max-total-tokens must be a positive safe integer");
+  const state = readRunState(workspace);
+  verifyLocks(workspace, state);
+  const ledger = readBudget(workspace);
+  const previous = ledger?.limits.max_total_tokens;
+  if (!ledger || previous === undefined) throw new UserFacingError("This run has no finite token limit to increase");
+  if (limit < previous) throw new UserFacingError(`Resume can only increase the token limit; current limit is ${previous}`);
+  if (limit === previous) return ledger;
+  ledger.token_limit_increases = [...(ledger.token_limit_increases ?? []), {
+    at: new Date().toISOString(), from: previous, to: limit, used_tokens: ledger.totals.total_tokens,
+  }];
+  ledger.limits.max_total_tokens = limit;
+  event(ledger, state.current_stage ?? "prepare", "token_limit_increase", {}, {
+    detail: `Explicit resume authorization: ${previous} -> ${limit}; used tokens preserved: ${ledger.totals.total_tokens}`,
+  });
+  save(workspace, ledger);
   return ledger;
 }
 

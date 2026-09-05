@@ -539,6 +539,10 @@ Existing output is refused unless explicitly resuming or using `exec`:
 PO_ALLOW_PAID=1 PO_OUTPUT_DIR=/absolute/path/to/previous-output npm run test:docker -- resume
 ```
 
+An explicit `PO_MAX_TOTAL_TOKENS` on resume increases only the effective token
+limit, with an audit record and without resetting consumption. Without this
+explicit setting, all existing limits are preserved.
+
 Resume calls `paper-orchestra resume /output/workspace --headless --json` and
 preserves previous acceptance attempts. CLI digest locks and persisted scope
 remain authoritative; new run knobs do not rewrite a resumed plan. It rebuilds

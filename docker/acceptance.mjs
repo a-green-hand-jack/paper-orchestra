@@ -22,6 +22,8 @@ if (!exit) {
     for (const [env, flag] of [['PO_MAX_TOTAL_TOKENS', '--max-total-tokens'], ['PO_MAX_TOTAL_COST', '--max-total-cost'], ['PO_MAX_MODEL_CALLS', '--max-model-calls'], ['PO_MAX_IMAGE_CALLS', '--max-image-calls'], ['PO_MAX_OPERATION_CALLS', '--max-operation-calls'], ['PO_MAX_RUN_MINUTES', '--max-run-minutes']]) {
       if (process.env[env]) args.push(flag, process.env[env]);
     }
+  } else if (process.env.PO_RESUME_MAX_TOTAL_TOKENS) {
+    args.push('--max-total-tokens', process.env.PO_RESUME_MAX_TOTAL_TOKENS);
   }
   const writing = run(process.env.PO_RESUME === '1' ? 'resume' : 'write', args);
   exit = writing.code;

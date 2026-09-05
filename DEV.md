@@ -267,7 +267,20 @@ scientific/visual review.
 | `PO_TIMEOUT_MULTIPLIER` | 1 | `--timeout-multiplier` |
 
 All six whole-run budgets are passed explicitly on fresh acceptance writes.
-Resume preserves locked scope and consumed budgets. `exec` passes exactly the
+Resume preserves locked scope and consumed budgets. An explicitly supplied
+`PO_MAX_TOTAL_TOKENS` on resume is forwarded as `--max-total-tokens` and may only
+increase the effective token ceiling. Omission never raises it automatically.
+The budget ledger records the increase and retains every usage counter; its
+`limits` field is the effective budget, while run scope retains the initial
+configuration. Other limits are unchanged. For example, with the usual model
+and identity settings configured:
+
+```bash
+PO_ALLOW_PAID=1 PO_MAX_TOTAL_TOKENS=16000000 \
+  PO_OUTPUT_DIR=/absolute/previous-output npm run test:docker -- resume
+```
+
+`exec` passes exactly the
 user's argv; supply budget CLI flags there as for an ordinary installed user.
 `PO_TIMEOUT_SECONDS` defaults to 7200 (60-86400), an outer command deadline in
 addition to CLI budgets. Known model cost is not a total invoice guarantee;
