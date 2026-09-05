@@ -354,3 +354,8 @@ test("template references and explicit source mappings cannot traverse or follow
   put(raw, "preamble.tex", "\\input{../outside}");
   assert.equal(discoverTemplate(raw), null, "nested references are also checked");
 });
+test("final audit logs are research, not a filename-only manuscript exclusion", () => {
+  assert.equal(materialRole("run_verified_nb_final_audit_run.txt", "ALL_CHECKS_PASS = True"), "research");
+  assert.equal(materialRole("final.pdf"), "manuscript");
+  assert.equal(materialRole("final_paper.tex"), "manuscript");
+});

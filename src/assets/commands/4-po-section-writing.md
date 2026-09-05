@@ -56,6 +56,10 @@ Use booktabs when supported by the preamble. Unavailable data is not zero.
 Never invent values or run new experiments to fill a table.
 
 Inspect the actual figures listed in `figures/info.json`. Use their exact filenames
+and read the controller-owned `.brain/raw/plotting_results.json` for generation
+provenance. Never copy a provider/model guessed in an outline generation prompt.
+If provenance marks the exact image model as unverified, state the actual executor
+and that qualification rather than asserting a model version as fact. Use paths
 including extensions under `figures/`. Reference and explain each provided figure,
 with readable sizing and honest captions. Conceptual GPT diagrams are illustrations
 of the method, not measurements. Numeric charts must reflect actual results.

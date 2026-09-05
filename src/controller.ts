@@ -34,7 +34,7 @@ import { assertInside, digestFile, digestValue, readJson, writeJsonAtomic } from
 import { retrieveForLiterature, UnmetLiteratureError } from "./literature-controller.js";
 import { preflightRun } from "./preflight.js";
 import { manuscriptReadiness, reviewManuscript } from "./manuscript-review.js";
-import { exportSubmission, publishTables } from "./presentation.js";
+import { analyzeSourceTables, exportSubmission, publishTables } from "./presentation.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -59,7 +59,7 @@ import {
   suppliedBibliography,
   toSuppliedCandidates,
 } from "./bibliography.js";
-import { ensureGraphicxPackage } from "./latex.js";
+import { ensureGraphicxPackage, includedGraphics } from "./latex.js";
 
 export interface ControllerOptions {
   readonly workspace: string;
@@ -134,6 +134,7 @@ async function drive(
   const { workspace } = options;
   let state = readRunState(workspace);
   verifyLocks(workspace, state);
+  analyzeSourceTables(workspace);
   await preflightRun(workspace, state, options.allowLkmSpend ?? false);
 
   await initGit(workspace, state.run_branch);
@@ -366,7 +367,6 @@ async function runStage(
     extra.bibliography_origin = bibliographyOriginNote(workspace, state.scope.bibliography_mode ?? "seed");
   }
   if (stage === "section_writing" || stage === "refinement") {
-    publishTables(workspace);
     extra.citation_keys = availableCitationKeys(workspace);
   }
 
@@ -377,6 +377,7 @@ async function runStage(
     await buildIfManuscriptStage(options, reviewingFinal ? "refinement" : "section_writing");
     await reviewManuscript({ runtime, workspace, sourceRel: reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft,
       model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+    await repairReviewedFigures(runtime, options, sessions, signal, reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft);
   }
 
   await prompt(runtime, {
@@ -429,6 +430,7 @@ async function runStage(
   if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
     await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
       model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+    await repairReviewedFigures(runtime, options, sessions, signal, ARTIFACTS.finalTex);
   }
 
   let checks = validateStage(workspace, stage, state.scope);
@@ -450,6 +452,7 @@ async function runStage(
     if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
       await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
         model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+      await repairReviewedFigures(runtime, options, sessions, signal, ARTIFACTS.finalTex);
     }
 
     checks = validateStage(workspace, stage, state.scope);
@@ -608,6 +611,14 @@ async function buildIfManuscriptStage(
   const { workspace } = options;
   const sourceAbs = join(workspace, sourceRel);
   if (!existsSync(sourceAbs)) return; // artifact_exists reports this better.
+  try {
+    publishTables(workspace);
+  } catch (error) {
+    writeJsonAtomic(join(workspace, ARTIFACTS.buildReport), { ok: false, source: sourceRel,
+      pdf: null, pages: null, errors: [`Invalid table_presentation.json or table plan: ${String(error)}`],
+      built_at: new Date().toISOString() });
+    return;
+  }
 
   const source = readFileSync(sourceAbs, "utf8");
   const withGraphicx = ensureGraphicxPackage(source);
@@ -697,8 +708,9 @@ async function visuallyReviewFigure(
     text: [
       "Act as a strict publication-figure visual critic. Inspect the attached rendered image,",
       "not the generating code or a textual description. Fail it if content overlaps internally,",
-      "labels or ticks are unreadable at column width, content is clipped, axes/units are wrong or",
+      "labels or ticks are unreadable at the intended full figure size, content is clipped, axes/units are wrong or",
       "misleading, or the layout contains any other visible defect.",
+      "Do not assume every figure will be reduced to a narrow two-column thumbnail. Wide figures can use the full text width; the final manuscript review checks their actual printed size.",
       "Return exactly one JSON object: {\"passed\": boolean, \"suggestions\": string}.",
       "When passed is false, suggestions must be a concrete repair instruction.",
     ].join("\n"),
@@ -788,6 +800,12 @@ async function runPlottingGeneration(
   const results: Array<Record<string, unknown>> = [];
   const previous = existsSync(join(workspace, ARTIFACTS.plottingResults))
     ? readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults)) : [];
+  // Older controller-written manuscript feedback lacked the per-figure round field.
+  for (const record of previous) {
+    if (Array.isArray(record.critic_history)) record.critic_history.forEach((review, index) => {
+      if (review.origin === "manuscript_review" && review.round === undefined) review.round = index;
+    });
+  }
 
   for (const { spec, route } of routed) {
     const cached = previous.find((result) => result.figure_id === spec.figure_id &&
@@ -842,7 +860,9 @@ async function runPlottingGeneration(
                 aspect_ratio: spec.aspect_ratio,
                 data_source: spec.data_source.join(", ") || "(no data file named; the figure is conceptual)",
                 data_files: dataFiles.map((file, index) => `${spec.data_source[index]} -> data/${file.name}`).join("\n"),
-              })
+              }) + (criticHistory.length ? "\nPrior visual review feedback to address:\n" +
+                criticHistory.filter((review) => review.passed === false)
+                  .map((review) => String(review.suggestions ?? "")).join("\n") : "")
             : `The code-generated figure \`${spec.figure_id}\` failed: ${failure}\n\n` +
               "Return a complete corrected script in one ```python block and the caption as before.";
         await prompt(runtime, { sessionId, text: generationPrompt, model });
@@ -866,20 +886,33 @@ async function runPlottingGeneration(
         failure = rendered.error ?? "";
       } else {
         const basePrompt =
-          spec.generation_prompt.trim() ||
+          spec.generation_prompt.trim().replace(/^Provider\/model:[^.]*\.\s*/i, "") ||
           `${spec.title}. ${spec.objective}. Create a clear publication figure with aspect ratio ` +
             `${spec.aspect_ratio}; do not add unsupported quantitative claims.`;
         const repairs = [
-          ...criticHistory.map((review) => String(review.suggestions ?? "")),
+          ...criticHistory.slice(-3).map((review) => String(review.suggestions ?? "")),
           failure.startsWith("visual review failed:") ? failure.replace(/^visual review failed:\s*/i, "") : "",
         ]
           .map((repair) => repair.trim())
           .filter((repair, index, all) => repair.length > 0 && all.indexOf(repair) === index);
-        const generationPrompt =
+        let generationPrompt =
           repairs.length === 0
             ? basePrompt
             : `${basePrompt}\n\nRepair every issue found by visual review:\n` +
               repairs.map((repair) => `- ${repair}`).join("\n");
+        if (repairs.length >= 2) {
+          generationPrompt += "\nRepeated spatial-layout repairs have failed. Redesign this as a simple " +
+            "non-spatial conceptual definition map with clearly labelled boxes and relationships. " +
+            "Do not draw perspective planes, physical trajectories or misleading vector projections. " +
+            "Preserve the scientific definitions and required concepts; connectors indicate definition " +
+            "dependencies, not physical vector directions. Clearly identify this as a conceptual relationship map.";
+          generationPrompt += " Use at most five large boxes with concise labels/defining equations, not " +
+            "explanatory paragraphs. Keep all lettering large (about 5% of image height), use uncrossed " +
+            "connectors, and leave detailed explanations to the paper caption. Do not draw provenance " +
+            "or executor metadata inside the image. In this simplified fallback use symbol names and " +
+            "short descriptive labels only, not equations: formal definitions belong in the accompanying " +
+            "caption and Methods. Never invent a mathematical relationship to fill a box.";
+        }
         try {
           const generated = await generateTextImage({
             figureId: spec.figure_id,
@@ -1003,6 +1036,54 @@ async function runPlottingGeneration(
  * mention a caption. Falls back to the figure title upstream, so a model that
  * forgets the caption still yields a placed figure rather than a failed stage.
  */
+async function repairReviewedFigures(runtime: Runtime, options: ControllerOptions,
+  sessions: Record<string, string>, signal: AbortSignal, sourceRel: string): Promise<void> {
+  const { workspace } = options;
+  if (!readRunState(workspace).scope.use_plotting) return;
+  const review = readJson<{ findings: Array<{severity: string; location: string; problem: string; action: string}> }>(join(workspace, ".brain/manuscript/review.json"));
+  const source = readFileSync(join(workspace, sourceRel), "utf8").replace(/(?<!\\)%[^\n]*/g, "");
+  const graphics = [...source.matchAll(/\\begin\{figure\*?\}([\s\S]*?)\\end\{figure\*?\}/g)]
+    .map((match) => includedGraphics(match[1]!)[0]);
+  const records = readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults));
+  let changed = false;
+  const repaired = new Set<(typeof review.findings)[number]>();
+  for (const finding of review.findings) {
+    if (finding.severity !== "blocking" || !/redraw|regenerate (?:the )?(?:figure|diagram|image)|correct (?:the )?geometry|successful visual correction/i.test(finding.action)) continue;
+    const number = /figure\s+(\d+)/i.exec(finding.location)?.[1];
+    const image = number ? graphics[Number(number) - 1] : undefined;
+    const diagrams = records.filter((item) => item.render_route === "text_to_image");
+    const record = records.find((item) => typeof item.image_path === "string" && finding.problem.includes(basename(item.image_path))) ??
+      (image ? records.find((item) => typeof item.image_path === "string" && basename(item.image_path) === basename(image)) :
+        diagrams.length === 1 && /conceptual|diagram|schematic|triad/i.test(finding.problem) ? diagrams[0] : undefined);
+    if (!record) continue;
+    record.image_sha256 = null;
+    const history = Array.isArray(record.critic_history) ? record.critic_history : [];
+    record.critic_history = [...history, { round: history.length, passed: false,
+      suggestions: `${finding.problem} ${finding.action}`, origin: "manuscript_review" }];
+    changed = true;
+    repaired.add(finding);
+  }
+  if (!changed) return;
+  writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), records);
+  say(options, "   regenerating figures with blocking full-manuscript feedback");
+  try {
+    await runPlottingGeneration(runtime, options, sessions, signal, readRunState(workspace));
+  } catch (error) {
+    updateStage(workspace, "refinement", (stage) => ({ ...stage, status: "failed", error: String(error) }));
+    throw error;
+  }
+  updateRunState(workspace, (state) => ({ ...state, current_stage: "refinement", status: "running" }));
+  for (const finding of review.findings) {
+    if (repaired.has(finding)) {
+      finding.action = "The controller has regenerated the affected image using this feedback. Inspect the current " +
+        "files listed in figures/info.json and include the corresponding generated image with includegraphics. " +
+        "Update the caption to describe that current image. Do not replace it with a LaTeX picture, TikZ, or an undisplayed artifact. " +
+        "The controller will review the newly compiled manuscript again; this is not a visual approval.";
+    }
+  }
+  writeJsonAtomic(join(workspace, ".brain/manuscript/review.json"), review);
+}
+
 export function extractCaption(answer: string): string {
   const outsideFences = answer.replace(/```[\s\S]*?```/g, "\n");
   // `**` around the label is optional and may sit on either side of the colon:

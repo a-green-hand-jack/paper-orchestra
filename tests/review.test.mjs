@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { ARTIFACTS } from "../dist/paths.js";
 import { digestFile } from "../dist/files.js";
 import { reviewManuscript, manuscriptReadiness } from "../dist/manuscript-review.js";
-import { publishTables, tableCoverage, tablePlanCheck, exportSubmission } from "../dist/presentation.js";
+import { analyzeSourceTables, publishTables, tableCoverage, tablePlanCheck, exportSubmission } from "../dist/presentation.js";
 import { compileLatex, stageBuildDir } from "../dist/latexbuild.js";
 
 function put(dir, rel, value) {
@@ -70,8 +70,25 @@ function runtime(dir, replies) {
 }
 const poppler = ["pdfinfo", "pdftoppm"].every((bin) => spawnSync(bin, ["-v"]).status === 0);
 
+test("controller computes grouped extrema from raw rows and cross-checks independent summaries", (t) => {
+  const dir = fixture(t);
+  put(dir, "source/rays.csv", "orientation,residual\nA,-308.62\nA,-289.17\nB,0\n");
+  put(dir, "source/summary.csv", "orientation,min_residual,max_residual\nA,-308.62,-289.17\nB,0,1\n");
+  analyzeSourceTables(dir);
+  const analysis = JSON.parse(readFileSync(join(dir, ".brain/raw/data_analysis.json")));
+  const rays = analysis.files.find((file) => file.source === "source/rays.csv");
+  assert.equal(rays.rows, 3);
+  assert.deepEqual(rays.groups.find((group) => group.value === "A").statistics.residual,
+    { count: 2, min: -308.62, max: -289.17, mean: (-308.62 - 289.17) / 2 });
+  assert.equal(analysis.cross_checks.length, 4);
+  assert.equal(analysis.cross_checks.filter((check) => !check.matches).length, 1);
+});
+
 test("review attaches all 13 pages, repairs JSON once, overwrites model metadata and records usage", { skip: !poppler }, async (t) => {
   const dir = fixture(t); build(dir, 13);
+  put(dir, ARTIFACTS.plottingResults, [{ figure_id: "diagram", generation_provenance: {
+    provider: "openai-codex-oauth", model: "gpt-image-2",
+    parameters: { model_evidence: "executor default; not reported by the image tool" } } }]);
   const rt = runtime(dir, ["first pages", "next pages", "not json", JSON.stringify(approved)]);
   const result = await reviewManuscript({ runtime: rt, workspace: dir, sourceRel: ARTIFACTS.finalTex, timeoutMs: 30000 });
   assert.equal(result.ready, true);
@@ -86,6 +103,9 @@ test("review attaches all 13 pages, repairs JSON once, overwrites model metadata
   assert.equal(new Set(images.map((image) => image.filename)).size, 13);
   assert.match(rt.calls[0].parts[0].text, /outline_v1.json/);
   assert.match(rt.calls[0].parts[0].text, /81.2/);
+  assert.match(rt.calls[0].parts[0].text, /plotting_results\.json/);
+  assert.match(rt.calls[0].parts[0].text, /openai-codex-oauth/);
+  assert.match(rt.calls[0].parts[0].text, /not reported by the image tool/);
   assert.equal(manuscriptReadiness(dir).passed, true);
   const attempts = readdirSync(join(dir, ".po-run/reviews"));
   const snapshot = join(dir, ".po-run/reviews", attempts[0], "attempt.json");
@@ -110,6 +130,29 @@ test("blocking finding overrides ready; malformed review never becomes approval"
   assert.equal(readdirSync(join(dir, ".po-run/reviews")).length, 2);
 });
 
+test("review receives complete small raw CSV and retrieved metadata instead of only summaries", { skip: !poppler }, async (t) => {
+  const dir = fixture(t); build(dir);
+  put(dir, "source/rays.csv", "b,residual\n80,-308.62\n1160,-289.17\n");
+  put(dir, ".brain/input/rays.csv.summary.md", "Sample summary only.");
+  put(dir, ".brain/input-manifest.json", [{ source: "rays.csv", status: "readable", role: "research",
+    normalized: ".brain/input/rays.csv.summary.md" }]);
+  put(dir, ARTIFACTS.outlineV1, { table_plan: [], research_claims: [{ evidence_paths: ["source/rays.csv"] }] });
+  put(dir, ARTIFACTS.finalTex, "\\documentclass{article}\\begin{document}Evidence \\cite{Actual2026}.\\end{document}");
+  put(dir, ARTIFACTS.candidates, [{ citation_key: "Actual2026", title: "An actual retrieved record",
+    provider: "bohrium_lkm", provider_id: "fixture-1", retrieved_at: "2026-09-05", doi: "10.1234/fixture" }]);
+  stageBuildDir(dir, join(dir, ARTIFACTS.finalTex));
+  copyFileSync(join(dir, ARTIFACTS.finalPdf), join(dir, ".brain/tmp/build/manuscript.pdf"));
+  const rt = runtime(dir, [JSON.stringify(approved)]);
+  assert.equal((await reviewManuscript({ runtime: rt, workspace: dir, sourceRel: ARTIFACTS.finalTex, timeoutMs: 30000 })).ready, true);
+  const context = rt.calls[0].parts[0].text;
+  assert.match(context, /80,-308\.62\n1160,-289\.17/);
+  assert.match(context, /An actual retrieved record/);
+  assert.match(context, /10\.1234\/fixture/);
+  assert.equal(manuscriptReadiness(dir).passed, true);
+  put(dir, ARTIFACTS.candidates, []);
+  assert.equal(manuscriptReadiness(dir).passed, false);
+});
+
 test("stale PDF and writer-produced approval fail without contacting a model", async (t) => {
   const dir = fixture(t); build(dir);
   put(dir, ".brain/manuscript/review.json", { ...approved, manuscript_sha256: digestFile(join(dir, ARTIFACTS.finalTex)),
@@ -121,13 +164,27 @@ test("stale PDF and writer-produced approval fail without contacting a model", a
   assert.equal(rt.creates.length, 0);
 });
 
+test("a failed build returns actionable unready feedback so refinement can repair before review", async (t) => {
+  const dir = fixture(t); build(dir);
+  put(dir, ARTIFACTS.buildReport, { ok: false, source: ARTIFACTS.finalTex, pdf: ARTIFACTS.finalPdf,
+    pages: 1, errors: ["Reference tab:missing undefined"], built_at: new Date().toISOString() });
+  const rt = runtime(dir, []);
+  const review = await reviewManuscript({ runtime: rt, workspace: dir, sourceRel: ARTIFACTS.finalTex, timeoutMs: 30000 });
+  assert.equal(review.ready, false);
+  assert.equal(review.reviewed_pages, 0);
+  assert.equal(rt.creates.length, 0);
+  assert.match(review.findings[0].problem, /tab:missing/);
+  assert.match(review.findings[0].action, /Repair the listed LaTeX/);
+  assert.equal(manuscriptReadiness(dir).passed, false);
+});
+
 test("tables escape data, are deterministic, and verify inclusion and source manifests", (t) => {
   const dir = fixture(t);
   put(dir, ARTIFACTS.outlineV1, { table_plan: [table] });
   assert.equal(publishTables(dir), 1);
   const path = join(dir, ".brain/manuscript/tables/main.tex");
   const text = readFileSync(path, "utf8");
-  assert.match(text, /A \\& B\\_1/);
+  assert.match(text, /A \\& B 1/);
   assert.match(text, /\\textbackslash\{\}input\\\{bad\\\}/);
   assert.match(text, /81.2 & --/);
   assert.match(text, /\\label\{tab:main\}/);
@@ -153,6 +210,33 @@ test("table provenance rejects traversal, external symlinks, and duplicate ids",
   assert.throws(() => publishTables(dir));
   put(dir, ARTIFACTS.outlineV1, { table_plan: [table, table] });
   assert.throws(() => publishTables(dir), /Duplicate/);
+});
+
+test("table renderer typesets mathematical headers and preserves requested decimal places", (t) => {
+  const dir = fixture(t);
+  put(dir, ".brain/input/results.json", { score: -52 });
+  put(dir, ARTIFACTS.outlineV1, { table_plan: [{ ...table, columns: ["beta_c b^4 residual"],
+    rows: [{ label: "alpha_y", values: [-52], source_paths: [".brain/input/results.json"] }],
+    column_verification: [{ selector: "/score", operation: "direct", decimals: 2 }] }] });
+  publishTables(dir);
+  const text = readFileSync(join(dir, ".brain/manuscript/tables/main.tex"), "utf8");
+  assert.match(text, /\\ensuremath\{\\beta_\{c\}\}/);
+  assert.match(text, /\\ensuremath\{b\^\{4\}\}/);
+  assert.match(text, /-52\.00/);
+  assert.match(text, /\\ensuremath\{\\alpha_\{y\}\}/);
+});
+
+test("presentation-only table edits cannot change measurements or structure", (t) => {
+  const dir = fixture(t);
+  put(dir, ARTIFACTS.outlineV1, { table_plan: [table] });
+  put(dir, ".brain/manuscript/table_presentation.json", { main: { caption: "Measured accuracy",
+    row_header: "Method", columns: ["Accuracy", "Not measured"], row_labels: ["Method A"] } });
+  publishTables(dir);
+  assert.match(readFileSync(join(dir, ".brain/manuscript/tables/main.tex"), "utf8"), /Method A & 81\.2 & --/);
+  put(dir, ".brain/manuscript/table_presentation.json", { main: { values: [99] } });
+  assert.equal(tablePlanCheck(dir).passed, false);
+  put(dir, ".brain/manuscript/table_presentation.json", { main: { columns: ["Wrong count"] } });
+  assert.equal(tablePlanCheck(dir).passed, false);
 });
 
 test("submission preserves nested manuscript and venue dependencies, adapts bibliography, excludes research inputs", (t) => {
@@ -291,7 +375,7 @@ test("heterogeneous Gewu-shaped rows verify original fitted coefficients and CSV
   });
   assert.equal(manifest.numeric_verification[0].operation, "direct"); // Override is not merged with column range/rounding.
   const tex = readFileSync(join(dir, ".brain/manuscript/tables/main.tex"), "utf8");
-  assert.match(tex, /Group & Value & Record/);
+  assert.match(tex, /Item & Value & Record/);
   assert.match(tex, /p\{\\dimexpr/);
   assert.match(tex, /40\.7070301858/);
   put(dir, ARTIFACTS.finalTex, "\\input{tables/main}");

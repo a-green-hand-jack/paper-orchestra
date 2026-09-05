@@ -61,7 +61,8 @@ export interface PdfInspection {
 }
 
 export function isManuscriptPath(rel: string): boolean {
-  return /(?:^|[\/_. -])(?:manuscripts?|papers?|submission|camera[_. -]?ready|preprint|thesis|dissertation|draft|final)(?:$|[\/_. -])/i.test(rel);
+  return /(?:^|[\/_. -])(?:manuscripts?|papers?|submission|camera[_. -]?ready|preprint|thesis|dissertation|draft)(?:$|[\/_. -])/i.test(rel) ||
+    /(?:^|\/)final(?:\.[a-z0-9]+|\/|$)/i.test(rel);
 }
 
 /** Controller-only classification. Unknown is not a claim that a document is a

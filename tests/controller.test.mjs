@@ -265,6 +265,12 @@ async function controllerChild(scenario, dir) {
       writeFileSync(image, Buffer.alloc(4096, 2));
       assert.notEqual(cached[0].image_sha256, digestFile(image));
     }
+    if (scenario === "plotting-cache-feedback") {
+      cached[0].image_sha256 = null;
+      cached[0].critic_history.push({ origin: "manuscript_review", passed: false,
+        suggestions: "Redraw the axis with readable labels" });
+      put(dir, ARTIFACTS.plottingResults, cached);
+    }
     interruptSecondFigure = false;
     renders.length = 0; prompts.length = 0;
     const resumed = await runController({ workspace: dir, headless: true, onEvent() {} });
@@ -278,6 +284,10 @@ async function controllerChild(scenario, dir) {
     if (matching) assert.deepEqual(results[0], cached[0], "reuse the reviewed record without regeneration");
     assert.equal(results[0].plan_sha256, digestValue(plan.plotting_plan[0]));
     assert.equal(results[0].image_sha256, digestFile(image));
+    if (scenario === "plotting-cache-feedback") {
+      assert.ok(Number.isInteger(results[0].critic_history.find((entry) => entry.origin === "manuscript_review").round));
+      assert.ok(prompts.some((entry) => entry.text?.includes("Redraw the axis with readable labels")));
+    }
     assert.ok(validateStage(dir, "plotting", resumed.scope).every((entry) => entry.passed));
   } else if (scenario === "missing-triage") {
     await assert.rejects(runController({ workspace: dir, headless: true, onEvent() {} }), /triage.*failed validation/);
@@ -331,6 +341,7 @@ if (process.argv[2] === "--controller-fixture") {
     ["plotting-cache-match", "resume reuses persisted reviewed figure when plan_sha256 and image_sha256 match"],
     ["plotting-cache-plan", "resume regenerates reviewed figure when plan_sha256 changes"],
     ["plotting-cache-image", "resume regenerates reviewed figure when image_sha256 changes"],
+    ["plotting-cache-feedback", "manuscript feedback preserves valid critic history and reaches code regeneration"],
     ["table-remediation", "literature remediates actionable numeric table_plan failure before plotting publishes tables"],
   ]) test(title, (t) => {
     const dir = fixture(t);

@@ -6,6 +6,7 @@ import { OutlineSchema, TABLE_VERIFICATION_HELP, type ColumnVerification, type T
 import { assertInside, digestFile, digestValue, ensureDir, readJson, walkFiles, writeJsonAtomic } from "./files.js";
 import { ARTIFACTS, paths } from "./paths.js";
 import type { Check } from "./state/schema.js";
+import { z } from "zod";
 import { isLatexDependency } from "./latexbuild.js";
 
 const TABLES = ".brain/manuscript/tables";
@@ -50,6 +51,70 @@ function csvRecords(text: string, delimiter: string): Record<string, string>[] {
   return rows.map((values) => {
     if (values.length !== headers.length) throw new Error("CSV row does not match headers");
     return Object.fromEntries(headers.map((header, index) => [header, values[index]!]));
+  });
+}
+
+/** Small raw tables are analyzed mechanically, without executing repository code. */
+export function analyzeSourceTables(workspace: string): void {
+  const source = paths(workspace).source;
+  const files: Array<Record<string, unknown>> = [];
+  const loaded: Array<{ path: string; rows: Record<string, string>[] }> = [];
+  for (const rel of walkFiles(source).filter((rel) => /\.(csv|tsv)$/i.test(rel))) {
+    const path = safeFile(source, rel);
+    if (statSync(path).size > 2 * 1024 * 1024 || loaded.length >= 32) {
+      files.push({ source: `source/${rel}`, status: "skipped", reason: "bounded analysis: 2 MiB per file, 32 files" });
+      continue;
+    }
+    try {
+      const rows = csvRecords(readFileSync(path, "utf8").replace(/^\uFEFF/, ""), rel.endsWith(".tsv") ? "\t" : ",");
+      const columns = Object.keys(rows[0] ?? {});
+      if (columns.length > 64 || rows.length > 100000) throw new Error("bounded analysis: 64 columns, 100000 rows");
+      loaded.push({ path: `source/${rel}`, rows });
+      const stats = (subset: Record<string, string>[]) => Object.fromEntries(columns.flatMap((column) => {
+        const values = subset.map((row) => numeric(row[column])).filter((value): value is number => value !== null);
+        if (!values.length) return [];
+        return [[column, { count: values.length, min: values.reduce((a, b) => Math.min(a, b)),
+          max: values.reduce((a, b) => Math.max(a, b)), mean: values.reduce((a, b) => a + b / values.length, 0) }]];
+      }));
+      const groups: Array<{ column: string; value: string; rows: number; statistics: ReturnType<typeof stats> }> = [];
+      for (const column of columns) {
+        const labels = [...new Set(rows.map((row) => row[column]!))];
+        if (!labels.length || labels.length > 20 || labels.every((value) => numeric(value) !== null)) continue;
+        for (const value of labels) {
+          const selected = rows.filter((row) => row[column] === value);
+          groups.push({ column, value, rows: selected.length, statistics: stats(selected) });
+        }
+      }
+      files.push({ source: `source/${rel}`, source_sha256: digestFile(path), status: "computed",
+        rows: rows.length, statistics: stats(rows), groups });
+    } catch (error) {
+      files.push({ source: `source/${rel}`, status: "unreadable", reason: String(error) });
+    }
+  }
+  const crossChecks: Array<Record<string, unknown>> = [];
+  for (const file of files) {
+    if (!Array.isArray(file.groups)) continue;
+    for (const group of file.groups as Array<{column: string; value: string; statistics: Record<string, {min: number; max: number}>}>) {
+      for (const other of loaded.filter((entry) => entry.path !== file.source)) {
+        for (const row of other.rows.filter((entry) => entry[group.column] === group.value)) {
+          for (const [field, text] of Object.entries(row)) {
+            const match = /^(min|max)_(.+)$/.exec(field);
+            const reported = numeric(text);
+            if (!match || reported === null || !group.statistics[match[2]!]) continue;
+            const operation = match[1] as "min" | "max";
+            const computed = group.statistics[match[2]!]![operation];
+            crossChecks.push({ source: file.source, against: other.path, group: group.value,
+              column: match[2], operation, computed, reported,
+              matches: Math.abs(computed - reported) <= 1e-12 * Math.max(1, Math.abs(reported)) });
+          }
+        }
+      }
+    }
+  }
+  writeJsonAtomic(join(workspace, ".brain/raw/data_analysis.json"), {
+    version: 1, executor: "paper-orchestra controller", computed_at: new Date().toISOString(),
+    procedure: "Numeric column counts, extrema and means over complete small CSV/TSV files; categorical groups with at most 20 labels; matching min_/max_ summary columns cross-checked by group.",
+    files, cross_checks: crossChecks,
   });
 }
 
@@ -235,6 +300,13 @@ function safeFile(root: string, rel: string): string {
 
 function tableArtifacts(workspace: string) {
   const plan = OutlineSchema.parse(readJson(join(workspace, ARTIFACTS.outlineV1))).table_plan;
+  const presentationPath = join(workspace, ".brain/manuscript/table_presentation.json");
+  const presentations = z.record(z.object({ caption: z.string().optional(), columns: z.array(z.string()).optional(),
+    row_labels: z.array(z.string()).optional(), row_header: z.string().optional() }).strict())
+    .parse(existsSync(presentationPath) ? readJson(presentationPath) : {});
+  for (const id of Object.keys(presentations)) {
+    if (!plan.some((table) => table.table_id === id)) throw new Error(`Unknown table presentation ID: ${id}`);
+  }
   if (new Set(plan.map((table) => table.table_id.toLowerCase())).size !== plan.length) throw new Error("Duplicate table_id");
   return plan.map((table) => {
     const sourceFiles = new Map<string, string>();
@@ -247,9 +319,17 @@ function tableArtifacts(workspace: string) {
       return [rel, digestFile(path)];
     }));
     const numeric_verification = verifyTableNumbers(table, sourceFiles);
-    const tex = tableTex(table);
+    const presentation = presentations[table.table_id] ?? {};
+    if ((presentation.columns && presentation.columns.length !== table.columns.length) ||
+        (presentation.row_labels && presentation.row_labels.length !== table.rows.length)) {
+      throw new Error(`Table ${table.table_id}: presentation must preserve row and column counts`);
+    }
+    const tex = tableTex({ ...table, caption: presentation.caption ?? table.caption,
+      columns: presentation.columns ?? table.columns,
+      rows: table.rows.map((row, index) => ({ ...row, label: presentation.row_labels?.[index] ?? row.label })) },
+    presentation.row_header);
     return { table, tex, manifest: { version: 1, table_id: table.table_id,
-      plan_sha256: digestValue(table), source_hashes, numeric_verification,
+      plan_sha256: digestValue(table), presentation, source_hashes, numeric_verification,
       tex_sha256: createHash("sha256").update(tex).digest("hex") } };
   });
 }
@@ -261,14 +341,31 @@ function escapeTex(value: string | number | null): string {
   return String(value).replace(/[\\{}$&#%_~^]/g, (char) => escaped[char]!).replace(/[\r\n\t]+/g, " ");
 }
 
-function tableTex(table: TableSpec): string {
+function tableTex(table: TableSpec, rowHeader = "Item"): string {
   const width = 1 / (table.columns.length + 1);
   const layout = `p{\\dimexpr${width.toFixed(5)}\\linewidth-2\\tabcolsep\\relax}`.repeat(table.columns.length + 1);
+  const displayText = (value: string): string => value.split(/((?:alpha|beta|gamma|delta|theta|lambda|sigma|mu|nu|phi|psi|omega)_[A-Za-z0-9]+|\b[A-Za-z]\^[+-]?\d+\b)/g)
+    .map((part) => {
+      const greek = /^(alpha|beta|gamma|delta|theta|lambda|sigma|mu|nu|phi|psi|omega)_([A-Za-z0-9]+)$/.exec(part);
+      if (greek) return `\\ensuremath{\\${greek[1]}_{${greek[2]}}}`;
+      const power = /^([A-Za-z])\^([+-]?\d+)$/.exec(part);
+      return power ? `\\ensuremath{${power[1]}^{${power[2]}}}` : escapeTex(part.replaceAll("_", " "));
+    }).join("");
+  const displayValue = (value: string | number | null, decimals?: number): string => {
+    if (typeof value !== "number") return value === null ? "--" : displayText(value);
+    const fixed = decimals === undefined ? String(value) : value.toFixed(decimals);
+    const text = value !== 0 && Math.abs(value) < 1e-4 && (decimals === undefined || decimals > 4)
+      ? Number(fixed).toExponential() : fixed;
+    const scientific = /^(.+)[eE]([+-]?\d+)$/.exec(text);
+    return scientific ? `\\ensuremath{${scientific[1]}\\times10^{${Number(scientific[2])}}}` : text;
+  };
   return ["% Generated by PaperOrchestra from the locked table plan; null values are unavailable.",
-    "\\begin{table}[htbp]", "\\centering", "\\small", `\\caption{${escapeTex(table.caption)}}`,
+    "\\begin{table}[htbp]", "\\centering", "\\small", `\\caption{${displayText(table.caption)}}`,
     `\\label{tab:${table.table_id}}`, `\\begin{tabular}{${layout}}`, "\\hline",
-    ["Group", ...table.columns].map(escapeTex).join(" & ") + " " + "\\".repeat(2), "\\hline",
-    ...table.rows.map((row) => [row.label, ...row.values].map(escapeTex).join(" & ") + " " + "\\".repeat(2)),
+    [rowHeader, ...table.columns].map(displayText).join(" & ") + " " + "\\".repeat(2), "\\hline",
+    ...table.rows.map((row) => [displayText(row.label), ...row.values.map((value, index) =>
+      displayValue(value, (row.cell_verification?.[index] ?? table.column_verification?.[index])?.decimals))]
+      .join(" & ") + " " + "\\".repeat(2)),
     "\\hline", "\\end{tabular}", "\\end{table}", ""].join("\n");
 }
 

@@ -176,7 +176,7 @@ test("brief reaches template selection and exact brief editions do not silently 
 
 test("all stage prompts use real artifact contracts and preserve per-figure reply format", (t) => {
   const dir = fixture(t);
-  for (const path of [".brain/input-manifest.json", ".brain/raw/materials.json", ".brain/manuscript/final_paper.tex", ".brain/manuscript/review.json"]) {
+  for (const path of [".brain/input-manifest.json", ".brain/raw/materials.json", ".brain/raw/plotting_results.json", ".brain/manuscript/final_paper.tex", ".brain/manuscript/review.json"]) {
     writeFileSync(join(dir, path), "test artifact");
   }
   const extra = { materials: "source/results.json", paper_count: "3", min_cite_paper_count: "2",
@@ -207,6 +207,8 @@ test("all stage prompts use real artifact contracts and preserve per-figure repl
   assert.match(readList, /final_paper\.tex/);
   assert.match(readList, /raw_draft\.tex/);
   assert.match(readList, /manuscript\/tables/);
+  assert.match(readList, /plotting_results\.json/);
+  assert.match(buildStagePrompt(dir, "section_writing", ScopeSchema.parse(baseScope)), /plotting_results\.json/);
   const disabled = buildStagePrompt(dir, "outline", ScopeSchema.parse({ ...baseScope, use_plotting: false, bibliography_mode: "closed" }));
   assert.match(disabled, /disabled; use supplied figures only/);
   assert.match(disabled, /Bibliography mode: closed/);

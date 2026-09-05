@@ -199,6 +199,8 @@ function codexPrompt(request: TextToImageRequest): string {
       aspect_ratio: request.aspectRatio,
     }),
     "Generate exactly one publication-quality raster image matching that visual brief and aspect ratio.",
+    "Do not invent equations or mathematical relationships not explicitly supplied in the visual brief. " +
+      "A requested symbol without a supplied formula should remain a symbol/label, not a guessed equation.",
     "Keep the geometry simple and internally consistent. Repeated definitions must describe the same " +
       "directions and objects in the drawing. Typeset mathematical subscripts; never draw raw LaTeX or underscore syntax.",
     "After the image tool completes, return only a JSON object with `generated_image_path` set to the " +

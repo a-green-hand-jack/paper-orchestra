@@ -124,6 +124,7 @@ function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[]
         ARTIFACTS.citationMap,
         ARTIFACTS.updatedTemplate,
         ARTIFACTS.figuresInfo,
+        ...ifPresent(workspace, ARTIFACTS.plottingResults),
         ...ifPresent(workspace, ARTIFACTS.figuresDir),
         ...ifPresent(workspace, `${BRAIN_DIR}/manuscript/tables/`),
         ...materials,
@@ -133,6 +134,7 @@ function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[]
       return [ARTIFACTS.rawDraft, ...ifPresent(workspace, ARTIFACTS.finalTex),
         `${BRAIN_DIR}/manuscript/review.json`, ARTIFACTS.outlineV1, ARTIFACTS.citationMap,
         ...ifPresent(workspace, ARTIFACTS.figuresInfo), ...ifPresent(workspace, ARTIFACTS.figuresDir),
+        ...ifPresent(workspace, ARTIFACTS.plottingResults),
         ...ifPresent(workspace, `${BRAIN_DIR}/manuscript/tables/`),
         ...ifPresent(workspace, ARTIFACTS.buildReport), ...materials, ...guidelines];
   }
@@ -154,7 +156,8 @@ export function buildStagePrompt(
 ): string {
   const body = substitute(loadCommand(workspace, stage), placeholdersFor(stage, scope, extra));
   const outputs = STAGE_OUTPUTS[stage];
-  const inputs = stageInputs(workspace, stage, scope);
+  const inputs = [...stageInputs(workspace, stage, scope), ...ifPresent(workspace, ".brain/raw/data_analysis.json"),
+    ...ifPresent(workspace, ".brain/manuscript/table_presentation.json")];
   const citationKeys = extra.citation_keys?.trim();
 
   // Plotting is the one stage whose product is a REPLY, not a file: the model
@@ -206,6 +209,12 @@ export function buildStagePrompt(
     "",
     "Write exactly these paths:",
     ...outputs.map((path) => `- \`${path}\``),
+    ...(["section_writing", "refinement"].includes(stage) ? [
+      "You may additionally write `.brain/manuscript/table_presentation.json` for presentation-only table corrections.",
+      "Shape: {\"table_id\": {\"caption\": \"...\", \"row_header\": \"Quantity\", \"columns\": [\"...\"], \"row_labels\": [\"...\"]}}.",
+      "All fields are optional. Preserve the number/order of columns and rows; never add values, sources or calculations here.",
+      "The controller regenerates tables with these labels/captions and the original verified values. Keep using the generated table inputs; do not replace them with handwritten tables.",
+    ] : []),
     ...(citationKeys
       ? [
           "",

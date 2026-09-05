@@ -38,6 +38,7 @@ export function permissionsFor(mode: "autonomous" | "collaborative"): Permission
       ".brain/raw/citation_map.json": "deny",
       ".brain/raw/query_plan.json": "deny",
       ".brain/raw/build.json": "deny",
+      ".brain/raw/data_analysis.json": "deny",
       ".brain/raw/plotting_results.json": "deny",
       ".brain/manuscript/figures/**": "deny",
       ".brain/manuscript/review.json": "deny",

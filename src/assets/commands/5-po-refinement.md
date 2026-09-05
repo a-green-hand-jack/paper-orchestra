@@ -39,6 +39,10 @@ positioning, figures/tables, and brief compliance as required by the findings.
 Repair page-level clipping, overlap, unreadable figures, awkward breaks and
 excess whitespace through source/layout changes without concealing content.
 Preserve sound existing content and the selected venue's style.
+Generated figures remain controller-owned. When the controller reports regeneration,
+inspect and include the updated image rather than responding to the old pixels.
+Never substitute an inline LaTeX picture, TikZ diagram or other rendering route for
+a required text-to-image figure, or leave its generated asset undisplayed.
 
 Reopen actual results before changing numbers. Keep captions, tables, numeric
 charts and prose consistent, preserving units, splits and precision. Use only
@@ -46,6 +50,9 @@ exact permitted citation keys. A requested measurement that has not been found
 must first be sought in the available materials; an available calculation is
 not a new experiment, but use controller-verified results rather than mental
 arithmetic. Never invent an experiment, datum, citation or author declaration.
+Check image-provider and model names against `.brain/raw/plotting_results.json`,
+not the outline's proposed generation prompt. If the exact image model was not
+reported by the executor, preserve that uncertainty rather than asserting a version.
 
 If a finding requires genuinely missing experiments or unavailable permissions,
 do not silently ignore it or claim resolution. State the supported research
