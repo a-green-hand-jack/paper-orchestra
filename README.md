@@ -8,6 +8,8 @@ submission-ready LaTeX manuscript, with literature synthesis, generated figures,
 and a compiled PDF. Artifact checks and independent model review support that
 goal; they do not certify scientific correctness, novelty, or venue acceptance.
 
+中文用户使用指南：[USER.md](USER.md)。开发者 Docker 验收流程见 [DEV.md](DEV.md)。
+
 **This fork is a rewrite.** The original Python/Conda multi-agent pipeline has
 been replaced by a standalone OpenCode-native agent in TypeScript. The writing
 capability is PaperOrchestra's; the runtime is not.
