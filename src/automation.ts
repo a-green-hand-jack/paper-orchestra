@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { ARTIFACTS } from "./paths.js";
 import { resumeStage } from "./state/store.js";
 import type { RunState } from "./state/schema.js";
+import { manuscriptReadiness } from "./manuscript-review.js";
 
 /** Stable result envelope consumed by other agents and automation systems. */
 export function runResult(workspace: string, state: RunState): Record<string, unknown> {
@@ -17,7 +18,10 @@ export function runResult(workspace: string, state: RunState): Record<string, un
       state.status === "prepared" ||
       state.status === "completed" ||
       state.status === "gate_waiting",
-    exit_status: 0,
+    exit_status: state.status === "failed" || state.status === "interrupted" ? 1 : 0,
+    plan_completed: state.status === "completed",
+    submission_ready: state.status === "completed" && state.scope.plan.includes("refinement") &&
+      manuscriptReadiness(absolute).passed,
     workspace: absolute,
     run_id: state.run_id,
     run_state: state.status,
@@ -31,6 +35,8 @@ export function runResult(workspace: string, state: RunState): Record<string, un
       latex: artifact(ARTIFACTS.finalTex),
       bibliography: artifact(ARTIFACTS.references),
       final_pdf: artifact(ARTIFACTS.finalPdf),
+      submission: artifact("submission"),
+      review: artifact(".brain/manuscript/review.json"),
     },
   };
 }

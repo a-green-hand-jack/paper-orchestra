@@ -83,6 +83,8 @@ export const ScopeSchema = z.object({
   /** Short, locked explanation of the template decision. */
   template_rationale: z.string().min(1).max(500).optional(),
   network_policy: z.enum(["online", "offline"]),
+  /** New runs explicitly store seed; optional preserves the digest of shipped run scopes. */
+  bibliography_mode: z.enum(["seed", "closed"]).optional(),
   /**
    * Hard ceiling on literature retrieval calls. Locked into scope because it
    * changes which sources the manuscript could possibly cite, and each call

@@ -1,109 +1,76 @@
-<!--
-Originally ported from methods/prompts/content_refinement_agent.py, which has since been removed.
+<!-- Source of truth. No controller placeholders. -->
 
-THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
-There is no generator to rerun: scripts/port_prompts.py was removed with
-its inputs.
+Revise this run's complete manuscript using its actual content and PDF review.
+Write the full revised LaTeX directly to `.brain/manuscript/final_paper.tex`.
+Do not return artifact code blocks, a response letter, or an editorial worklog.
 
-Controller-substituted placeholders: none
--->
+## Inputs
 
-Role: Senior AI Researcher.
-Task: Revise and strengthen a LaTeX research paper by systematically addressing peer review feedback.
+Read `.brain/manuscript/review.json` and `.brain/manuscript/raw_draft.tex`.
+When `.brain/manuscript/final_paper.tex` exists, read and revise that latest version
+rather than resetting to the original draft. Also read `.brain/raw/outline_v1.json`,
+`.brain/raw/citation_map.json`, `.brain/raw/materials.json`, the actual source and
+extracted results needed to check claims, the commissioning brief, and available
+guidelines, figure/table artifacts and build report listed in the workspace contract.
+Do not assume an unlisted PDF, feedback file or change history exists.
 
-You are the author responsible for the "Rebuttal via Revision" phase. You will receive:
-* 'paper.tex': The current LaTeX source code.
-* 'paper.pdf': The compiled PDF context.
-* 'conference_guidelines.md': The formatting and page limit rules.
-* **The author's materials** under `.brain/input/`: the Ground Truth for all data and metrics. `.brain/raw/materials.json`, when present, maps them and carries the ledger of measured numbers in `facts`.
-* 'worklog.json': History of previous changes.
-* 'citation_map.json': The allowed bibliography.
-* 'reviewer_feedback': A JSON object containing specific Strengths, Weaknesses, Questions, and Decisions from an LLM reviewer.
-
-YOUR GOAL:
-1. Analyze Feedback: Deconstruct the `reviewer_feedback` into actionable editing tasks.
-2. Address Weaknesses: Rewrite sections to clarify logic, strengthen arguments, or justify design choices pointed out as weak.
-3. Integrate Answers: Incorporate answers to the reviewer's "Questions" directly into the manuscript (e.g., adding training cost details to the Implementation section).
-4. Execution: Generate a JSON worklog of your editorial decisions and the full, revised LaTeX source.
-
-### CRITICAL EXECUTION STANDARDS
-
-#### 1. Content Revision Strategy
-- Weakness Mitigation: If the reviewer flags "incremental novelty," rewrite the Introduction and Related Work to explicitly contrast your contribution against prior art. If they flag "unclear methodology," restructure the relevant section for clarity.
-- Answering Questions: Do NOT write a separate response letter. If the reviewer asks "What is the inference latency?", you must find a natural place in the paper (e.g., Experiments or Discussion) to insert that information, ensuring it aligns with what the materials record.
-- Preserve Strengths: Do not delete or heavily alter sections listed under "Strengths" unless necessary for space or flow.
-
-#### 2. Data Integrity & Hallucination Check
-- Ground Truth: All numerical claims (accuracy, parameter count, training hours, latency) MUST be verified against the author's materials -- against the `facts` ledger where it covers them, and against the file itself where it does not.
-- Missing Data: If the reviewer asks for new experiments, ablations, or baselines the materials do not record (`unresolved` in materials.json lists known gaps), simply ignore those specific requests. Your job is purely presentation refinement of the existing completed experiments, not adding or promising to add new experiments.
-
-#### 3. Writing Style & Tone
-- Academic Tone: Maintain a formal, objective, and precise tone. Avoid defensive language.
-- Conciseness: If the paper is near the page limit, prioritize density of information over flowery prose.
-- Flow: Ensure that new insertions (answers to questions) transition smoothly with existing text.
-
-#### 4. LaTeX & Citation Integrity
-- Structure: Do not break the LaTeX compilation. Keep packages and environments stable. If using `figure*` for wide figures, ensure they are closed with `\end{figure*}` (not `\end{figure}`). Check for completeness.
-- Citations: Use ONLY keys from `citation_map.json`.
-
-### OUTPUT FORMAT (STRICT)
-You MUST return your response in two distinct code blocks in this exact order:
-
-1. Worklog for the current turn (JSON):
+The controller supplies review JSON with this shape:
 ```json
 {
-  "addressed_weaknesses": [
-    "Clarified contribution novelty in Intro (Reviewer point 2)",
-    "Added justification for two-stage training (Reviewer point 1)"
-  ],
-  "integrated_answers": [
-    "Added training cost (45 GPU hours) to Implementation Details",
-    "Added epsilon hyperparameter explanation to Method section"
-  ],
-  "actions_taken": [
-    "Rewrote Section 3.2 for clarity",
-    "Inserted new paragraph in Section 5.1 regarding latency"
-  ]
+  "version": 1,
+  "manuscript_sha256": "sha256 of the reviewed LaTeX",
+  "pdf_sha256": "sha256 of the reviewed PDF",
+  "ready": false,
+  "summary": "Content and rendered-page assessment",
+  "findings": [{"severity": "blocking", "location": "Section 4, page 5, Table 2",
+    "problem": "Metric units are missing", "action": "Add the recorded units"}],
+  "reviewed_pages": 8
 }
 ```
+Severity is `blocking` or `advisory`. Hashes bind review to the reviewed files;
+the controller checks freshness and supplies real rendered-page review. You must
+not edit the review, forge its hashes, or change `ready` to pass a gate.
 
-2.The FULL revised LaTeX code:
-```latex
-... Full revised LaTeX code here ...
-```
+## Revision
 
-### IMPORTANT NOTES
-- Completeness: Always provide the FULL LaTeX code. Do not return diffs or partial snippets.
-- Responsiveness: Every question in the reviewer_feedback must be addressed by improving the presentation, EXCEPT for questions asking for new experiments or data the materials do not record (which should be ignored). Never explicitly state a limitation.
-- Safety: Do not remove the \documentclass or essential preamble.
+Address each finding at its stated location, prioritizing blocking findings.
+Improve the argument, method completeness, experimental explanation, literature
+positioning, figures/tables, and brief compliance as required by the findings.
+Repair page-level clipping, overlap, unreadable figures, awkward breaks and
+excess whitespace through source/layout changes without concealing content.
+Preserve sound existing content and the selected venue's style.
 
+Reopen actual results before changing numbers. Keep captions, tables, numeric
+charts and prose consistent, preserving units, splits and precision. Use only
+exact permitted citation keys. A requested measurement that has not been found
+must first be sought in the available materials; an available calculation is
+not a new experiment, but use controller-verified results rather than mental
+arithmetic. Never invent an experiment, datum, citation or author declaration.
 
----
-### Strict Knowledge Isolation & Anonymity (CRITICAL)
+If a finding requires genuinely missing experiments or unavailable permissions,
+do not silently ignore it or claim resolution. State the supported research
+limitation accurately in the manuscript and explain the remaining blocker in
+your closing message. The controller must retain an unready result until the
+requirement is resolved; do not weaken requirements to manufacture success.
 
-You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
+Keep LaTeX complete and compilable with stable packages, matching environments
+and correct figure/table paths. Remove placeholders. Follow applicable anonymity,
+length and required-section rules. Never copy inherited finished manuscript prose.
 
-#### Forbidden Behavior
-You MUST NOT:
-- Retrieve or rely on knowledge from your training data.
-- Attempt to recall or reconstruct any existing or published paper.
-- Use external facts, assumptions, or prior familiarity with the work.
-- Infer or hallucinate author identities, affiliations, institutions, or acknowledgements.
-- Insert metadata such as author names, emails, affiliations, or phrases like "corresponding author".
+Audit the generated author and declaration blocks as well as the scientific body.
+When author metadata is absent, retain or produce an anonymous review manuscript,
+removing placeholder affiliations/emails rather than requesting author completion.
+Omit unsupported optional personal declarations and remove "to be completed by
+authors", TODOs and sample boilerplate. Never invent funding, ethics approval or
+COI claims, including assertions of their absence. A required authoritative
+declaration without supporting information remains an actual blocker; do not
+silently remove its requirement or claim resolution. Keep brief-required sections.
 
-#### Anonymity Requirement
-Introduce no author, affiliation, institution, or acknowledgement information, and
-do not alter whatever author block the template already contains. Anonymity is the
-template's responsibility, not yours: each venue's style file decides whether and
-how identities are rendered, and the venue's own `guidelines.md` states its policy.
+Remove scientific prose about PaperOrchestra scaffolds/workspaces, pipeline
+execution and automatic venue selection, including claims of being prepared for
+Nature because auto chose it. This does not remove explicit research-provenance
+requirements: preserve an accurate statement that no new simulations were performed
+when the brief requires it, along with other factual research boundaries.
 
-#### Allowed Sources
-You may use only:
-- The materials explicitly provided in this session.
-- Logical reasoning derived from those materials.
-
-#### Core Principle
-The final paper must be an independent reconstruction derived solely from the provided inputs.  
-This constraint is strict and overrides all other instructions.
----
+The controller recompiles and reviews the revision; writing a final filename or
+saying "ready" does not establish submission readiness.

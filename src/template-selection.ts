@@ -10,6 +10,7 @@ import {
   manualCcfTemplateAdapterForId,
   manualMathTemplateAdapterForId,
   templateAdapter,
+  TEMPLATE_ADAPTERS,
   type TemplateAdapter,
 } from "./venue-catalog.js";
 import { installOfficialVenue, type InstalledVenue } from "./venue-install.js";
@@ -76,6 +77,7 @@ export interface TemplateDecision {
 export interface TemplateSelectionRequest {
   readonly rawMaterials: string;
   readonly model: ModelRef | null;
+  readonly brief?: string | null;
 }
 
 export interface ResolvedTemplateSelection extends TemplateDecision {
@@ -121,6 +123,8 @@ export function buildTemplateSelectionPrompt(request: TemplateSelectionRequest):
     "",
     "Allowed templates:",
     candidates,
+    ...(request.brief ? ["Additional exact editions for explicit brief requirements (some require a supplied official kit):",
+      ...TEMPLATE_ADAPTERS.map((adapter) => `- ${adapter.id}: ${adapter.title}`)] : []),
     "",
   ];
 
@@ -137,6 +141,13 @@ export function buildTemplateSelectionPrompt(request: TemplateSelectionRequest):
   // should say so.
   return [
     ...preamble,
+    "The commissioning brief below is the author's requirements, not sampled research text.",
+    "Honor its venue, field and format requirements before inferring a fit from the topic.",
+    "Do not substitute another venue or edition for an explicit brief requirement.",
+    "Never use or reproduce an inherited finished manuscript as research evidence.",
+    "<brief>",
+    request.brief ?? "No commissioning brief supplied.",
+    "</brief>",
     "The material below is a sample of the author's directory. Judge the paper's topic",
     "from it.",
     "",
@@ -175,10 +186,11 @@ function parseModelDecision(reply: string): TemplateDecision {
   return { templateId: value.template_id, rationale: value.rationale };
 }
 
-function validateAutomaticDecision(decision: TemplateDecision): TemplateDecision {
+function validateAutomaticDecision(decision: TemplateDecision, hasBrief = false): TemplateDecision {
   const templateId = decision.templateId.trim();
   const rationale = decision.rationale.trim();
-  const permitted = new Set(AUTOMATIC_TEMPLATE_CANDIDATES.map((candidate) => candidate.id));
+  const permitted = new Set<string>(hasBrief ? TEMPLATE_ADAPTERS.map((adapter) => adapter.id)
+    : AUTOMATIC_TEMPLATE_CANDIDATES.map((candidate) => candidate.id));
   if (!permitted.has(templateId as AutomaticTemplateCandidate["id"])) {
     throw new UserFacingError(
       `the automatic template selector chose unsupported template "${templateId}". ` +
@@ -264,6 +276,9 @@ async function resolveAdapterTemplate(
   // be answering a different question.
   const fallback = options.fallback;
   if (!fallback) {
+    if (options.offline) {
+      throw new UserFacingError(`${adapter.id} is not cached and network policy is offline; supply the exact kit locally.`);
+    }
     ensureDir(dirname(destination));
     await installOfficial(adapter.id, destination);
     return { directory: resolveTemplate(destination), fellBackTo: null, why: null };
@@ -295,13 +310,14 @@ async function resolveExplicitTemplate(
   requested: string,
   cacheDirectory: string,
   installOfficial: OfficialTemplateInstaller,
+  offline = false,
 ): Promise<{ templateId: string; directory: string }> {
   if (looksLikeTemplatePath(requested)) {
     return { templateId: requested, directory: resolveTemplate(requested) };
   }
   const adapter = manualAdapterFor(requested);
   if (!adapter) return { templateId: requested, directory: resolveTemplate(requested) };
-  const resolved = await resolveAdapterTemplate(adapter, cacheDirectory, installOfficial);
+  const resolved = await resolveAdapterTemplate(adapter, cacheDirectory, installOfficial, { offline });
   return { templateId: adapter.id, directory: resolved.directory };
 }
 
@@ -316,7 +332,7 @@ export async function resolveTemplateSelection(
   const installer = options.installOfficial ?? installOfficialVenue;
   const cacheDirectory = resolve(options.cacheDirectory ?? templateCacheDirectory());
   if (options.requested !== AUTO_TEMPLATE) {
-    const explicit = await resolveExplicitTemplate(options.requested, cacheDirectory, installer);
+    const explicit = await resolveExplicitTemplate(options.requested, cacheDirectory, installer, options.networkPolicy === "offline");
     return {
       requested: options.requested,
       mode: "explicit",
@@ -327,14 +343,14 @@ export async function resolveTemplateSelection(
   }
 
   const decide = options.decide ?? decideTemplateWithModel;
-  const decision = validateAutomaticDecision(await decide(options));
+  const decision = validateAutomaticDecision(await decide(options), Boolean(options.brief));
   const adapter = templateAdapter(decision.templateId);
   if (!adapter) {
     throw new UserFacingError(`automatic template "${decision.templateId}" is not registered`);
   }
   const candidate = AUTOMATIC_TEMPLATE_CANDIDATES.find((entry) => entry.id === decision.templateId);
   const resolved = await resolveAdapterTemplate(adapter, cacheDirectory, installer, {
-    ...(candidate ? { fallback: candidate.bundledFallback } : {}),
+    ...(candidate && !options.brief ? { fallback: candidate.bundledFallback } : {}),
     ...(options.networkPolicy === "offline" ? { offline: true } : {}),
   });
   // The fallback goes in the rationale because that string is what `status`

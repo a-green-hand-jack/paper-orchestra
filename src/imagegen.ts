@@ -199,6 +199,8 @@ function codexPrompt(request: TextToImageRequest): string {
       aspect_ratio: request.aspectRatio,
     }),
     "Generate exactly one publication-quality raster image matching that visual brief and aspect ratio.",
+    "Keep the geometry simple and internally consistent. Repeated definitions must describe the same " +
+      "directions and objects in the drawing. Typeset mathematical subscripts; never draw raw LaTeX or underscore syntax.",
     "After the image tool completes, return only a JSON object with `generated_image_path` set to the " +
       "absolute managed output path returned by the tool.",
   ].join("\n");
@@ -232,7 +234,7 @@ async function generateWithCodex(
     throw new UserFacingError(`Codex image generation timed out after ${IMAGE_TIMEOUT_MS / 1000}s`);
   }
   if (result.exitCode !== 0) {
-    throw new UserFacingError(`Codex image generation exited ${result.exitCode}: ${tail(result.stderr)}`);
+    throw new UserFacingError(`Codex image generation exited ${result.exitCode}: ${codexFailureSummary(result.stdout)}`);
   }
 
   const threadId = threadIdFromJsonl(result.stdout);
@@ -253,10 +255,28 @@ async function generateWithCodex(
         auth: "chatgpt_oauth",
         executor: "codex exec",
         image_generation: "built_in",
+        model_evidence: "executor default; not reported by the image tool",
         ...(threadId ? { thread_id: threadId } : {}),
       },
     },
   };
+}
+
+/** JSON mode writes failures to stdout; stderr may contain only an ordinary stdin notice. */
+export function codexFailureSummary(stdout: string): string {
+  const failures: string[] = [];
+  for (const line of stdout.split("\n")) {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (event.type !== "error" && event.type !== "turn.failed") continue;
+      const error = event.error as Record<string, unknown> | undefined;
+      const message = typeof event.message === "string" ? event.message :
+        typeof error?.message === "string" ? error.message : String(event.type);
+      failures.push(message.replace(/Bearer\s+\S+|\b(?:sk|sess)-[\w-]+/gi, "[redacted]")
+        .replace(/((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[redacted]").slice(0, 600));
+    } catch { /* Not a JSON event. Never emit raw stdout/transcripts. */ }
+  }
+  return failures.at(-1) ?? "Codex turn failed without a structured error event; no image was produced";
 }
 
 async function generateWithExternalAdapter(

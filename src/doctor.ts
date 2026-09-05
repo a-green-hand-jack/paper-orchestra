@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import type { Check } from "./state/schema.js";
 import { textToImageCapability } from "./imagegen.js";
+import { executableAvailable } from "./preflight.js";
 
 async function which(binary: string): Promise<string | null> {
   try {
@@ -84,6 +85,7 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
   checks.push(await requireBinary("pdflatex", "pdflatex", "manuscript assembly"));
   checks.push(await requireBinary("bibtex", "bibtex", "bibliography compilation"));
   checks.push(await requireBinary("pdftotext", "pdftotext", "importing PDF source material"));
+  checks.push(await requireBinary("pdfinfo", "pdfinfo", "refinement page-count verification"));
 
   const providers = await listOpencodeProviders();
   checks.push(
@@ -97,14 +99,22 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
   );
 
   const probes: Probe[] = [];
+  const bohrAvailable = executableAvailable("bohr");
+  probes.push({
+    name: "bohr (literature retrieval)",
+    satisfied: bohrAvailable,
+    detail: bohrAvailable
+      ? "executable on PATH; run preflight checks authentication when retrieval is needed"
+      : "not on PATH; required for literature retrieval, not for supplied closed bibliographies",
+  });
 
   const pdftoppm = await which("pdftoppm");
   probes.push({
     name: "pdftoppm (visual review)",
     satisfied: pdftoppm !== null,
     detail: pdftoppm
-      ? `${pdftoppm} - refinement can review rendered pages`
-      : "absent - refinement will skip visual review of the compiled PDF",
+      ? `${pdftoppm} - available for rendered-page visual review`
+      : "absent - runs requiring rendered-page visual review will fail preflight",
   });
 
   const matplotlib = await version("python3", [
@@ -130,18 +140,16 @@ export async function runDoctor(): Promise<{ checks: Check[]; probes: Probe[]; o
 }
 
 /**
- * Authenticated OpenCode providers, read from OpenCode's own auth store.
- *
- * Only provider names are read, never credential values, so `doctor` output is
- * safe to paste into an issue.
+ * Provider names from the CLI's safe listing, never from the credential store.
  */
 export async function listOpencodeProviders(): Promise<string[]> {
-  const home = process.env.XDG_DATA_HOME ?? `${process.env.HOME ?? ""}/.local/share`;
-  const authFile = `${home}/opencode/auth.json`;
   try {
-    const { readFileSync } = await import("node:fs");
-    const parsed = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-    return Object.keys(parsed).sort();
+    const { stdout, stderr } = await execa("opencode", ["auth", "list"], { timeout: 15_000 });
+    const plain = `${stdout}\n${stderr}`.replace(/\u001b\[[0-9;]*m/g, "");
+    return plain.split("\n").flatMap((line) => {
+      const match = /\u25cf\s+(.+?)\s+(?:oauth|api|env)\s*$/i.exec(line.trim());
+      return match?.[1] ? [match[1].trim()] : [];
+    }).sort();
   } catch {
     return [];
   }

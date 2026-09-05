@@ -10,7 +10,7 @@ import {
   PlottingResultsSchema,
   MaterialsMapSchema,
 } from "./artifacts.js";
-import { assertInside, walkFiles } from "./files.js";
+import { assertInside, readJson, walkFiles } from "./files.js";
 import {
   ANONYMITY_OPTIONS,
   bibKeys,
@@ -24,7 +24,6 @@ import {
 } from "./latex.js";
 import { suppliedBibliography } from "./bibliography.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
-import { materialsFitWhole } from "./input.js";
 import { MIN_FIGURE_BYTES } from "./figures.js";
 import { plannedCitationCount } from "./queries.js";
 import type { Outline } from "./artifacts.js";
@@ -452,13 +451,13 @@ function literatureDedup(workspace: string): Check {
  * being validated (#28). Reading `provider: "supplied"` out of `candidates.json`
  * would have let a model turn this check off by editing one string.
  */
-function bibliographyProvenance(workspace: string): Check {
+function bibliographyProvenance(workspace: string, scope?: Scope): Check {
   const name = "bibliography_provenance";
   const bib = readIfExists(join(workspace, ARTIFACTS.references));
   if (bib === null) return fail(name, `expected ${ARTIFACTS.references} to exist`);
 
   const suppliedRel = suppliedBibliography(workspace);
-  if (suppliedRel) {
+  if (suppliedRel && scope?.bibliography_mode === "closed") {
     // Stronger than the retrieval path, not weaker: the reference set is a
     // digest-locked file under `source/`, so `verifyLocks` would already have
     // refused the run if it had changed since prepare. Comparing against
@@ -895,7 +894,9 @@ function materialsGrounding(workspace: string): Check {
       continue;
     }
     if (!flatten(body).includes(flatten(fact.quote))) {
-      ungrounded.push(`"${fact.quote.slice(0, 60)}" is not in ${fact.source_path}`);
+      ungrounded.push(`quote ${JSON.stringify(fact.quote)} is not in ${fact.source_path}. ` +
+        `For fact ${JSON.stringify(fact.statement)}, re-read that file and copy one contiguous exact span; ` +
+        "do not normalize punctuation, insert ellipses, or concatenate nonadjacent lines");
     }
   }
 
@@ -964,20 +965,20 @@ function materialsSelection(workspace: string): Check {
  * A single function branching on stage rather than a registry, so the full set
  * of checks for a stage is readable in one place.
  */
+function literatureCoverage(workspace: string): Check {
+  try {
+    const outline = OutlineSchema.parse(readJson(join(workspace, ARTIFACTS.outlineV1)));
+    return outline.citation_gaps.length === 0
+      ? pass("literature_coverage", "no unresolved citation searches")
+      : fail("literature_coverage", `Unresolved literature needs: ${outline.citation_gaps.join("; ")}`);
+  } catch (error) {
+    return fail("literature_coverage", String(error));
+  }
+}
+
 export function validateStage(workspace: string, stage: StageId, scope: Scope): Check[] {
   switch (stage) {
     case "triage":
-      // Recomputed, not recorded: the controller skips this stage for an input
-      // small enough to read whole, and both sides must reach that answer from
-      // the same tree rather than from a flag either could disagree with.
-      if (materialsFitWhole(workspace)) {
-        return [
-          pass(
-            "materials_read_whole",
-            "the materials are small enough for every stage to read in full; no map needed",
-          ),
-        ];
-      }
       return [
         artifactExists(workspace, ARTIFACTS.materialsMap, 32),
         schemaValid(workspace, ARTIFACTS.materialsMap, MaterialsMapSchema),
@@ -1002,7 +1003,9 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         schemaValid(workspace, ARTIFACTS.citationMap, CitationMapSchema),
         schemaValid(workspace, ARTIFACTS.outlineV1, OutlineSchema),
         literatureDedup(workspace),
-        bibliographyProvenance(workspace),
+        bibliographyProvenance(workspace, scope),
+        literatureCoverage(workspace),
+        tablePlanCheck(workspace),
       ];
 
     case "plotting":
@@ -1026,6 +1029,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "section_writing":
       return [
+        tableCoverage(workspace, ARTIFACTS.rawDraft),
         artifactExists(workspace, ARTIFACTS.rawDraft, 512),
         citationIntegrity(workspace, ARTIFACTS.rawDraft),
         citationFloorCheck(workspace, ARTIFACTS.rawDraft, scope),
@@ -1041,6 +1045,8 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "refinement":
       return [
+        tableCoverage(workspace, ARTIFACTS.finalTex),
+        manuscriptReadiness(workspace),
         artifactExists(workspace, ARTIFACTS.finalTex, 512),
         artifactExists(workspace, ARTIFACTS.finalPdf, 1024),
         latexAssembly(workspace),
@@ -1083,3 +1089,5 @@ export const validators = {
   materialsSelection,
   noUnresolvedMarkers,
 };
+import { manuscriptReadiness } from "./manuscript-review.js";
+import { tableCoverage, tablePlanCheck } from "./presentation.js";

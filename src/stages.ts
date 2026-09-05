@@ -77,9 +77,9 @@ export const TIMEOUTS_MS: Record<StageId, number> = {
  * `paper-orchestra resume`, which is deliberate rather than an infinite retry.
  */
 export const REMEDIATION_ATTEMPTS: Record<StageId, number> = {
-  triage: 1,
+  triage: 2,
   outline: 1,
-  literature: 1,
+  literature: 2,
   // Image generations are independent Codex turns, so a third attempt can
   // carry forward two rounds of accumulated visual feedback.
   plotting: 2,

@@ -240,6 +240,9 @@ export function gateByRelevance<T extends Scoreable>(
   options: { fraction?: number } = {},
 ): GateResult<T> {
   const fraction = options.fraction ?? RELEVANCE_FRACTION;
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    throw new RangeError("relevance fraction must be between 0 and 1");
+  }
   const profile = topicProfile(outline);
   const anchors = anchorNames(outline);
 
@@ -292,7 +295,7 @@ export function gateByRelevance<T extends Scoreable>(
   const judgements: Array<Judgement<T>> = scored
     .map((entry) => ({
       ...entry,
-      admitted: entry.topical >= threshold || entry.anchor !== null,
+      admitted: (entry.topical > 0 && entry.topical >= threshold) || entry.anchor !== null,
     }))
     .sort((a, b) => b.topical - a.topical);
 
@@ -300,6 +303,6 @@ export function gateByRelevance<T extends Scoreable>(
     admitted: judgements.filter((j) => j.admitted).map((j) => j.candidate),
     rejected: judgements.filter((j) => !j.admitted),
     judgements,
-    anchorRescued: judgements.filter((j) => j.admitted && j.topical < threshold).length,
+    anchorRescued: judgements.filter((j) => j.admitted && (j.topical === 0 || j.topical < threshold)).length,
   };
 }

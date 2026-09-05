@@ -25,7 +25,10 @@ export function substitute(template: string, values: Readonly<Record<string, str
 
 /** Placeholders each stage's command markdown declares. */
 export function placeholdersFor(stage: StageId, scope: Scope, extra: Record<string, string> = {}) {
-  const base: Record<string, string> = { cutoff_date: scope.research_cutoff };
+  const base: Record<string, string> = {
+    cutoff_date: scope.research_cutoff,
+    bibliography_mode: scope.bibliography_mode ?? "seed",
+  };
   return { ...base, ...extra };
 }
 
@@ -78,8 +81,8 @@ function ifPresent(workspace: string, rel: string): string[] {
  * `materials.json` accompanies them when it exists. It is a map, not a
  * substitute: it says which of several hundred files are worth opening and
  * carries the grounded numbers, so a large input stays tractable without any
- * stage being cut off from the source. It is absent when the input was small
- * enough to read whole, which is why every reference to it is conditional.
+ * stage being cut off from the source. Every run performs material understanding,
+ * including small inputs; conditional references also allow repairing old runs.
  *
  * `template/guidelines.md` is conditional for a different reason: only a venue
  * author kit ships one. Naming a path that is not there taught the model that
@@ -92,6 +95,8 @@ function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[]
   const materials = [
     ...ifPresent(workspace, BRIEF_FILE),
     `${BRAIN_DIR}/input/`,
+    "source/",
+    ...ifPresent(workspace, `${BRAIN_DIR}/input-manifest.json`),
     ...ifPresent(workspace, ARTIFACTS.materialsMap),
   ];
   const guidelines = ifPresent(workspace, join(TEMPLATE_DIR, "guidelines.md"));
@@ -99,7 +104,8 @@ function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[]
     case "triage":
       // Triage is the producer of the map, not a consumer: it reads the
       // normalized view of everything and the inventory that describes it.
-      return [...ifPresent(workspace, BRIEF_FILE), `${BRAIN_DIR}/input/`, ...guidelines];
+      return [...ifPresent(workspace, BRIEF_FILE), `${BRAIN_DIR}/input/`, "source/",
+        ...ifPresent(workspace, `${BRAIN_DIR}/input-manifest.json`), ...guidelines];
     case "outline":
       return [...materials, join(TEMPLATE_DIR, "template.tex"), ...guidelines];
     case "literature":
@@ -118,11 +124,17 @@ function stageInputs(workspace: string, stage: StageId, _scope: Scope): string[]
         ARTIFACTS.citationMap,
         ARTIFACTS.updatedTemplate,
         ARTIFACTS.figuresInfo,
+        ...ifPresent(workspace, ARTIFACTS.figuresDir),
+        ...ifPresent(workspace, `${BRAIN_DIR}/manuscript/tables/`),
         ...materials,
         ...guidelines,
       ];
     case "refinement":
-      return [ARTIFACTS.rawDraft, ARTIFACTS.citationMap, ...materials, ...guidelines];
+      return [ARTIFACTS.rawDraft, ...ifPresent(workspace, ARTIFACTS.finalTex),
+        `${BRAIN_DIR}/manuscript/review.json`, ARTIFACTS.outlineV1, ARTIFACTS.citationMap,
+        ...ifPresent(workspace, ARTIFACTS.figuresInfo), ...ifPresent(workspace, ARTIFACTS.figuresDir),
+        ...ifPresent(workspace, `${BRAIN_DIR}/manuscript/tables/`),
+        ...ifPresent(workspace, ARTIFACTS.buildReport), ...materials, ...guidelines];
   }
 }
 
@@ -162,6 +174,9 @@ export function buildStagePrompt(
       "Read only these paths:",
       ...inputs.map((path) => `- \`${path}\``),
       "",
+      "Runtime data files (controller-provided source-to-script mapping):",
+      extra.data_files?.trim() || "No runtime mapping supplied. Do not guess copied paths or invent replacement data.",
+      "",
       "Rules:",
       "- Return the script IN YOUR REPLY, in one ```python fenced block. Do not write",
       "  it to a file: the controller executes what you return and writes every",
@@ -170,8 +185,10 @@ export function buildStagePrompt(
       "  `Caption:`. Plain text, no markdown, no `Figure N:` prefix -- LaTeX numbers",
       "  figures itself.",
       "- `source/` and `template/` are read-only inputs. Never modify them.",
-      "- The script runs with no network in its own directory. Embed the data as",
-      "  literals; read nothing and fetch nothing.",
+      "- Read original data_source files using workspace tools to understand their actual fields.",
+      "  Script reads use only the declared copies under data/ at the mapped runtime paths.",
+      "- The script runs with no network in its own directory. Do not fetch data,",
+      "  reach outside that directory, or replace missing source data with fabricated literals.",
     ].join("\n");
   }
 
@@ -202,11 +219,38 @@ export function buildStagePrompt(
           "",
           `\`${BRIEF_FILE}\` is the commissioning brief: the author's own requirements for`,
           "this paper -- venue, length, structure, what each section must contain. Where it",
-          "and your defaults disagree, it wins. Where it is silent, use your judgement.",
+          "and your defaults disagree, it wins. Explicit locked CLI options take precedence",
+          "over the brief; then apply template rules and finally recorded inferences.",
         ]
       : []),
     "",
     "Rules:",
+    `- Locked template: ${scope.template_id ?? scope.venue}; selection: ${scope.template_selection ?? "explicit"}.`,
+    `- Automatic figure generation: ${scope.use_plotting ? "enabled" : "disabled; use supplied figures only"}.`,
+    `- Bibliography mode: ${scope.bibliography_mode ?? "seed"}. Only the controller retrieves or changes bibliography records.`,
+    ...(scope.target_citations === undefined ? [] : [`- Explicit CLI citation target: ${scope.target_citations}. Record this requirement; never pad unsupported citations.`]),
+    "- Never read or reuse inherited finished manuscript prose, PDFs, or equivalent extracted text.",
+    "  Templates supply style and structure only. Write independent prose from raw research evidence.",
+    "- Read source and extracted results before making claims. Do not run new experiments,",
+    "  invent measurements, or hide missing evidence. State supported limitations accurately.",
+    "- A raw research folder and optional brief are sufficient inputs; author metadata is not assumed.",
+    "  When author metadata is absent, produce an anonymous review manuscript. In generated TeX only,",
+    "  replace placeholder author blocks with a template-compatible anonymous author block and remove",
+    "  placeholder affiliations, emails and personal metadata. Preserve the document class and style.",
+    "- Never invent funding, ethics approval, consent, author contributions or conflicts of interest (COI).",
+    "  Absence of information does not establish 'no funding', 'no conflicts' or 'not applicable'.",
+    "  Omit unsupported optional personal declarations, not TODOs, sample boilerplate or promises",
+    "  such as 'to be completed by authors'. Keep sections required by the brief and applicable venue rules.",
+    "  If the selected venue or brief requires an authoritative declaration that is unavailable,",
+    "  flag an actual blocker rather than inventing it, silently dropping the requirement or claiming readiness.",
+    "  Record it in materials.unresolved or outline requirements when producing those artifacts; otherwise",
+    "  report the blocker without inserting editorial instructions into the manuscript.",
+    "- Scientific prose and captions must discuss the research, not PaperOrchestra, scaffolds, workspaces,",
+    "  pipeline execution or automatic template selection. Do not say the paper was prepared for Nature",
+    "  because auto selected its template. Keep that operational rationale outside the manuscript.",
+    "  Preserve explicitly required research provenance and boundaries: if the brief requires stating",
+    "  that no new simulations were performed, state that accurately. Do not remove required sections",
+    "  or factual provenance under this rule.",
     "- `source/` and `template/` are read-only inputs. Never modify them, and never",
     "  satisfy a requirement by editing them.",
     "- A controller validates your output against schemas and content checks after",

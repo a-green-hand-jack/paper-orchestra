@@ -3,9 +3,10 @@
 <div align="center"><sup>1</sup>Google Cloud AI Research</div>
 <br><br>
 
-PaperOrchestra turns unconstrained pre-writing materials — an idea and an
-experimental log — into a submission-ready LaTeX manuscript, with literature
-synthesis, generated figures, and a compiled PDF.
+PaperOrchestra aims to turn raw pre-writing research materials into a
+submission-ready LaTeX manuscript, with literature synthesis, generated figures,
+and a compiled PDF. Artifact checks and independent model review support that
+goal; they do not certify scientific correctness, novelty, or venue acceptance.
 
 **This fork is a rewrite.** The original Python/Conda multi-agent pipeline has
 been replaced by a standalone OpenCode-native agent in TypeScript. The writing
@@ -21,7 +22,7 @@ capability is PaperOrchestra's; the runtime is not.
 [google-research/paper-orchestra](https://github.com/google-research/paper-orchestra)
 — the Python/Conda multi-agent pipeline this repository was forked from, and
 whose paper is cited below. The writing capability is theirs. What changed is
-the runtime and the guarantees around it.
+the runtime and the checks around it.
 
 - **Model-agnostic.** Every model call goes through an OpenCode session, so the
   provider is a flag. Upstream required Vertex or `GEMINI_API_KEY`.
@@ -73,15 +74,16 @@ my-paper/                          my-project/
 ├── figures/                       │   ├── train.sh
 └── references.bib                 │   └── results.csv
                                    ├── paper/
-                                   │   └── main.tex      ← found, used as the template
-                                   └── refs.bib          ← found, so no paid retrieval
+                                   │   └── template.tex  ← author kit, not a finished paper
+                                   └── refs.bib          ← seeds for literature retrieval
 ```
 
-Nothing here is required and nothing has to be named a particular way. A
-template in the input is used; without one, a bundled venue is chosen from the
-paper's topic. A bibliography in the input is used as it is, so retrieval is
-skipped and costs nothing. Figures you already drew are published as they are.
-Whatever is left is the research material.
+No fixed input filenames are required. A discovered author kit can supply the
+template; an explicit `--template` or commissioning `--brief` takes precedence.
+Otherwise a template is selected from the paper's topic. Finished manuscripts
+are not treated as raw research or automatically reused as author kits.
+A supplied bibliography seeds literature retrieval by default. Supplied figures
+can be reused, and generation of planned new figures is enabled by default.
 
 Then run it from there:
 
@@ -106,29 +108,36 @@ paper-orchestra validate ./paper-run --json
 ```
 
 The result object includes the absolute workspace, run state, current and next
-stage, validation failures, and paths to the LaTeX, bibliography, and final PDF.
+stage, validation failures, and paths to the LaTeX, bibliography, final PDF,
+review, and submission directory. `plan_completed` means the locked plan has
+completed, including a shortened `--until` plan. `submission_ready` additionally
+requires refinement and a passing independent review of the current manuscript
+and PDF. Neither `ok: true` nor `plan_completed: true` alone means a paper is ready.
 
 `--allow-lkm-spend` is required because literature retrieval costs real money.
-Without it the run stops before searching and tells you what it would have
-spent — roughly 2 CNY for a full paper.
+Without it the run stops before paid searching. At about 0.05 CNY per call,
+the default 40-call ceiling represents roughly 2 CNY, not a fixed per-paper bill.
 
-**Unless you bring your own bibliography.** Put a `references.bib` in your
-materials and PaperOrchestra uses it instead of searching: zero retrieval calls,
-zero spend, and `--allow-lkm-spend` is not needed. The file is used verbatim —
-never rewritten, never added to — and the manuscript may only cite keys it
-defines. A bibliography is a decision you have already made, so a run that has
-one is free.
+**A supplied bibliography is a seed, not an opt-out.** The default
+`--bibliography-mode seed` permits retrieval to supplement it and still requires
+`--allow-lkm-spend`. Choose `--bibliography-mode closed` explicitly to restrict
+citations to the supplied collection and skip paid retrieval. Closed mode needs
+a supplied bibliography; it does not make writing, review, or image generation
+free of provider costs.
 
 ### Common variations
 
 ```bash
-# a specific model, and figures generated from your data
-paper-orchestra write --model openai/gpt-5.6-terra --use-plotting --allow-lkm-spend
+# a specific model; planned figure generation is already enabled
+paper-orchestra write --model openai/gpt-5.6-terra --allow-lkm-spend
+
+# use only a supplied bibliography, and disable automatic figure generation
+paper-orchestra write --bibliography-mode closed --no-plotting
 
 # a specified venue, and a fixed literature cutoff
 paper-orchestra write --template iclr2026 --research-cutoff 2024-11 --allow-lkm-spend
 
-# pause for your approval after outline, literature, drafting and refinement
+# pause after triage, outline, literature, drafting, and refinement
 paper-orchestra write --mode collaborative --allow-lkm-spend
 
 # your own LaTeX template
@@ -143,11 +152,13 @@ paper-orchestra templates list --ccf-a
 | `--template <venue\|dir\|auto>` | Default `auto` asks the configured model to choose from reproducible current templates by topic. Any explicit adapter id or local template directory wins over the model. |
 | `--model <provider/model>` | e.g. `openai/gpt-5.6-terra`; omit for OpenCode's default |
 | `--stage-model <stage>=<model>` | Override one stage's model; repeatable |
-| `--use-plotting` | Generate figures from your data, not just place supplied ones |
-| `--mode collaborative` | Pause for approval at four gates |
+| `--brief <file>` | Commissioning requirements: venue, length, section requirements; `-` reads stdin |
+| `--no-plotting` | Disable default-on generation of planned figures; `--use-plotting` remains an explicit enable flag |
+| `--bibliography-mode <seed\|closed>` | Default `seed` supplements supplied references; explicit `closed` skips retrieval and restricts citations to supplied keys |
+| `--mode collaborative` | Pause at five gates: triage, outline, literature, section writing, refinement |
 | `--headless` | Do not attach the OpenCode TUI |
 | `--json` | Emit NDJSON events and a stable machine-readable result |
-| `--target-citations <n>` | How many distinct sources to cite, capped by how many relevant ones retrieval found (default: 20) |
+| `--target-citations <n>` | Override the adaptive citation target inferred from the paper's needs |
 | `--max-lkm-calls <n>` | Ceiling on paid retrieval calls (default: 40) |
 | `--research-cutoff <yyyy-mm>` | Treat nothing published after this as prior work |
 | `--until <stage>` | Stop after a stage, locking a shorter plan |
@@ -170,8 +181,14 @@ paper-orchestra templates info cvpr2026
 ### Where the output lands
 
 ```
-<workspace>/.brain/manuscript/final_paper.pdf     the paper
+<workspace>/submission/main.tex                 portable manuscript entry point
+<workspace>/submission/final.pdf                controller-built PDF
+<workspace>/submission/references.bib           exported bibliography
+<workspace>/submission/figures/                 exported figures
+<workspace>/submission/README.md                standalone build instructions
+<workspace>/.brain/manuscript/final_paper.pdf     working PDF, retained for provenance
 <workspace>/.brain/manuscript/figures/            every figure used
+<workspace>/.brain/manuscript/review.json         current independent review
 <workspace>/.brain/raw/references.bib             the bibliography
 <workspace>/.brain/raw/candidates.json            every retrieved source, auditable
 ```
@@ -181,29 +198,32 @@ paper-orchestra templates info cvpr2026
 ### Validators, not self-assessment
 
 A stage completes because its artifacts exist and pass checks — never because
-the model said it was done. Fourteen validators run per stage:
+the model said it was done. Checks are stage-specific, not a fixed count run
+at every stage. They include:
 
 | Validator | Catches |
 |---|---|
 | `schema_valid` | An artifact that does not match its schema |
 | `materials_provenance` | A cited material path that was never in the input |
-| `materials_grounding` | A quoted number that is not really in the file it names |
+| `materials_grounding` | Evidence-ledger quotes or values that do not match their named source |
 | `materials_selection` | A map that repeats a file, or claims to have read fewer than it lists |
 | `outline_coverage` | An empty section plan, or a figure with no usable id |
 | `citation_integrity` | A `\cite` key that resolves to nothing |
 | `citation_floor` | A manuscript that cites far fewer sources than were found |
-| `bibliography_provenance` | A bibliography entry with no retrieval record behind it |
+| `bibliography_provenance` | A bibliography entry without the required retrieval or supplied-file provenance |
 | `literature_dedup` | Two entries describing the same paper |
 | `figure_coverage` | A planned figure that never rendered, or one never placed |
 | `figure_render` | A "rendered" figure that is really an empty canvas |
 | `latex_assembly` | A build failure, unresolved `[?]` marks, content overflowing its column |
 | `template_compatibility` | A manuscript that changed the venue's document class |
 | `no_unresolved_markers` | Leftover placeholders or TODO markers |
+| `table_coverage` | Planned tables missing from the manuscript or inconsistent with their generated provenance |
+| `manuscript_readiness` | Missing, stale, incomplete, or blocking independent final-manuscript review |
 
 A failed check's message is written as the repair instruction and is handed
 back to the model verbatim.
 
-### The model cannot fabricate
+### Controller-owned evidence
 
 The agent runs with `bash`, `webfetch` and `websearch` denied. Everything
 mechanical belongs to the controller, costs zero model tokens, and cannot be
@@ -212,16 +232,27 @@ faked by a claim in a transcript:
 - **Literature retrieval** — candidates come from Bohrium LKM, are enriched
   from Crossref and DataCite, scored for relevance against the paper's own
   topic, and written to disk *before* the model sees them. The model can only
-  cite what retrieval actually found. When you supply a `references.bib`,
-  retrieval is skipped and every entry traces to that digest-locked file
-  instead — a stronger guarantee, since the reference set never came from a
-  model at all.
+  cite admitted references. Supplied references retain file provenance; they
+  seed retrieval unless `--bibliography-mode closed` explicitly disables it.
+  Provenance and metadata checks do not prove that a source supports a claim.
 - **Figure generation and review** — the outline agent selects a code or
-  text-to-image route. The controller executes code in a network-disabled
-  directory or calls an explicit image adapter, then visually reviews the
+  text-to-image route. The controller executes code in a scoped subprocess
+  or calls an image provider, then uses a model to visually review the
   rendered output before it can pass.
 - **LaTeX builds** — four-pass `pdflatex`/`bibtex`, diagnosed from the final log.
 - **PDF page rendering** for visual review.
+
+Refinement invokes an actual independent manuscript reviewer before revising the
+compiled draft and again after building the final manuscript. It uses a separate
+OpenCode session with tools disabled, not a writer-authored readiness report.
+The controller supplies the brief, materials, outline, manuscript source,
+and every rendered PDF page in batches of six. The reviewer assesses content
+support, coherence, limitations, citations, figures/tables, and layout. Review
+attempts and replies are retained under `.po-run/reviews/`; the current review
+is bound to source/PDF hashes and the full page count. Final readiness requires
+a matching controller review with no blocking findings. The reviewer may use
+the same configured model as the writer; independence here means a separate
+session and role, not an independent scientific authority.
 
 ### Literature quality
 
@@ -243,12 +274,37 @@ that found it, so a bibliography can be audited after the fact.
 - Per-stage token and cost telemetry.
 - Each stage runs in its own session, which bounds transcript growth.
 
-### Safe by default
+### Input and security boundaries
 
-Credentials are refused at import: `.env*`, `.npmrc`, `.netrc`, key files and
-token-shaped filenames never enter the workspace or a checkpoint. Generated
-figure scripts run in a separate process with no network, in their own
-directory.
+Import is bounded to 5,000 files and 256 MiB total, with a 64 MiB per-file cap.
+Oversized files are skipped; exceeding aggregate limits fails import. Import
+and normalization manifests record exclusions and unreadable inputs rather than
+silently treating them as evidence. Manuscript/template/bibliography roles are
+separated from raw research using path and content heuristics.
+
+Controller-owned extractors provide bounded previews:
+
+- PDFs: `pdftotext`, at most 200 pages, 15 seconds, and 2 MiB output; no OCR.
+- CSV/TSV and JSONL/NDJSON: up to 200 rows; JSON previews and saved notebook
+  cells/outputs are bounded too. Notebook cells are not executed.
+- SQLite: read-only immutable snapshots, at most 20 ordinary tables and 200
+  rows per table; no views, virtual tables, or uncheckpointed WAL contents.
+- NumPy `.npy`/`.npz`: requires NumPy, disables pickle loading, and summarizes
+  at most 10,000 values per array; NPZ has 20-entry and 64 MiB expansion limits.
+
+Data extraction uses isolated Python with a 15-second timeout and bounded
+output; structured JSON/notebook parsing is capped at 16 MiB. These are sampled
+views, not exhaustive dataset statistics. Missing dependencies or extraction
+failures are recorded as unreadable, not replaced by inferred results.
+
+Sensitive filename/path rules exclude common credential files such as `.env`,
+`.npmrc`, `.netrc`, and private keys, and source-path checks reject symlinks and
+traversal. These rules are not a general secret-content detector: sanitize the
+materials before import, especially databases and arbitrarily named files.
+Agent shell/network tools are denied, but controller retrieval and image
+providers can use the network. Generated figure scripts use a scoped subprocess,
+restricted environment, and timeout, not a hardened OS sandbox or guaranteed
+network isolation. Run untrusted inputs/code in an appropriately isolated host.
 
 ### Model-agnostic
 
@@ -261,7 +317,7 @@ existing Codex OAuth session and does not require `OPENAI_API_KEY`:
 
 ```bash
 codex login
-paper-orchestra write --use-plotting --allow-lkm-spend
+paper-orchestra write --allow-lkm-spend
 ```
 
 Set an external adapter only when another image provider or a custom image
@@ -269,7 +325,7 @@ service should override the Codex default:
 
 ```bash
 export PAPER_ORCHESTRA_IMAGE_ADAPTER=/absolute/path/to/image-adapter
-paper-orchestra write --use-plotting --allow-lkm-spend
+paper-orchestra write --allow-lkm-spend
 ```
 
 The adapter reads one JSON request from stdin and returns one JSON object with
@@ -289,31 +345,28 @@ with setup guidance instead of silently omitting the figure.
 | 5 | `section_writing` | `raw_draft.tex` |
 | 6 | `refinement` | `final_paper.tex`, `final_paper.pdf` |
 
-Stage 1 maps the materials; it does not rewrite them. Every later stage reads
+Stage 1 runs model triage for every input, including small material sets; it
+does not rewrite them. Every later stage reads
 the author's own files, and `materials.json` tells it which ones are worth
 opening and carries the ledger of measured numbers, each with a quote copied
-verbatim from the file it came from. A validator re-reads those files, so a
-fabricated number cannot pass — and nothing the map leaves out becomes
-invisible, because the files are still there to read.
-
-Two stages need no model when there is nothing for one to do. The mapping
-stage is skipped when the materials are small enough for every stage to read in
-full, and retrieval is skipped when the input already holds a bibliography — in
-both cases the controller records what it used and the validators confirm it,
-at zero cost.
+verbatim from the file it came from. Validators check the ledger against those
+files, but do not prove every manuscript claim or scientific inference. Imported
+files remain available beyond the map, subject to the recorded input roles and
+readability limits. Only explicit closed bibliography mode skips retrieval;
+the presence of a bibliography alone does not skip literature work.
 
 Retrieval (stage 3) is controller-owned: candidates come from Bohrium LKM, are
 enriched from Crossref and DataCite, scored for relevance against the paper's
 own topic, and written to disk before the model sees them. The model can only
-cite what retrieval found — or, with a supplied bibliography, only what that
-file defines — which is what makes a fabricated reference impossible rather
-than merely discouraged.
+cite the admitted reference set, including supplied seeds, or only the supplied
+collection in closed mode. This constrains citation keys and provenance, not
+the scientific truth of the resulting prose.
 
-Figures (stage 3) use the route selected in `outline.json`. Code generation runs
-in a scoped directory with no network and accepts PDF only; text-to-image uses
+Figures (stage 4) use the route selected in `outline.json`. Code generation runs
+in a scoped subprocess and accepts PDF only; text-to-image uses
 Codex's ChatGPT-authenticated built-in image generation by default, with
 `PAPER_ORCHESTRA_IMAGE_ADAPTER` as an explicit override. Both outputs are
-rendered to pixels, attached to a visual critic, and repaired once or fail with
+rendered to pixels, attached to a visual critic, and receive bounded repairs or fail with
 the critic's concrete finding. Supplied figures continue to work without either
 generation dependency.
 
@@ -324,13 +377,67 @@ generation dependency.
 ├── .brain/{input,raw,manuscript,tmp}   # artifacts, drafts, figures
 ├── source/                            # imported materials, read-only, digested
 ├── template/                          # LaTeX template, read-only, digested
+├── submission/                        # exported manuscript and build dependencies
 ├── .opencode/                         # per-run agent config and prompts
 └── .po-run/{run.json,session.json,checkpoints/,logs/}
 ```
 
 `source/` and `template/` are hashed at import and re-checked on resume, so a
-resume cannot silently change what is being written. Credentials are refused at
-import: `.env*`, key files and token-shaped filenames never enter the workspace.
+resume detects changed imported inputs. See the input/security boundaries above
+for import exclusions and their limits.
+
+## Gewu preparation and end-to-end workflow
+
+`scripts/prepare-gewu.py` prepares the raw-only Issue48 writing task without
+launching a model. It uses an authenticated `hf` CLI cache to fetch an allowlist
+from `Jack-Jieke-Wu/Gewu-Solutions`, pinned to revision
+`576302afd4bc95cd3b3ed809f4822c611a1ea95f`, solution
+`lewton-agent_kerrDeflection-solution__57b47284`. The source manifest marks it
+accepted, while `problem.yaml` says candidate; supplied passing audit logs are
+raw-evidence provenance, not verification of live journal acceptance.
+
+The allowlist contains notes, problem/rubric, code, CSVs, and existing audit logs,
+not finished papers, manuscript TeX, extracted paper prose, bibliographies,
+prebuilt figures, or archives. Preparation checks remote blob hashes and CSV
+consistency, records inclusion/exclusion decisions and SHA-256 hashes, and freezes
+the brief and verifier under the gitignored `datasets/gewu-issue48/` directory.
+
+From this clone, with the writing dependencies configured:
+
+```bash
+python3 scripts/prepare-gewu.py
+npm run build
+node dist/cli.js doctor
+node dist/cli.js write datasets/gewu-issue48/input \
+  --brief datasets/gewu-issue48/benchmark/gewu-kerr-no-assets/instruction.md \
+  --headless --json --allow-lkm-spend -o ./po-run-gewu
+node dist/cli.js status ./po-run-gewu --json
+node dist/cli.js validate ./po-run-gewu --json
+```
+
+The brief is essential: it requires a new 6-12 page English paper, at least five
+independently retrieved references, a new quantitative PDF plot and conceptual
+image, numerical cross-checks, and explicit limitations. It forbids retrieving
+the finished source paper or running new simulations. Local CLI output lands in
+`po-run-gewu/submission/`; the brief/verifier's `/workspace/submission` and
+`/workspace/po-run-harbor` paths describe the benchmark environment, not the local
+output layout. Its `submission-status.json` completion marker is a benchmark
+contract, not a file the standalone CLI export currently creates.
+
+Inspect `submission_ready`, the independent review, the exported PDF, and the
+standalone build instructions before assessing the result. Preparation checks and
+unit tests are not an end-to-end writing pass. **No successful Gewu end-to-end
+run is claimed here**; the frozen verifier and human scientific/visual review
+still need to assess the generated manuscript.
+
+## Development checks
+
+```bash
+npm test
+```
+
+This builds the TypeScript runtime and runs `tests/*.test.mjs` with Node's test
+runner. It is not a live provider-backed end-to-end manuscript evaluation.
 
 ## Project structure
 

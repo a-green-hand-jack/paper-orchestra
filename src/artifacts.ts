@@ -89,6 +89,93 @@ export const SectionPlanEntrySchema = z
   })
   .passthrough();
 
+export const WritingRequirementSchema = z.object({
+  requirement: z.string().min(1),
+  source: z.enum(["cli", "brief", "template", "inferred"]),
+  verification: z.string().min(1),
+}).passthrough();
+
+export const ResearchClaimSchema = z.object({
+  claim: z.string().min(1),
+  evidence_paths: z.array(z.string().min(1)).min(1),
+  limitations: z.array(z.string()).default([]),
+}).passthrough();
+
+export const TABLE_VERIFICATION_HELP = 'For heterogeneous rows, use row.cell_verification aligned with values, excluding the row label. Example for two columns: {"values":[40.7070301858,null],"cell_verification":[{"selector":"text:alpha_z coefficients:","operation":"direct","index":2,"decimals":10},null]}. Each non-null cell specification replaces the column default; null inherits it. Fix metadata or identify the actual source evidence; never change recorded values just to satisfy checking or drop required research outcomes.';
+
+/** Selectors identify structured fields or exact original-log prefixes, never executable expressions. */
+export const ColumnVerificationSchema = z.object({
+  selector: z.string().min(1).optional(),
+  operation: z.enum(["direct", "min", "max", "mean", "std", "range", "mean_std"]),
+  /** JavaScript's supported fixed-point range; extra displayed zeros do not add measured precision. */
+  decimals: z.number().int().min(0).max(100).optional(),
+  ddof: z.union([z.literal(0), z.literal(1)]).optional(),
+  /** Zero-based numeric token after a text selector's literal prefix, not a line occurrence index. */
+  index: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict().superRefine((spec, ctx) => {
+  const text = spec.selector?.startsWith("text:") ?? false;
+  if (text) {
+    const prefix = spec.selector!.slice(5);
+    if (!prefix.trim() || /[\r\n\0]/.test(prefix)) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ["selector"], message: "text: requires a nonempty literal single-line prefix, preserving original whitespace" });
+    if (spec.operation !== "direct") ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ["operation"], message: "text: selectors support only direct numeric extraction from an original .txt/.log line" });
+  } else if (spec.index !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ["index"], message: "index is only valid with a text: selector; use an indexed JSON pointer for structured data" });
+});
+export type ColumnVerification = z.infer<typeof ColumnVerificationSchema>;
+
+/** Ordered values align with columns; null denotes an unavailable measurement, never zero. */
+export const TableSpecSchema = z.object({
+  table_id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+  title: z.string().min(1),
+  caption: z.string().min(1),
+  section: z.string().min(1),
+  columns: z.array(z.string().min(1)).min(1),
+  column_verification: z.array(ColumnVerificationSchema.nullable()).optional(),
+  rows: z.array(z.object({
+    label: z.string().min(1),
+    values: z.array(z.union([z.number().finite(), z.string(), z.null()])),
+    cell_verification: z.array(ColumnVerificationSchema.nullable()).optional(),
+    source_paths: z.array(z.string().min(1)).min(1),
+  }).passthrough()).min(1),
+  source_paths: z.array(z.string().min(1)).min(1),
+  /** Optional explanation, not a substitute for exact selectors and operations above. */
+  calculation: z.string().default(""),
+}).passthrough().superRefine((table, ctx) => {
+  if (table.column_verification && table.column_verification.length !== table.columns.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["column_verification"],
+      message: `column_verification must have exactly ${table.columns.length} entries; row label is separate. ${TABLE_VERIFICATION_HELP}` });
+  }
+  table.rows.forEach((row, index) => {
+    if (row.values.length !== table.columns.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rows", index, "values"],
+        message: "row values must align with columns (row label is separate)" });
+    }
+    if (row.cell_verification && row.cell_verification.length !== row.values.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rows", index, "cell_verification"],
+        message: `cell_verification must have exactly ${row.values.length} entries, aligned with this row's values. ${TABLE_VERIFICATION_HELP}` });
+    }
+  });
+});
+export type TableSpec = z.infer<typeof TableSpecSchema>;
+
+export const ManuscriptReviewSchema = z.object({
+  version: z.literal(1),
+  manuscript_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  ready: z.boolean(),
+  summary: z.string(),
+  findings: z.array(z.object({
+    severity: z.enum(["blocking", "advisory"]),
+    location: z.string().min(1),
+    problem: z.string().min(1),
+    action: z.string().min(1),
+  })),
+  reviewed_pages: z.number().int().nonnegative(),
+});
+export type ManuscriptReview = z.infer<typeof ManuscriptReviewSchema>;
+
 export const OutlineSchema = z
   .object({
     /**
@@ -106,7 +193,18 @@ export const OutlineSchema = z
      * hints then decide.
      */
     citation_target: z.number().int().nonnegative().default(0),
+    /** Unmet support for external prior-work claims actually asserted, not original research questions. */
+    citation_gaps: z.array(z.string().min(1)).default([]),
+    /** Audit of citation support or concrete external-claim revisions that resolved a gap. */
+    citation_gap_resolutions: z.array(z.object({
+      query: z.string().trim().min(1),
+      resolution: z.enum(["cited", "claim_narrowed"]),
+      detail: z.string().trim().min(1),
+    })).optional(),
     plotting_plan: z.array(PlotSpecSchema).default([]),
+    table_plan: z.array(TableSpecSchema).default([]),
+    research_claims: z.array(ResearchClaimSchema).default([]),
+    requirements: z.array(WritingRequirementSchema).default([]),
     intro_related_work_plan: z
       .object({
         introduction_strategy: z
@@ -205,7 +303,7 @@ export type Candidate = z.infer<typeof CandidateSchema>;
 
 export const PlottingResultSchema = z
   .object({
-    figure_id: z.string().min(1),
+  figure_id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
     title: z.string().default(""),
     task_name: z.enum(["plot", "diagram"]).default("plot"),
     render_route: z.enum(["code", "text_to_image"]).default("code"),
@@ -350,6 +448,13 @@ export const MaterialsMapSchema = z
     facts: z.array(MaterialFactSchema).default([]),
     /** Questions the materials could not answer, carried forward honestly. */
     unresolved: z.array(z.string()).default([]),
+    research_claims: z.array(ResearchClaimSchema).default([]),
+    requirements: z.array(WritingRequirementSchema).default([]),
+    coverage: z.array(z.object({
+      path: z.string().min(1),
+      status: z.enum(["read", "unread", "unreadable", "excluded", "computable", "missing"]),
+      reason: z.string().min(1),
+    }).passthrough()).default([]),
   })
   .passthrough();
 export type MaterialsMap = z.infer<typeof MaterialsMapSchema>;

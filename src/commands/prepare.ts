@@ -50,7 +50,8 @@ export interface PrepareOptions {
   readonly templateRationale?: string;
   readonly mode: "autonomous" | "collaborative";
   readonly headless: boolean;
-  readonly usePlotting: boolean;
+  readonly usePlotting?: boolean;
+  readonly bibliographyMode?: "seed" | "closed";
   readonly researchCutoff: string;
   readonly networkPolicy: "online" | "offline";
   readonly defaultModel: ModelRef | null;
@@ -63,7 +64,7 @@ export interface PrepareOptions {
    */
   readonly until?: StageId | null;
   readonly maxLkmCalls: number;
-  readonly targetCitations: number;
+  readonly targetCitations?: number;
 }
 
 export interface PrepareResult {
@@ -184,7 +185,8 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
 
   const scope: Scope = ScopeSchema.parse({
     plan: planFor(options.until ?? null),
-    use_plotting: options.usePlotting,
+    use_plotting: options.usePlotting ?? true,
+    bibliography_mode: options.bibliographyMode ?? "seed",
     research_cutoff: options.researchCutoff,
     venue: templateLabel(options, discovered),
     ...(options.templateId ? { template_id: options.templateId } : {}),

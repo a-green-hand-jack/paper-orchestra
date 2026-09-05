@@ -98,6 +98,8 @@ class PaperOrchestra(BaseInstalledAgent):
         max_lkm_calls: int | str | None = None,
         target_citations: int | str | None = None,
         research_cutoff: str | None = None,
+        use_plotting: bool | str = True,
+        image_adapter: str | None = None,
         **kwargs,
     ):
         """Accept the knobs a Harbor job needs, via `--ak key=value`.
@@ -123,6 +125,9 @@ class PaperOrchestra(BaseInstalledAgent):
         # admit work published years after the paper under reconstruction, so
         # the job needs a way to say otherwise.
         self.research_cutoff = research_cutoff
+        self.use_plotting = _as_bool(use_plotting)
+        # Container-side executable, provisioned by the task image or a mount.
+        self.image_adapter = image_adapter
 
     @staticmethod
     @override
@@ -142,7 +147,8 @@ class PaperOrchestra(BaseInstalledAgent):
             # `git` for the per-stage checkpoints, `poppler-utils` for
             # `pdftotext`, which PaperOrchestra requires rather than probes:
             # it converts any PDF in the materials into readable text.
-            command="apt-get update && apt-get install -y curl git poppler-utils unzip",
+            command=("apt-get update && apt-get install -y curl git poppler-utils unzip python3"
+                     + (" python3-matplotlib" if self.use_plotting else "")),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
 
@@ -207,6 +213,7 @@ class PaperOrchestra(BaseInstalledAgent):
             retrieval_flags += f"--target-citations {self.target_citations} "
         if self.research_cutoff:
             retrieval_flags += f"--research-cutoff {shlex.quote(self.research_cutoff)} "
+        generation_flags = "--use-plotting " if self.use_plotting else "--no-plotting "
 
         # The rendered instruction IS the brief: Harbor's contract is one
         # location plus one instruction, and the instruction is where the venue,
@@ -222,28 +229,38 @@ class PaperOrchestra(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                f"mkdir -p /logs/agent && cat > {instruction_path} <<'PO_EOF'\n"
-                f"{instruction}\nPO_EOF"
+                f"mkdir -p /logs/agent && printf '%s\\n' {shlex.quote(instruction)} > {instruction_path}"
             ),
         )
 
-        await self.exec_as_agent(
-            environment,
-            command=(
-                ". ~/.nvm/nvm.sh 2>/dev/null; "
-                f"paper-orchestra write /workspace {model_flag}{retrieval_flags}"
-                f"--brief {shlex.quote(instruction_path)} "
-                f"--headless --json -o {shlex.quote(WORKSPACE)} "
-                "2>&1 | stdbuf -oL tee /logs/agent/paper-orchestra.jsonl"
-            ),
-            env=env,
-        )
-
-        await self._map_submission(environment)
+        try:
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    "set -eo pipefail; . ~/.nvm/nvm.sh 2>/dev/null; "
+                    f"paper-orchestra write /workspace {model_flag}{retrieval_flags}{generation_flags}"
+                    f"--brief {shlex.quote(instruction_path)} "
+                    f"--headless --json -o {shlex.quote(WORKSPACE)} "
+                    "2>&1 | stdbuf -oL tee /logs/agent/paper-orchestra.jsonl"
+                ),
+                env=env,
+            )
+        except Exception:
+            # Preserve diagnostics without converting a failed pipeline into a
+            # successful Harbor trial, even if partial submission mapping fails.
+            try:
+                await self._map_submission(environment, failed=True)
+            except Exception:
+                self.logger.warning("Could not map partial PaperOrchestra artifacts")
+            raise
+        else:
+            await self._map_submission(environment)
 
     async def _provision_credentials(self, environment: BaseEnvironment) -> dict[str, str]:
         """Give the container whatever this host uses to reach a model."""
         env: dict[str, str] = {}
+        if self.image_adapter:
+            env["PAPER_ORCHESTRA_IMAGE_ADAPTER"] = self.image_adapter
         for key in (
             "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENCODE_API_KEY",
             "ANTHROPIC_API_KEY", "BOHRIUM_PROJECT_ID",
@@ -286,7 +303,7 @@ class PaperOrchestra(BaseInstalledAgent):
                 )
         return env
 
-    async def _map_submission(self, environment: BaseEnvironment) -> None:
+    async def _map_submission(self, environment: BaseEnvironment, failed: bool = False) -> None:
         """
         Lay the workspace out the way the task's contract asks for.
 
@@ -331,6 +348,10 @@ else
   echo "PO_SUBMIT: the run produced no manuscript" >&2
 fi
 
+if [ -f "$WS/.brain/manuscript/final_paper.pdf" ]; then
+  cp "$WS/.brain/manuscript/final_paper.pdf" "$SUB/final_paper.pdf"
+fi
+
 # After the template sweep, and unconditionally: this is the bibliography the
 # manuscript was written against.
 if [ -f "$WS/.brain/raw/references.bib" ]; then
@@ -345,7 +366,47 @@ if [ -d "$WS/.brain/manuscript/figures" ]; then
     -exec cp {{}} "$SUB/figures/" \;
 fi
 
+# Prefer the product's portable export: it includes generated tables and the
+# rewritten bibliography paths. This is layout adaptation, not paper editing.
+if [ -d "$WS/submission" ]; then
+  if [ -f "$WS/submission/final.pdf" ] && [ -f "$WS/submission/final_paper.pdf" ]; then
+    cmp -s "$WS/submission/final.pdf" "$WS/submission/final_paper.pdf" || {{
+      echo "PO_SUBMIT: conflicting final PDF aliases" >&2
+      exit 1
+    }}
+  fi
+  cp -R "$WS/submission/." "$SUB/"
+  if [ -f "$WS/submission/final.pdf" ]; then
+    cp "$WS/submission/final.pdf" "$SUB/final_paper.pdf"
+  fi
+fi
+
 chmod -R u+w "$SUB"
+python3 - <<'PO_STATUS'
+import json
+from pathlib import Path
+ws = Path({WORKSPACE!r})
+sub = Path('/workspace/submission')
+events = []
+log = Path('/logs/agent/paper-orchestra.jsonl')
+if log.exists():
+    for line in log.read_text(errors='replace').splitlines():
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict) and event.get('type') == 'result':
+                events.append(event)
+        except ValueError:
+            pass
+completed = (not {failed!r} and bool(events)
+             and events[-1].get('run_state') == 'completed'
+             and (ws / '.brain/manuscript/final_paper.tex').is_file()
+             and (ws / '.brain/manuscript/final_paper.pdf').is_file())
+status = {{'status': 'completed' if completed else 'partial',
+          'pipeline_failed': {failed!r},
+          'manuscript_source': 'final_paper.tex' if (ws / '.brain/manuscript/final_paper.tex').is_file()
+                               else 'raw_draft.tex' if (ws / '.brain/manuscript/raw_draft.tex').is_file() else None}}
+(sub / 'submission-status.json').write_text(json.dumps(status, indent=2) + '\n')
+PO_STATUS
 ls -la "$SUB"
 """
         await self.exec_as_agent(environment, command=script)

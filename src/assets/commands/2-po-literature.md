@@ -1,80 +1,122 @@
-<!--
-Originally ported from methods/prompts/literature_review_agent.py, which has since been removed.
+<!-- Source of truth. Placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}, {bibliography_origin}, {bibliography_mode}. -->
 
-THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
-There is no generator to rerun: scripts/port_prompts.py was removed with
-its inputs.
+Write the Introduction and Related Work from the paper's research and citation plan.
+Read `.brain/raw/outline.json`, `.brain/raw/citation_map.json`,
+`.brain/raw/references.bib`, `.brain/raw/materials.json`, the actual materials
+needed to check contributions, and `template/template.tex`. Apply the brief and
+any available template guidelines. Never use inherited finished manuscript prose.
 
-Controller-substituted placeholders: {cutoff_date}, {paper_count}, {min_cite_paper_count}, {bibliography_origin}
--->
+The controller provides {paper_count} candidate papers. {bibliography_origin}
+Bibliography mode is `{bibliography_mode}`: `seed` permits controller-managed
+gap retrieval; `closed` restricts the bibliography to the supplied collection.
+Neither mode permits you to invent entries, fetch papers yourself, or write the
+controller-owned bibliography or citation map.
 
-Role: Senior AI Researcher.
-Task: Write the introduction and related work section of a paper.
+Use only exact keys in `.brain/raw/citation_map.json`. Read the recorded abstracts
+before asserting what a source says. The requested introduction/related-work
+coverage is {min_cite_paper_count} distinct sources; every citation must support
+its nearby claim. Never pad irrelevant citations to satisfy a count. The user's
+minimum of relevant citations remains mandatory across the manuscript; resolving
+an individual gap does not lower that minimum or the explicit citation target.
 
-You will be given a 'template.tex', this is the initial skeleton we outlined for you. 
-Your job is to fill in two sections: Introduction and Related Work. Leave all the other sections untouched.
+## Citation Gaps And Resolutions
 
-INPUTS:
-* 'intro_related_work_plan': This is your PRIMARY guide for structure and arguments.
-* **The author's materials** under `.brain/input/`, mapped by `.brain/raw/materials.json` when it is present: use them to ensure the Intro accurately frames the technical contribution and the results it actually reports.
-* 'citation_checklist': This includes the citation keys that you should use when citing relevant papers.
-* 'collected_papers': These are all the relevant papers we collect for you for citation purpose.
+`citation_gaps` is only for unmet support for external prior-work claims actually
+asserted in the paper, expressed as specific search queries. It is not a list of
+original contributions, missing new experiments or unanswerable research questions.
+Before requesting another search, identify the external claim and its location,
+and check whether the collected records already support it. Mere topic similarity
+is not support. The controller decides whether authorized, budgeted retrieval can
+fill a genuine gap.
 
-YOU MUST ONLY CITE THE GIVEN 'collected_papers', DO NOT cite new papers other than the given papers.
+Do not demand an independently published identical formula or a universal correctness
+proof for the supplied original research. Describe an original supplied formula as
+a supplied tested result when the materials record those tests, with their actual
+scope; otherwise describe the derivation or proposal and its evidence boundaries.
+Cite relevant foundations for external methods, but do not require their original
+papers to prove every constraint or special case in the supplied implementation.
+Do not misattribute an original result to a background citation.
 
-CITATION REQUIREMENTS:
-- You have access to the abstract of {paper_count} collected papers.
-  {bibliography_origin}
-- You MUST cite at least {min_cite_paper_count} distinct papers across the introduction
-  and related work sections.
-- Do NOT try to cite all of them. Prefer the smallest set that genuinely supports your
-  claims: a citation must back the specific sentence it is attached to. A paragraph
-  where every sentence carries three references is worse than one where the right
-  sentence carries one.
-- If a collected paper does not support any claim you are actually making, leave it
-  uncited. An unused entry in the bibliography costs nothing; an unsupported citation
-  costs the paper its credibility.
-- Introduction: Cite key statistics, foundational models (CLIP, etc.), and broad problem statements.
-- Related Work: Do deep comparative citations. Group distinct works (e.g., "Several methods [A, B, C]...").
-- Ensure every \cite{key} corresponds exactly to a key in 'citation_checklist'.
-- CRITICAL TIMELINE RULE: Do not treat any papers published after {cutoff_date} as prior baselines to beat. Treat them strictly as concurrent work.
-- CRITICAL EVALUATION RULE: Do not claim our method beats or achieves State-of-the-Art over a specific cited paper UNLESS the author's materials record an explicit evaluation against that paper. Frame other recent papers strictly as concurrent, orthogonal, or conceptual work.
-- You need to return the full code for the new 'template.tex', where the two empty sections (Introduction and Related Work) are now fille in, 
-  while all the other code (packages, styles, and other sections) are identical to the original 'template.tex'.
+A gap may be resolved by a directly supporting citation or by narrowing/removing
+the unsupported external comparison. This must not remove requested research
+outcomes, required sections or the minimum citation target. Apply every revision
+to `.brain/raw/updated_template.tex` and the corresponding claims in the updated
+outline. Keep `citation_gaps` limited to genuinely unresolved external claims.
+Do not erase an unmet user requirement or relabel it resolved merely to stop searches.
 
-IMPORTANT NOTE:
-- DO NOT change '\usepackage[capitalize]{cleveref}' into '\usepackage[capitalize]{cleverref}', as there's no 'cleverref.sty'.
+Record actual resolutions in optional `citation_gap_resolutions`, an array of
+`{query, resolution, detail}` objects. Preserve existing audit entries. `query`
+copies the original gap query; `resolution` is exactly `cited` or `claim_narrowed`.
+For `cited`, detail must name the exact allowed citation key, the supported claim
+and its location. For `claim_narrowed`, detail must give the concrete revised claim
+(or identify the removed comparison) and its section/paragraph location, explaining
+why the missing external support is no longer required. A generic statement like
+"claim softened" without the actual edit and location is not a resolution.
 
-OUTPUT Format:
-You must return the code for the updated 'template.tex', Make sure to wrap the code with ```latex content```.
+Budget exhaustion is not success and does not resolve a gap. Do not fake citations,
+repeatedly request an identical unanswerable proof search, or declare readiness
+because no retrieval calls remain. If required support or the user's minimum of
+relevant citations cannot be met honestly, retain the unmet requirement and report
+the actual blocker. Clearing inappropriate proof-search requests alone does not
+establish that the paper is ready.
 
+Respect the research cutoff {cutoff_date}. Do not assert superiority over a cited
+method without a recorded comparison. Distinguish context from evaluated baselines.
+Check hypotheses about prior-work limitations and qualify unsupported claims.
 
----
-### Strict Knowledge Isolation & Anonymity (CRITICAL)
+## Table Provenance
 
-You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
+Preserve table plans and their numeric verification metadata in `outline_v1.json`.
+When repairing a table, read its actual source files; never change recorded values
+just to satisfy checking or drop required research outcomes. Row labels are separate
+from columns: `values` and any `column_verification` must match the column count.
+For heterogeneous rows, use **row.cell_verification**, aligned with that row's values.
+Each non-null object completely overrides its column default; null inherits it,
+then automatic inference if no default exists. A three-entry column specification
+for two columns is still invalid; do not shift entries or guess their meaning.
 
-#### Forbidden Behavior
-You MUST NOT:
-- Retrieve or rely on knowledge from your training data.
-- Attempt to recall or reconstruct any existing or published paper.
-- Use external facts, assumptions, or prior familiarity with the work.
-- Infer or hallucinate author identities, affiliations, institutions, or acknowledgements.
-- Insert metadata such as author names, emails, affiliations, or phrases like "corresponding author".
+Compact exact row example for two columns (`Value`, `Note`), valid only if the
+original log contains the stated third coefficient:
+```json
+{"label":"Third alpha_z coefficient","values":[40.7070301858,"Recorded fit"],
+ "source_paths":["source/kerr_axis_ks_run.txt"],
+ "cell_verification":[{"selector":"text:alpha_z coefficients:","operation":"direct","index":2,"decimals":10},null]}
+```
 
-#### Anonymity Requirement
-Introduce no author, affiliation, institution, or acknowledgement information, and
-do not alter whatever author block the template already contains. Anonymity is the
-template's responsibility, not yours: each venue's style file decides whether and
-how identities are rendered, and the venue's own `guidelines.md` states its policy.
+Verification objects contain only `selector`, required `operation`, optional
+`decimals`, `ddof`, `index`. Structured selectors are exact CSV/TSV headers or JSON
+pointers (including indexed or `*` array segments). Supported operations are
+`direct`, `min`, `max`, `mean`, `std`, `range`, `mean_std`; `std`/`mean_std` require
+`ddof: 0` (population) or `ddof: 1` (sample). Do not invent unsupported transforms.
 
-#### Allowed Sources
-You may use only:
-- The materials explicitly provided in this session.
-- Logical reasoning derived from those materials.
+`text:<literal line prefix>` supports ONLY `direct` extraction from the original
+plain `source/*.txt`/`.log` research files named in that row's `source_paths`, never
+a finished paper, Markdown summary or normalized-text substitute. It matches from
+the start of exactly one original line, preserving whitespace; no regex or broad
+number search. `index` is the zero-based numeric token AFTER that prefix, not a line
+occurrence; omit it only when one numeric token follows. Missing, repeated or
+non-finite matches fail. `index` is invalid for structured selectors. `decimals`
+allows 0 to 100 fixed-point display places, including small scientific-notation
+values; trailing zeros are immaterial, but synthetic measured precision is forbidden.
+Use different cell selectors for different metrics sharing a column. This checks
+numeric field provenance, not a generalized formal proof of the research.
 
-#### Core Principle
-The final paper must be an independent reconstruction derived solely from the provided inputs.  
-This constraint is strict and overrides all other instructions.
----
+Write exactly these two files directly with editing tools:
+- `.brain/raw/outline_v1.json`: preserve the complete outline, including
+  requirements, research claims, plotting and table plans. Replace subsection
+  `citation_hints` with resolved `citation_candidates` arrays of exact keys;
+  attach candidates to introduction and related-work plans as appropriate.
+- `.brain/raw/updated_template.tex`: a complete LaTeX document with independently
+  written Introduction and Related Work. Preserve the template's formatting,
+  packages and section structure; remove sample/inherited research prose rather
+  than treating it as content. Leave other sections as empty structural scaffolds
+  for the section writer, not sample instructions or a finished source manuscript.
+
+Do not return fenced artifact contents in chat. When author metadata is absent,
+use an anonymous review author block in the generated document, not the template's
+placeholder names, affiliations or emails. Formatting preservation does not require
+preserving placeholder metadata or unsupported optional personal declarations.
+Never invent funding, ethics approval or COI statements. A required authoritative
+declaration without evidence is an actual blocker, not sample prose to retain.
+Keep brief-required sections and research provenance; do not put template-selection
+rationale or references to PaperOrchestra scaffolds/workspaces into scientific prose.

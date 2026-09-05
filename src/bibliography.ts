@@ -4,13 +4,11 @@ import { extname, join } from "node:path";
 import type { Candidate } from "./artifacts.js";
 import { paths, SOURCE_DIR } from "./paths.js";
 import { findAuthoredFile } from "./salience.js";
+import { mergeCandidates, toBibtex } from "./literature.js";
 
 /**
- * Ingestion of a bibliography the author supplied, instead of one we retrieved.
- *
- * "I already have my bibliography, don't go searching" is an ordinary situation,
- * and on that path retrieval is worse than unnecessary: it costs money and
- * returns a set of papers unrelated to the one the manuscript must cite from.
+ * Ingestion of an author-supplied bibliography, normally as retrieval seeds.
+ * Explicit closed mode keeps the author's collection as the sole source set.
  *
  * The parser is deliberately tolerant. A real bibliography is machine-merged
  * from several tools and is not clean: `pwb-0001`'s 114 entries include a stray
@@ -220,8 +218,26 @@ export function toSuppliedCandidates(bib: string, ingestedAt: string): Candidate
  * it, nothing ordered it, and a prompt that asserts a property the artifact does
  * not have is the class of defect #30 exists to remove, not to add to.
  */
-export function bibliographyOriginNote(workspace: string): string {
+export function mergeSeedBibliography(
+  seedBib: string,
+  retrieved: readonly Candidate[],
+  ingestedAt: string,
+): { bibtex: string; candidates: Candidate[] } {
+  const seeds = toSuppliedCandidates(seedBib, ingestedAt);
+  const candidates = mergeCandidates(seeds, retrieved);
+  // Keep comments, macros, formatting and every authored field byte-for-byte.
+  const additions = candidates.slice(seeds.length);
+  return { bibtex: seedBib + (additions.length ? `\n${toBibtex(additions)}` : ""), candidates };
+}
+
+export function bibliographyOriginNote(workspace: string, mode: "seed" | "closed" = "seed"): string {
   if (suppliedBibliography(workspace)) {
+    if (mode === "seed") {
+      return "The author's bibliography is a seed, supplemented by controller-retrieved sources. " +
+        "Supplied entries retain their original keys and content and were not relevance-screened. " +
+        "Judge each source on its evidence; request controller retrieval for uncovered topics, " +
+        "and never invent entries or citation keys.";
+    }
     return (
       "They are the author's own fixed bibliography, supplied with the materials. " +
       "They are NOT ordered by relevance and were NOT screened for it, so judge each " +

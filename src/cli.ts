@@ -194,7 +194,10 @@ program
     ),
   )
   .option("--headless", "run without attaching the OpenCode TUI", false)
-  .option("--use-plotting", "generate figures instead of using supplied ones", false)
+  .option("--use-plotting", "generate planned figures (enabled by default)", true)
+  .option("--no-plotting", "disable automatic figure generation")
+  .addOption(new Option("--bibliography-mode <mode>", "treat supplied bibliography as seeds or a closed collection")
+    .choices(["seed", "closed"]).default("seed"))
   .option("--model <ref>", "provider/model[:variant]; omit to use OpenCode's default")
   .option(
     "--stage-model <entry>",
@@ -216,14 +219,13 @@ program
   .option(
     "--allow-lkm-spend",
     "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call); " +
-      "not needed when the materials supply a references.bib",
+      "required for retrieval even when a seed bibliography is supplied",
     false,
   )
   .option("--max-lkm-calls <n>", "ceiling on literature retrieval calls", "40")
   .option(
     "--target-citations <n>",
-    "how many distinct sources the manuscript should cite, capped by how many relevant ones retrieval found",
-    "20",
+    "override the adaptive citation target (default: infer from the paper's needs)",
   )
   .option("--prepare-only", "create and lock the workspace, then stop", false)
   .option("--json", "newline-delimited machine-readable events and result", false)
@@ -237,6 +239,11 @@ program
     const multiplier = Number(options.timeoutMultiplier);
     if (!Number.isFinite(multiplier) || multiplier <= 0) {
       fail(`--timeout-multiplier must be a positive number, got "${options.timeoutMultiplier}"`);
+    }
+    for (const [flag, value] of [["max-lkm-calls", options.maxLkmCalls], ["target-citations", options.targetCitations]]) {
+      if (value !== undefined && (!Number.isSafeInteger(Number(value)) || Number(value) < 0)) {
+        fail(`--${flag} must be a nonnegative integer, got "${value}"`);
+      }
     }
 
     const defaultModel = options.model ? parseModelRef(options.model as string) : null;
@@ -256,22 +263,21 @@ program
       if (brief.trim().length === 0) fail(`the brief from ${from === "-" ? "stdin" : from} is empty`);
     }
 
-    // A template the author already has beats one we would go and choose. Only
-    // when the input holds none does the selector run -- and that is the one
-    // path here that costs a model call and may need the network, so skipping
-    // it is the common case rather than the exception.
+    // Explicit CLI template > commissioning brief > discovered kit > topic inference.
+    // A brief must reach selection even when the input happens to contain a kit.
     //
     // `prepareWorkspace` runs discovery again to act on it. Two calls of a
     // deterministic function, so the answer is the same; the alternative is
     // handing `prepare` a result it cannot verify, which would make it
     // unusable on its own.
     const requested = options.template as string;
-    const discoveredTemplate = requested === AUTO_TEMPLATE ? discoverTemplate(rawMaterials) : null;
+    const discoveredTemplate = requested === AUTO_TEMPLATE && !brief ? discoverTemplate(rawMaterials) : null;
     const selectedTemplate = discoveredTemplate
       ? null
       : await resolveTemplateSelection({
           requested,
           rawMaterials,
+          brief,
           model: defaultModel,
           networkPolicy: options.networkPolicy as "online" | "offline",
         });
@@ -286,7 +292,8 @@ program
       templateRationale: selectedTemplate?.rationale,
       mode: options.mode as "autonomous" | "collaborative",
       headless: Boolean(options.headless),
-      usePlotting: Boolean(options.usePlotting),
+      usePlotting: options.plotting !== false && Boolean(options.usePlotting),
+      bibliographyMode: options.bibliographyMode as "seed" | "closed",
       researchCutoff: (options.researchCutoff as string | undefined) ?? currentYearMonth(),
       networkPolicy: options.networkPolicy as "online" | "offline",
       defaultModel,
@@ -294,7 +301,7 @@ program
       timeoutMultiplier: multiplier,
       until: (options.until as StageId | undefined) ?? null,
       maxLkmCalls: Number(options.maxLkmCalls),
-      targetCitations: Number(options.targetCitations),
+      ...(options.targetCitations === undefined ? {} : { targetCitations: Number(options.targetCitations) }),
     });
 
     const { state } = result;
@@ -406,7 +413,7 @@ program
   .option(
     "--allow-lkm-spend",
     "authorize paid Bohrium LKM literature retrieval (~0.05 CNY per call); " +
-      "not needed when the materials supply a references.bib",
+      "required for retrieval even when a seed bibliography is supplied",
     false,
   )
   .option("--headless", "resume without attaching the OpenCode TUI", false)

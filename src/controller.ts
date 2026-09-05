@@ -30,9 +30,11 @@ import {
 } from "./state/store.js";
 import { citationFloor, validateStage } from "./validation.js";
 import { CitationMapSchema, OutlineSchema } from "./artifacts.js";
-import { readJson, writeJsonAtomic } from "./files.js";
-import { LKM_CALL_PRICE_CNY, retrieveLiterature, toBibtex, toCitationMap } from "./literature.js";
-import { planQueries } from "./queries.js";
+import { assertInside, digestFile, digestValue, readJson, writeJsonAtomic } from "./files.js";
+import { retrieveForLiterature, UnmetLiteratureError } from "./literature-controller.js";
+import { preflightRun } from "./preflight.js";
+import { manuscriptReadiness, reviewManuscript } from "./manuscript-review.js";
+import { exportSubmission, publishTables } from "./presentation.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -51,7 +53,7 @@ import {
   type VisualReview,
 } from "./figures.js";
 import { generateTextImage, textToImageCapability } from "./imagegen.js";
-import { materialsFitWhole, materialsInventory, suppliedFiguresDir } from "./input.js";
+import { materialsInventory, suppliedFiguresDir } from "./input.js";
 import {
   bibliographyOriginNote,
   suppliedBibliography,
@@ -132,6 +134,7 @@ async function drive(
   const { workspace } = options;
   let state = readRunState(workspace);
   verifyLocks(workspace, state);
+  await preflightRun(workspace, state, options.allowLkmSpend ?? false);
 
   await initGit(workspace, state.run_branch);
   const installed = installRuntimeAssets(workspace, state);
@@ -181,6 +184,11 @@ async function drive(
       if (state.status === "gate_waiting") return state;
     }
 
+    if (state.scope.plan.includes("refinement")) {
+      const ready = manuscriptReadiness(workspace);
+      if (!ready.passed) throw new UserFacingError(ready.detail);
+      exportSubmission(workspace);
+    }
     state = updateRunState(workspace, (current) => ({
       ...current,
       status: "completed",
@@ -243,6 +251,7 @@ async function runStage(
   const { workspace } = options;
   let state = readRunState(workspace);
   // Claim the stage before any provider, capability, or session setup. If one
+  const priorError = state.stages[stage].error;
   // of those fails, the persisted failure belongs to this stage rather than
   // overwriting the previously completed stage named by current_stage.
   updateRunState(workspace, (current) => ({
@@ -255,56 +264,6 @@ async function runStage(
 
   say(options, "");
 
-  // A small input needs no map: every stage can read all of it, so producing a
-  // map of three files would spend a model call to restate a directory
-  // listing. Same shape as plotting-with-generation-off below, and the same
-  // reason -- prompting here would buy nothing the filesystem does not say.
-  //
-  // Nothing is written on this path. An artifact synthesized by the controller
-  // to keep the shape uniform would be a map nobody made, and the stages that
-  // read it cannot tell the difference; `stageInputs` names materials.json only
-  // when it exists, so absence is the honest signal.
-  if (stage === "triage" && materialsFitWhole(workspace)) {
-    say(options, `>> ${TITLES[stage]} (${stage})  materials read whole, no model call`);
-
-    const checks = validateStage(workspace, stage, state.scope);
-    const blockers = blocking(checks);
-    reportChecks(options, checks);
-    if (blockers.length > 0) {
-      updateStage(workspace, stage, (s) => ({
-        ...s,
-        status: "failed",
-        attempts: s.attempts + 1,
-        error: blockers.map((c) => `${c.name}: ${c.detail}`).join("; "),
-      }));
-      throw new UserFacingError(
-        `stage "${stage}" failed validation: ` +
-          blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
-      );
-    }
-
-    const completed = updateStage(workspace, stage, (s) => ({
-      ...s,
-      status: "completed",
-      attempts: s.attempts + 1,
-      started_at: s.started_at ?? new Date().toISOString(),
-      completed_at: new Date().toISOString(),
-      notes: "Materials small enough to read in full; no map synthesized.",
-    }));
-    const sha = await checkpoint({
-      workspace,
-      runId: completed.run_id,
-      stage,
-      status: "completed",
-      mode: completed.mode,
-      checks,
-    });
-    say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
-    // Gated like any other completed stage: in collaborative mode the user
-    // should still get to see what the run decided.
-    return resolveGate(options, stage, completed, signal);
-  }
-
   // Plotting with generation ON runs a per-figure loop rather than the single
   // prompt every other stage uses, so it has its own path.
   if (stage === "plotting" && state.scope.use_plotting) {
@@ -315,6 +274,7 @@ async function runStage(
   // supplied, so the controller just publishes them and lets the validators
   // confirm. Prompting a session here would spend tokens to do nothing.
   if (stage === "plotting" && !state.scope.use_plotting) {
+    publishTables(workspace);
     say(options, `>> ${TITLES[stage]} (${stage})  supplied figures, no model call`);
     const published = publishSuppliedFigures(workspace);
     say(options, `   published ${published} supplied figure(s)`);
@@ -403,17 +363,27 @@ async function runStage(
     extra.min_cite_paper_count = String(
       citationFloor(relevant, state.scope, plan.success ? plan.data : null),
     );
-    extra.bibliography_origin = bibliographyOriginNote(workspace);
+    extra.bibliography_origin = bibliographyOriginNote(workspace, state.scope.bibliography_mode ?? "seed");
   }
   if (stage === "section_writing" || stage === "refinement") {
+    publishTables(workspace);
     extra.citation_keys = availableCitationKeys(workspace);
   }
 
   const before = await sessionUsage(runtime, sessionId);
 
+  if (stage === "refinement") {
+    const reviewingFinal = existsSync(join(workspace, ARTIFACTS.finalTex));
+    await buildIfManuscriptStage(options, reviewingFinal ? "refinement" : "section_writing");
+    await reviewManuscript({ runtime, workspace, sourceRel: reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft,
+      model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+  }
+
   await prompt(runtime, {
     sessionId,
-    text: buildStagePrompt(workspace, stage, state.scope, extra),
+    text: buildStagePrompt(workspace, stage, state.scope, extra) + (priorError
+      ? `\n\nRESUMING AN EXISTING ATTEMPT. Inspect its existing output first and repair the following failure. ` +
+        `Preserve correct work instead of rewriting the whole stage.\n${priorError}` : ""),
     model,
   });
   const first = await waitForIdleOrPermissionAsk(runtime, options, {
@@ -428,7 +398,38 @@ async function runStage(
     );
   }
 
+  if (stage === "literature") {
+    // The literature writer can identify missing sources, but only the controller searches.
+    for (let round = 0; round < 2; round += 1) {
+      const revised = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outlineV1)));
+      if (!revised.success || revised.data.citation_gaps.length === 0) break;
+      let retrievalFeedback = "The controller retrieved your citation_gaps.";
+      try {
+        await retrieveForLiterature(options, state, revised.data.citation_gaps);
+      } catch (error) {
+        if (!(error instanceof UnmetLiteratureError)) throw error;
+        retrievalFeedback = `The controller could not resolve these searches: ${error.gaps.join("; ")}. ` +
+          "Within the remaining call budget, rephrase actual external citation needs. Alternatively " +
+          "narrow/remove an unsupported external claim and record the concrete revised claim, location " +
+          "and reason in citation_gap_resolutions. Do not demand an independently published identical " +
+          "result for original research, new experiments, or universal correctness proof. Preserve all " +
+          "brief requirements, research outcomes and minimum relevant citation count. Budget exhaustion " +
+          "does not itself resolve a gap.";
+      }
+      await prompt(runtime, { sessionId, model, text:
+        retrievalFeedback + " Re-read .brain/raw/candidates.json and .brain/raw/citation_map.json; " +
+        "update outline_v1.json and updated_template.tex using these sources. Clear only resolved " +
+        "citation_gaps, documenting cited or claim_narrowed resolutions, or state concrete remaining searches. " +
+        "Do not change controller-owned bibliography files." });
+      await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+    }
+  }
+
   await buildIfManuscriptStage(options, stage);
+  if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
+    await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
+      model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+  }
 
   let checks = validateStage(workspace, stage, state.scope);
   let failed = checks.filter((check) => !check.passed);
@@ -446,6 +447,10 @@ async function runStage(
     });
     await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
     await buildIfManuscriptStage(options, stage);
+    if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
+      await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
+        model, timeoutMs, signal, onProgress: (line) => say(options, line) });
+    }
 
     checks = validateStage(workspace, stage, state.scope);
     failed = checks.filter((check) => !check.passed);
@@ -576,144 +581,6 @@ export function approveRun(workspace: string): RunState {
     );
   }
   return updateRunState(workspace, (c) => ({ ...c, status: "running" }));
-}
-
-/**
- * Retrieve the bibliography before the literature stage prompts anything.
- *
- * The agent cannot search: `webfetch` and `websearch` are denied, so it cannot
- * cite a source it was not handed, and every entry it can cite carries a
- * provider id. That is what makes `bibliography_provenance` meaningful, and it
- * is the structural answer to a manuscript inventing references.
- *
- * The Python instead let the model search via Gemini's GoogleSearch tool, which
- * requires model-side web access this project deliberately withholds.
- */
-async function retrieveForLiterature(
-  options: ControllerOptions,
-  state: RunState,
-): Promise<number> {
-  const { workspace } = options;
-
-  // An author who supplied a bibliography has already decided what this paper
-  // cites. Retrieving anyway would spend money to obtain a DIFFERENT set of
-  // papers than the one the manuscript must draw from, so the paid substep is
-  // skipped and the supplied file is ingested instead.
-  //
-  // Only the retrieval is skipped, not the stage: the model still has to write
-  // `outline_v1.json` and fill the template's Introduction and Related Work.
-  // That is what makes this different in kind from the plotting and triage
-  // short-circuits, which have no work left once the artifacts are on disk.
-  const suppliedRel = suppliedBibliography(workspace);
-  if (suppliedRel) {
-    const raw = readFileSync(join(workspace, suppliedRel), "utf8");
-    const candidates = toSuppliedCandidates(raw, new Date().toISOString());
-
-    // Copied verbatim rather than regenerated from the parsed records.
-    // `toBibtex` emits the fields retrieval collects, which is a subset of what
-    // a real file carries: re-serializing `pwb-0001`'s bibliography turns
-    // 189 KB into 39 KB, dropping every abstract along with pages, volume and
-    // entry-type nuance. The grader compiles what we ship, and the author's
-    // file already compiles, so the only safe transformation is none.
-    writeFileSync(join(workspace, ARTIFACTS.references), raw, "utf8");
-    writeJsonAtomic(join(workspace, ARTIFACTS.candidates), candidates);
-    writeJsonAtomic(join(workspace, ARTIFACTS.citationMap), toCitationMap(candidates));
-    // Written even though it is empty, so the run's own spend record says zero
-    // paid queries rather than leaving an auditor with a missing file to
-    // interpret.
-    writeJsonAtomic(join(workspace, ARTIFACTS.queryPlan), {
-      generated_at: new Date().toISOString(),
-      origin: "supplied_bibliography",
-      supplied_path: suppliedRel,
-      reason:
-        "the author supplied a bibliography, so no query was planned and nothing was paid for",
-      decisions: [],
-    });
-
-    say(
-      options,
-      `   using the supplied bibliography ${suppliedRel}: ${candidates.length} entr(ies), ` +
-        "0 LKM call(s), 0.00 CNY",
-    );
-    return candidates.length;
-  }
-
-  const outlinePath = join(workspace, ARTIFACTS.outline);
-  const parsed = OutlineSchema.safeParse(readJson(outlinePath));
-  if (!parsed.success) {
-    throw new UserFacingError(
-      `cannot retrieve literature: ${ARTIFACTS.outline} does not match its schema. ` +
-        "Re-run the outline stage.",
-    );
-  }
-
-  const planned = planQueries(parsed.data);
-  const queries = planned.queries;
-  writeJsonAtomic(join(workspace, ARTIFACTS.queryPlan), {
-    generated_at: new Date().toISOString(),
-    decisions: planned.decisions,
-  });
-  const dropped = planned.decisions.filter((entry) => entry.action === "dropped").length;
-  const contextualized = planned.decisions.filter(
-    (entry) => entry.action === "contextualized",
-  ).length;
-  say(
-    options,
-    `   query plan: ${queries.length} paid call candidate(s), ${dropped} dropped, ` +
-      `${contextualized} contextualized`,
-  );
-  const budget = Math.min(queries.length, state.scope.max_lkm_calls);
-
-  if (!options.allowLkmSpend) {
-    throw new UserFacingError(
-      `the literature stage needs ${budget} Bohrium LKM call(s), costing about ` +
-        `${(budget * LKM_CALL_PRICE_CNY).toFixed(2)} CNY. Re-run with ` +
-        "--allow-lkm-spend to authorize it.",
-    );
-  }
-
-  say(options, `   retrieving literature: ${budget} of ${queries.length} query(ies)`);
-
-  const result = await retrieveLiterature({
-    queries,
-    cutoff: state.scope.research_cutoff,
-    maxCalls: budget,
-    outline: parsed.data,
-    onProgress: (line) => say(options, line),
-  });
-
-  writeJsonAtomic(join(workspace, ARTIFACTS.candidates), result.candidates);
-  writeFileSync(join(workspace, ARTIFACTS.references), toBibtex(result.candidates), "utf8");
-  writeJsonAtomic(join(workspace, ARTIFACTS.citationMap), toCitationMap(result.candidates));
-
-  say(
-    options,
-    `   retained ${result.candidates.length} source(s) from ${result.callsMade} call(s) ` +
-      `(~${(result.callsMade * LKM_CALL_PRICE_CNY).toFixed(2)} CNY); dropped ` +
-      `${result.dropped.anachronistic} after cutoff, ${result.dropped.noAbstract} without ` +
-      `abstract, ${result.dropped.duplicate} duplicate, ${result.dropped.irrelevant} off-topic`,
-  );
-
-  // Name the queries that returned nothing usable. Each one cost money, and
-  // per-query yield is the only evidence that distinguishes a badly phrased
-  // query from a genuinely thin corpus.
-  const barren = result.perQuery.filter((entry) => entry.admitted === 0);
-  if (barren.length > 0) {
-    say(
-      options,
-      `   ${barren.length} query(ies) yielded no relevant source: ` +
-        barren.map((entry) => `"${entry.query.slice(0, 40)}"`).join(", "),
-    );
-  }
-
-  if (result.candidates.length === 0) {
-    throw new UserFacingError(
-      "literature retrieval produced no source relevant to this paper, so the manuscript " +
-        "could only cite nothing. Check `bohr auth whoami`, widen the research cutoff, or " +
-        "revisit the outline's citation hints -- relevance is scored against the outline.",
-    );
-  }
-  return result.candidates.length;
 }
 
 /** Which stages produce a manuscript the controller should compile. */
@@ -859,7 +726,8 @@ async function runPlottingGeneration(
   const model = stageModel(state, stage);
   const timeoutMs = Math.round(TIMEOUTS_MS[stage] * state.timeout_multiplier);
 
-  const parsed = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outline)));
+  publishTables(workspace);
+  const parsed = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outlineV1)));
   if (!parsed.success) {
     throw new UserFacingError(
       `cannot generate figures: ${ARTIFACTS.outline} does not match its schema. ` +
@@ -871,6 +739,9 @@ async function runPlottingGeneration(
   const routed = planned.map((spec) => ({ spec, route: resolveFigureRoute(spec) }));
   const codeCount = routed.filter((entry) => entry.route === "code").length;
   const imageCount = routed.length - codeCount;
+  if (imageCount > 0 && state.scope.network_policy === "offline") {
+    throw new UserFacingError("offline policy forbids text-to-image network calls");
+  }
 
   if (codeCount > 0) {
     const capability = await plottingAvailable();
@@ -915,15 +786,42 @@ async function runPlottingGeneration(
   const supplied = publishSuppliedFigures(workspace);
   const info = FigureInfoSchema.parse(readJson(join(workspace, ARTIFACTS.figuresInfo)) ?? []);
   const results: Array<Record<string, unknown>> = [];
+  const previous = existsSync(join(workspace, ARTIFACTS.plottingResults))
+    ? readJson<Array<Record<string, unknown>>>(join(workspace, ARTIFACTS.plottingResults)) : [];
 
   for (const { spec, route } of routed) {
+    const cached = previous.find((result) => result.figure_id === spec.figure_id &&
+      result.plan_sha256 === digestValue(spec) && typeof result.image_path === "string");
+    if (cached) {
+      const image = assertInside(p.brainManuscript, String(cached.image_path));
+      if (existsSync(image) && cached.image_sha256 === digestFile(image)) {
+        info.push({ name: basename(image), caption: String(cached.caption) });
+        results.push(cached);
+        say(options, `   ${spec.figure_id}: reused reviewed figure`);
+        continue;
+      }
+    }
+    const dataFiles = spec.data_source.map((source, index) => {
+      const root = source.startsWith("source/") ? "source" :
+        source.startsWith(".brain/input/") ? ".brain/input" : null;
+      const relativeSource = root ? source.slice(root.length + 1) : "";
+      if (!root || relativeSource.includes("\\") ||
+          relativeSource.split("/").some((part) => !part || part === "." || part === "..")) {
+        throw new UserFacingError(`figure data must name an imported source: ${source}`);
+      }
+      return { path: assertInside(join(workspace, root), relativeSource), name: `${index}-${basename(source)}` };
+    });
     const budget = REMEDIATION_ATTEMPTS[stage] + 1;
     let imagePath: string | null = null;
     let bytes = 0;
     let failure = "";
     let caption = "";
     let provenance: Record<string, unknown> | null = null;
-    const criticHistory: Array<Record<string, unknown>> = [];
+    const priorFigure = previous.find((result) => result.figure_id === spec.figure_id &&
+      (result.plan_sha256 === digestValue(spec) ||
+        (result.description === spec.objective && result.aspect_ratio === spec.aspect_ratio)));
+    const criticHistory: Array<Record<string, unknown>> = Array.isArray(priorFigure?.critic_history)
+      ? priorFigure.critic_history as Array<Record<string, unknown>> : [];
 
     for (let attempt = 0; attempt < budget; attempt += 1) {
       if (attempt > 0) {
@@ -943,6 +841,7 @@ async function runPlottingGeneration(
                 objective: spec.objective,
                 aspect_ratio: spec.aspect_ratio,
                 data_source: spec.data_source.join(", ") || "(no data file named; the figure is conceptual)",
+                data_files: dataFiles.map((file, index) => `${spec.data_source[index]} -> data/${file.name}`).join("\n"),
               })
             : `The code-generated figure \`${spec.figure_id}\` failed: ${failure}\n\n` +
               "Return a complete corrected script in one ```python block and the caption as before.";
@@ -953,6 +852,7 @@ async function runPlottingGeneration(
           figureId: spec.figure_id,
           code: answer,
           workDir: join(p.brainTmp, "figures", spec.figure_id, `attempt-${attempt}`),
+          dataFiles,
         });
         caption = extractCaption(answer) || spec.title || spec.objective;
         provenance = {
@@ -971,12 +871,12 @@ async function runPlottingGeneration(
             `${spec.aspect_ratio}; do not add unsupported quantitative claims.`;
         const repairs = [
           ...criticHistory.map((review) => String(review.suggestions ?? "")),
-          failure.replace(/^visual review failed:\s*/i, ""),
+          failure.startsWith("visual review failed:") ? failure.replace(/^visual review failed:\s*/i, "") : "",
         ]
           .map((repair) => repair.trim())
           .filter((repair, index, all) => repair.length > 0 && all.indexOf(repair) === index);
         const generationPrompt =
-          attempt === 0
+          repairs.length === 0
             ? basePrompt
             : `${basePrompt}\n\nRepair every issue found by visual review:\n` +
               repairs.map((repair) => `- ${repair}`).join("\n");
@@ -1019,7 +919,10 @@ async function runPlottingGeneration(
     }
 
     if (imagePath) {
-      const target = join(figuresDir, basename(imagePath));
+      const target = join(figuresDir, `${spec.figure_id}${extname(imagePath).toLowerCase()}`);
+      if (info.some((entry) => entry.name === basename(target))) {
+        throw new UserFacingError(`duplicate published figure: ${basename(target)}`);
+      }
       copyFileSync(imagePath, target);
       info.push({ name: basename(target), caption });
       say(options, `   ${spec.figure_id}: rendered ${basename(target)} (${bytes} bytes, ${route})`);
@@ -1034,6 +937,8 @@ async function runPlottingGeneration(
         critic_history: criticHistory,
         ...(provenance ? { generation_provenance: provenance } : {}),
         image_path: join("figures", basename(target)),
+        plan_sha256: digestValue(spec),
+        image_sha256: digestFile(target),
       });
     } else {
       say(options, `   ${spec.figure_id}: FAILED - ${failure || "unknown"}`);
@@ -1047,8 +952,11 @@ async function runPlottingGeneration(
         aspect_ratio: spec.aspect_ratio,
         critic_history: criticHistory,
         ...(provenance ? { generation_provenance: provenance } : {}),
+        plan_sha256: digestValue(spec),
       });
     }
+    writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), results);
+    writeJsonAtomic(join(workspace, ARTIFACTS.figuresInfo), info);
   }
 
   writeJsonAtomic(join(workspace, ARTIFACTS.plottingResults), results);

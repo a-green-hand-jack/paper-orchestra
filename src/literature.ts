@@ -2,6 +2,7 @@ import { execa } from "execa";
 import { UserFacingError } from "./errors.js";
 import type { Candidate, Outline } from "./artifacts.js";
 import { gateByRelevance } from "./relevance.js";
+import { planQueries } from "./queries.js";
 
 /**
  * Literature retrieval over Bohrium LKM (Literature Knowledge Mining).
@@ -22,7 +23,7 @@ const CALL_TIMEOUT_MS = 120_000;
 /** Fixed price per LKM call, in CNY. Published by the CLI's own docs. */
 export const LKM_CALL_PRICE_CNY = 0.05;
 
-interface LkmPaper {
+export interface LkmPaper {
   id?: string;
   en_title?: string;
   zh_title?: string;
@@ -68,40 +69,48 @@ async function lkmSearch(query: string, topK: number, scopes: string): Promise<L
           "`npm i -g @dptech-corp/bohr-cli`, then `bohr auth login`.",
       );
     }
-    // A single failed query degrades the candidate set; it must not abort a
-    // stage that other queries can still populate.
-    return [];
+    // Do not include subprocess output: provider diagnostics may contain secrets.
+    throw new UserFacingError("Bohrium LKM search failed (process error or timeout).");
   }
 
-  const payload = parseEnvelope(stdout);
-  if (!payload) return [];
-  const papers = (payload.papers ?? {}) as Record<string, LkmPaper>;
-  return Object.values(papers);
+  return parseLkmSearchOutput(stdout);
 }
 
-function parseEnvelope(stdout: string): Record<string, unknown> | null {
+export function parseLkmSearchOutput(stdout: string): LkmPaper[] {
   // Scan from the end: progress documents precede the real payload.
   const starts: number[] = [];
   for (let at = 0; at < stdout.length; at += 1) {
     if (stdout[at] === "{") starts.push(at);
   }
   for (let at = starts.length - 1; at >= 0; at -= 1) {
+    let parsed: { ok?: boolean; data?: { code?: number; papers?: unknown } };
     try {
-      const parsed = JSON.parse(stdout.slice(starts[at] as number)) as {
-        ok?: boolean;
-        data?: Record<string, unknown>;
-      };
-      if (parsed.data) return parsed.data;
+      parsed = JSON.parse(stdout.slice(starts[at] as number));
     } catch {
       continue;
     }
+    if (parsed.ok !== true || !parsed.data ||
+        (parsed.data.code !== undefined && parsed.data.code !== 0)) {
+      throw new UserFacingError("Bohrium LKM search returned an unsuccessful envelope.");
+    }
+    const papers = parsed.data.papers;
+    if (!papers || typeof papers !== "object" ||
+        Object.values(papers).some((paper) => !paper || typeof paper !== "object" || Array.isArray(paper) ||
+          ["id", "en_title", "zh_title", "en_abstract", "authors", "doi", "publication_name",
+            "cover_date_start", "publication_date"].some((field) => {
+            const value = (paper as Record<string, unknown>)[field];
+            return value != null && typeof value !== "string";
+          }))) {
+      throw new UserFacingError("Bohrium LKM search returned malformed papers.");
+    }
+    return Object.values(papers) as LkmPaper[];
   }
-  return null;
+  throw new UserFacingError("Bohrium LKM search returned no valid JSON envelope.");
 }
 
 /** Title normalization for dedup: `literature_review_agent.py:_normalize_title`. */
 export function normalizeTitle(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return title.normalize("NFKD").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 const STOPWORDS = new Set([
@@ -393,7 +402,16 @@ export interface RetrievalOptions {
   readonly outline?: Outline;
   /** Admission threshold as a fraction of the best score. See RELEVANCE_FRACTION. */
   readonly relevanceFraction?: number;
+  readonly previousCandidates?: readonly Candidate[];
+  /** Successfully completed queries for this run; failed queries remain retryable. */
+  readonly previousQueries?: readonly string[];
+  readonly cache?: RetrievalCache;
+  /** Injectable transport for offline tests; production defaults to the CLI. */
+  readonly search?: (query: string, topK: number, scopes: string) => Promise<LkmPaper[]>;
 }
+
+/** Raw successful responses, keyed by [query, topK, scopes]; JSON-serializable. */
+export type RetrievalCache = Record<string, { papers: LkmPaper[]; retrievedAt: string }>;
 
 export interface RetrievalResult {
   readonly candidates: Candidate[];
@@ -412,7 +430,24 @@ export interface RetrievalResult {
    * A query with a yield of zero spent money for nothing, which is the signal
    * needed to tune query construction rather than guess at it.
    */
-  readonly perQuery: Array<{ query: string; retrieved: number; admitted: number }>;
+  readonly perQuery: Array<{ query: string; retrieved: number; admitted: number; status: "success" | "cached" | "failed" }>;
+  readonly completedQueries: string[];
+  readonly pendingQueries: string[];
+  readonly cache: RetrievalCache;
+  readonly failures: Array<{ query: string; message: string }>;
+}
+
+export class LiteratureRetrievalError extends UserFacingError {
+  constructor(readonly result: RetrievalResult) {
+    super(`Literature retrieval failed for ${result.failures.length} query(ies); partial results are available for checkpointing, not proof of coverage.`);
+  }
+}
+
+/** The controller supplies uncovered topics and the remaining call allowance. */
+export function retrieveLiteratureFollowup(
+  options: Omit<RetrievalOptions, "queries" | "outline"> & { outline: Outline; uncoveredTopics: readonly string[] },
+): Promise<RetrievalResult> {
+  return retrieveLiterature({ ...options, queries: planQueries(options.outline, options.uncoveredTopics).queries });
 }
 
 /**
@@ -424,23 +459,59 @@ export interface RetrievalResult {
  * bibtex-generation time.
  */
 export async function retrieveLiterature(options: RetrievalOptions): Promise<RetrievalResult> {
+  if (!Number.isSafeInteger(options.maxCalls) || options.maxCalls < 0) {
+    throw new RangeError("maxCalls must be a nonnegative integer");
+  }
+  if (options.relevanceFraction !== undefined && (!Number.isFinite(options.relevanceFraction) ||
+      options.relevanceFraction < 0 || options.relevanceFraction > 1)) {
+    throw new RangeError("relevance fraction must be between 0 and 1");
+  }
   const topK = options.topK ?? 10;
   const scopes = options.scopes ?? "abstract,conclusion";
   const byTitle = new Map<string, MutableCandidate>();
   const dropped = { anachronistic: 0, noAbstract: 0, duplicate: 0, irrelevant: 0 };
   const retrievedPerQuery = new Map<string, number>();
+  const statuses = new Map<string, "success" | "cached" | "failed">();
+  const cache: RetrievalCache = structuredClone(options.cache ?? {});
+  const queryId = (query: string): string => query.trim().toLowerCase().replace(/\s+/g, " ");
+  const completed = new Map((options.previousQueries ?? []).map((query) => [queryId(query), query]));
+  const attempted = new Set<string>();
+  const pendingQueries: string[] = [];
+  const failures: RetrievalResult["failures"] = [];
   let callsMade = 0;
 
-  for (const query of options.queries) {
-    if (callsMade >= options.maxCalls) break;
-    callsMade += 1;
+  for (const original of options.queries) {
+    const query = original.trim();
+    const id = queryId(query);
+    if (!id || attempted.has(id) || completed.has(id)) continue;
+    attempted.add(id);
+    const cacheKey = JSON.stringify([id, topK, scopes]);
+    let response = cache[cacheKey];
+    if (!response && callsMade >= options.maxCalls) {
+      pendingQueries.push(query);
+      continue;
+    }
     retrievedPerQuery.set(query, 0);
+    statuses.set(query, response ? "cached" : "success");
+    if (!response) {
+      callsMade += 1;
+      try {
+        response = { papers: await (options.search ?? lkmSearch)(query, topK, scopes), retrievedAt: new Date().toISOString() };
+        cache[cacheKey] = structuredClone(response);
+      } catch {
+        statuses.set(query, "failed");
+        failures.push({ query, message: "LKM search failed; check provider availability, authorization, and response format." });
+        pendingQueries.push(query);
+        continue;
+      }
+    }
+    completed.set(id, query);
     options.onProgress?.(
       `   lkm ${callsMade}/${Math.min(options.queries.length, options.maxCalls)}: ` +
         `${query.slice(0, 68)}`,
     );
 
-    for (const paper of await lkmSearch(query, topK, scopes)) {
+    for (const paper of response.papers) {
       const title = (paper.en_title || paper.zh_title || "").trim();
       if (!title) continue;
 
@@ -475,11 +546,11 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
         title,
         provider: "bohrium_lkm",
         provider_id: paper.id ?? paper.doi ?? normalized,
-        retrieved_at: new Date().toISOString(),
+        retrieved_at: response.retrievedAt,
         authors: (paper.authors ?? "").split("|").map((a) => a.trim()).filter(Boolean),
         venue: cleanVenue(paper.publication_name ?? ""),
         year: paperYear(paper),
-        abstract: abstract.slice(0, 1500),
+        abstract,
         doi: paper.doi ?? "",
         matched_queries: [query],
         relevance: 0,
@@ -524,6 +595,7 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
   const perQuery = [...retrievedPerQuery.entries()].map(([query, retrieved]) => ({
     query,
     retrieved,
+    status: statuses.get(query)!,
     admitted: records.filter(
       (record) =>
         record.matched_queries.includes(query) &&
@@ -535,9 +607,47 @@ export async function retrieveLiterature(options: RetrievalOptions): Promise<Ret
   // corpus yields the same keys; the WRITER, though, is told the sources arrive
   // most-relevant-first, and that has to be true. Order the output by relevance
   // after keying, which changes presentation without disturbing determinism.
-  const keyed = assignCitationKeys(records).sort((a, b) => b.relevance - a.relevance);
+  const keyed = mergeCandidates(options.previousCandidates ?? [], assignCitationKeys(records))
+    .sort((a, b) => b.relevance - a.relevance);
 
-  return { candidates: keyed, callsMade, dropped, anchorRescued, perQuery };
+  const result = { candidates: keyed, callsMade, dropped, anchorRescued, perQuery,
+    completedQueries: [...completed.values()], pendingQueries, cache, failures };
+  if (failures.length > 0) throw new LiteratureRetrievalError(result);
+  return result;
+}
+
+/** Preserve previously published keys/content; coalesce new records by identity. */
+export function mergeCandidates(previous: readonly Candidate[], incoming: readonly Candidate[]): Candidate[] {
+  const out = previous.map((candidate) => ({ ...candidate, matched_queries: [...candidate.matched_queries] }));
+  const used = new Set(out.map((candidate) => candidate.citation_key));
+  const identities = new Map<string, Candidate>();
+  const identifiers = (candidate: Candidate): string[] => {
+    const title = normalizeTitle(candidate.title);
+    const doi = candidate.doi.replace(/[{}\\]/g, "").trim().toLowerCase()
+      .replace(/^(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)/, "");
+    return [title ? `title:${title}` : "", doi ? `doi:${doi}` : "",
+      candidate.provider_id ? `${candidate.provider}:${candidate.provider_id}` : ""].filter(Boolean);
+  };
+  for (const candidate of out) {
+    for (const id of identifiers(candidate)) if (!identities.has(id)) identities.set(id, candidate);
+  }
+  for (const candidate of incoming) {
+    const ids = identifiers(candidate);
+    const existing = ids.map((id) => identities.get(id)).find(Boolean);
+    if (existing) {
+      existing.matched_queries = [...new Set([...existing.matched_queries, ...candidate.matched_queries])];
+      for (const id of ids) identities.set(id, existing);
+      continue;
+    }
+    let key = candidate.citation_key;
+    let suffix = 1;
+    while (used.has(key)) key = `${candidate.citation_key}_${suffix++}`;
+    const added = { ...candidate, citation_key: key, matched_queries: [...candidate.matched_queries] };
+    used.add(key);
+    out.push(added);
+    for (const id of ids) identities.set(id, added);
+  }
+  return out;
 }
 
 /**
@@ -556,11 +666,16 @@ export function assignCitationKeys(records: readonly MutableCandidate[]): Candid
     const base = citationKey(record.authors.join(" | "), record.year, record.title);
     let key = base;
     if (used.has(key)) {
-      let suffix = "a";
-      while (used.has(`${key}${suffix}`)) {
-        suffix = String.fromCharCode(suffix.charCodeAt(0) + 1);
-      }
-      key = `${key}${suffix}`;
+      let index = 0;
+      do {
+        let suffix = "";
+        let value = index++;
+        do {
+          suffix = String.fromCharCode(97 + value % 26) + suffix;
+          value = Math.floor(value / 26) - 1;
+        } while (value >= 0);
+        key = `${base}${suffix}`;
+      } while (used.has(key));
     }
     used.add(key);
     out.push({ ...record, citation_key: key });

@@ -73,8 +73,7 @@ export type Paths = ReturnType<typeof paths>;
 export const ARTIFACTS = {
   /**
    * The map into the author's materials: what to read, the grounded facts, and
-   * what the materials do not say. Absent when the input was small enough that
-   * every stage can simply read all of it.
+   * what the materials do not say. Required even for small inputs.
    */
   materialsMap: join(BRAIN_DIR, "raw", "materials.json"),
   outline: join(BRAIN_DIR, "raw", "outline.json"),

@@ -1,245 +1,201 @@
-<!--
-Originally ported from methods/prompts/outline_agent.py, which has since been removed.
+<!-- Source of truth. Controller placeholder: {cutoff_date}. -->
 
-THIS FILE IS THE SOURCE OF TRUTH for this prompt and is hand-edited.
-There is no generator to rerun: scripts/port_prompts.py was removed with
-its inputs.
+Plan an independent research paper for the selected venue. Write one valid JSON
+object directly to `.brain/raw/outline.json`, not into the conversation.
 
-Controller-substituted placeholders: {cutoff_date}
--->
+Read the commissioning brief when supplied, `.brain/raw/materials.json`, the
+actual source and extracted results it indexes, `template/template.tex`, and
+template guidelines when present. A materials map is navigation, not a substitute
+for opening code, configurations, results and notes. Never read or reuse an
+inherited finished manuscript, including PDF, LaTeX body or extracted equivalents.
+The template provides formatting and structure, never research prose.
 
-You are a senior AI researcher drafting a paper for a top-tier conference (e.g., NeurIPS, ICML, CVPR, ICLR). 
-Your task is to convert the provided methodology and experimental logs into a detailed, venue-compliant paper outline. You must output a single JSON object.
+## Requirements And Research
 
-Your inputs are:
-1.  **The author's materials**, under `.brain/input/`: their notes, code, scripts, tables and logs, in the structure they used. This is the ground truth for both the methodology and every measured number. Read the files themselves.
-2.  `.brain/raw/materials.json`, when it is present: a map into those materials. `reading` says which files are worth opening and what each contributes, `facts` is the ledger of measured numbers with a verbatim quote for each, and `unresolved` records what the materials never say. Use it to find your way; it is an index, not a substitute for the files. When it is absent the materials are small enough to read in full.
-3.  `template.tex`: The target structure. You must use the section commands (e.g., `\section{...}`) found here as your primary skeleton.
-4.  `guidelines.md`, when the template ships one: Formatting rules, specific page limits (for word count calculation), and mandatory sections.
+Record `requirements` as objects with `requirement`, `source` (one of `cli`,
+`brief`, `template`, `inferred`), and `verification` strings. Explicit locked CLI
+options win over the brief, which wins over inferred preferences. Follow applicable
+venue rules, page limits, anonymity and required sections. Record conflicts rather
+than silently discarding a requirement. Never invent author identities or declarations.
 
-### Processing Directives
+Missing author metadata means an anonymous review manuscript, not an author-filling
+task. Do not plan placeholder author details or sections saying "to be completed
+by authors". Omit unsupported optional personal declarations; do not infer funding,
+ethics approval or absence of conflicts from silence. Keep brief-required sections.
+If a venue or brief requires an authoritative declaration that is unavailable,
+record the actual blocker in `requirements`, including what evidence is needed for
+verification. Do not resolve it with boilerplate or silently mark it optional.
+Plan scientific content, not prose about the pipeline, scaffold or automatic venue
+choice. Preserve explicit research-provenance requirements such as no new simulations.
 
-Global Instruction: Do not analyze inputs in isolation. You must synthesize information across all provided documents for every step.
+Record `research_claims` as objects with `claim`, `evidence_paths` (nonempty array
+of actual workspace-relative files), and `limitations` (array of strings). Connect
+the method implementation, experiment configuration and results. Distinguish
+supported contributions from hypotheses and missing evidence. Do not plan new
+experiments or invent evaluations against literature-only baselines.
 
-#### Directive 0: Citation Target
+## Citation Plan
 
-Set `citation_target` to the number of DISTINCT sources this paper's argument
-actually needs. Judge it from the work, not from a habit:
+Set `citation_target` to the number of distinct sources the argument actually
+needs, not a fixed quota. Identify sources for datasets, baselines, metrics,
+architectures and prior-work claims that will appear in the paper. Do not pad
+citations or propose irrelevant searches. Respect the cutoff {cutoff_date}.
 
-* Every dataset, metric, optimizer, baseline and foundational architecture the
-  paper names needs a source.
-* Every claim about what prior work does or fails to do needs a source.
-* A related-work section that surveys a field needs more than one that
-  positions against three specific competitors.
+`citation_gaps` is only for unmet support for external prior-work claims actually
+asserted in the paper, expressed as specific search queries. It is not a list of
+original contributions, missing new experiments or unanswerable research questions.
+Do not demand an independently published identical formula or a universal correctness
+proof for the supplied original research. Describe an original supplied formula as
+a supplied tested result when the materials record those tests, with their actual
+scope; otherwise describe the derivation or proposal and its evidence boundaries.
+Cite external methodological foundations where relevant, without pretending those
+sources establish every detail of the original result.
 
-Do not pad it and do not lowball it. A paper that cites far more sources than
-its argument uses reads as padding; one that cites far fewer reads as
-unresearched. The controller enforces a floor derived from this number and from
-the citation hints you attach below, capped by how many sources retrieval
-actually found -- so a number well above what the plan supports simply makes
-the writing stage's job impossible.
+A gap may be resolved by a directly supporting citation or by narrowing/removing
+the unsupported external comparison. This must not remove requested research
+outcomes, required sections or the minimum citation target. An explicit user minimum
+of relevant citations remains mandatory; do not pad irrelevant citations or lower it.
+Budget exhaustion is not success and does not resolve a gap. If required support
+or the citation minimum cannot be met honestly, report the actual blocker.
 
-#### Directive 1: Plotting & Visualization Plan
-Synthesize the materials to identify the most compelling evidence.
-* Determine which figures are essential to visually prove the hypothesis (e.g., convergence rates, qualitative visual comparisons).
-* The `plot_type` MUST be exactly "plot" or "diagram". If it is a plot, specify the specific chart type (e.g., Radar Chart) inside the `objective`.
-* Choose `render_route` as `code` for quantitative plots whose exact values must remain auditable, or `text_to_image` for conceptual diagrams that benefit from image generation. Use `auto` only when either route is genuinely acceptable.
-* For `text_to_image`, provide a precise `generation_prompt` that describes the intended scientific content, labels, spatial relationships, and visual hierarchy without inventing results.
-* The `data_source` MUST be a list of workspace-relative paths to the files holding the
-  numbers this figure plots, for example `[".brain/input/tables/table_le.tex"]`. The
-  plotting stage is given exactly these paths and reads them for the data, so name the
-  file the numbers are actually in. An empty list means the figure needs no data.
-* Determine the ideal `aspect_ratio` for each figure. The aspect_ratio MUST be exactly one of: "1:1", "1:4", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9".
-* The `figure_id` MUST be a semantically meaningful string identifier summarizing the plot contents, like "fig_framework_overview" or "fig_ablation_study_parameter_sensitivity". It MUST NOT contain the word "Figure".
-* Output Focus: Create an array of objects for the `plotting_plan` key.
+Optional `citation_gap_resolutions` is an audit array of `{query, resolution, detail}`.
+`query` copies the original gap query; `resolution` is `cited` or `claim_narrowed`.
+For `cited`, detail must name the exact allowed citation key, the supported claim
+and its location. For `claim_narrowed`, detail must give the concrete revised claim
+(or identify the removed comparison) and its section/paragraph location, explaining
+why external support is no longer missing. Apply the revision in the section plan;
+do not merely declare the gap resolved. Preserve this audit for the literature stage.
 
-#### Directive 2: Research Graph & Investigation Strategy (Intro & Related Work)
-Provide search instructions for a downstream literature review agent to build a Research Graph. Do not write the actual paper content.
+Preserve the established `intro_related_work_plan` shape:
+- `introduction_strategy`: `hook_hypothesis`, `problem_gap_hypothesis`, `search_directions`.
+- `related_work_strategy`: `overview`, `subsections`.
+- Each related-work subsection: `subsection_title`, `methodology_cluster`,
+  `sota_investigation_mission`, `limitation_hypothesis`, `limitation_search_queries`,
+  `bridge_to_our_method`.
 
-Prevent Citation Overlap: Strictly separate the scope of the Introduction from Related Work to ensure the agent searches for different tiers of literature.
-*   Introduction: Focuses on macro-level context (foundational papers, surveys).
-*   Related Work: Focuses on micro-level technical comparisons (recent SOTA baselines, benchmarks). 
+Search directions and limitation queries are arrays of strings. Other fields
+above are strings. Treat alleged limitations of prior work as hypotheses to check,
+not facts. A literature gap never licenses making up a citation.
 
-* Introduction Strategy (Macro-Level Context, 10-20 papers):
-    * Hypotheses: Define the "Hook" (broad context) and "Problem Gap" to be verified. CRITICAL: Strictly scope the problem gap and claims to match the specific datasets and evaluations the materials actually record. Do not over-claim generalization.
-    * Search Directions: Provide 3-5 specific queries to find: 
-        1. Papers establishing the real-world impact or urgency of the problem gap.
-        2. Good survey or review papers on the topic.
-        3. 3-5 Foundational papers that established the sub-field.
-* Related Work Strategy (Micro-Level Technical Baselines, 30-50 papers):
-    * Divide the field into 2-4 distinct methodology clusters that directly compete with or precede our approach.
-    * For each cluster, define:
-        1.  Methodology Cluster Name: The technical category.
-        2.  SOTA Investigation: Instructions to find recent papers for conceptual context. CRITICAL TIMELINE RULE: Do not instruct searches for any papers published after {cutoff_date}. Furthermore, do NOT instruct the search for new "competitors" to beat if the materials do not record an evaluation against them.
-        3.  Limitation Hypothesis: The suspected failure point of these competing methods, based on the author's own account of their approach.
-        4.  Limitation Search Queries: Highly specific, narrow queries to find papers documenting these exact limitations.
-        5.  The Bridge: How our proposed method resolves this specific limitation.
-* Output Focus: Populate the `intro_related_work_plan` key.
+## Figures
 
-#### Directive 3: Section Writing Plan & Sizing Constraints
-Outline the remaining sections (Abstract, Methodology, Experiments, Conclusion, Appendix) into a detailed structural plan.
+Populate `plotting_plan` with figure objects retaining these fields:
+`figure_id`, `title`, `plot_type`, `render_route`, `data_source`, `objective`,
+`generation_prompt`, `aspect_ratio`.
 
-* Structural Hierarchy: If Subsection X.1 is created, X.2 is mandatory. Do not create orphaned subsections. Omit subsections entirely if a section does not require division.
-* Content Specificity: Explicitly reference source materials. 
-    * *Avoid:* "Describe the model."
-    * *Require:* "Formalize the Temporal-Aware Attention mechanism using Eq. 3 from `.brain/input/research_overview.md`."
-* Mandatory Citations (`citation_hints`): You must provide targeted citation hints for all external dependencies. Every hint must point to a single, unambiguous canonical paper. 
-    * Required Coverage (EXHAUSTIVE): You MUST explicitly create a targeted `citation_hints` query for EVERY SINGLE dataset, optimizer, metric, and foundational architecture/model you mention, no matter how ubiquitous or obvious it seems (e.g., AdamW, ResNet, ImageNet, CLIP, Transformer, LLaMA, GPT, LLaVA). If it appears anywhere in the materials, it MUST have a citation hint.
-        1. All baseline methods compared against.
-        2. All datasets evaluated on.
-        3. All standard metrics utilized.
-        4. All foundational algorithms, architectures (e.g., ResNet, Transformer), foundational models (e.g., LLMs, VLMs, Diffusion models), optimizers (e.g., AdamW), or frameworks built upon.
-    * Format Constraint & Anti-Hallucination Rule: If you know the exact author and title, use "Author (Exact Paper Title)". DO NOT guess or hallucinate authors. If you do not know the exact author, use this format: "research paper or technical report introducing '[Exact Model/Dataset/Metric Name]'".
-* Output Focus: Populate the `section_plan` key.
+Use unique filename-safe IDs such as `fig_method`. `plot_type` is `plot` or
+`diagram`; `render_route` is `code`, `text_to_image` or `auto`. Numeric charts must
+use `code` and actual result file paths in `data_source`. GPT text-to-image is
+for conceptual method/architecture diagrams, never numerical charts or simulated
+experimental images. Its `generation_prompt` must specify only supported modules,
+connections, labels and visual hierarchy. Use a W:H aspect ratio such as `16:9`.
+If automatic plotting is disabled, leave `plotting_plan` empty and plan around
+supplied figures. Missing figure inputs must not turn into invented evidence.
 
-Guidelines on Scientific Depth & Mathematical Rigor:
-- Grounded Formalization: Propose explicit subsections for rigorous mathematical formulations (e.g., loss functions, core algorithms, theoretical proofs). You must base these strictly on the materials; do not instruct the writing agent to include hallucinated variables or unsupported math.
+## Tables
 
-### Strict Output Format (JSON)
-You must output a single, valid JSON object with the following four top-level keys: "citation_target", "plotting_plan", "intro_related_work_plan", and "section_plan".
+Plan necessary main results, baseline comparisons and recorded ablations in
+`table_plan`, independently of the figure-generation flag. Read the actual result
+files. Choose a small, well-grounded table covering the needed evidence rather than
+a large speculative table. Rows contain source-backed data, not instructions for a
+later writer to guess. Never invent a baseline, run, column or value to fill space.
+The controller produces table files from this plan; writers include those files.
 
-Example Output:
+Each table has `table_id` (unique filename-safe ID), `title`, `caption`, `section`,
+`columns` (nonempty ordered string array, including units), `rows`, `source_paths`
+(nonempty array of actual workspace-relative files), and `calculation` (string,
+empty for direct measurements). Each row has `label`, `values` (ordered strings,
+finite numbers or null), and nonempty `source_paths`. Row labels are separate from
+columns; each values array must have exactly as many entries as columns. Null
+means unavailable, not zero. Keep recorded precision unless explicitly rounding.
 
+Use optional `column_verification` to make numeric provenance unambiguous. When
+present, it has exactly one entry per column, excluding the row label. Each entry
+is null (automatic inference, not a verification bypass) or an object containing
+only `selector`, `operation`, `decimals`, `ddof`, `index`. `operation` is required and is
+exactly `direct`, `min`, `max`, `mean`, `std`, `range`, or `mean_std`.
+
+For heterogeneous metrics sharing a value column, use **row.cell_verification**:
+an optional array with exactly one entry per row value, excluding the row label.
+A non-null cell object completely overrides that column's specification (no field
+merging); null inherits the column default, then automatic inference if no default
+exists. Column defaults, when present, must STILL match the number of columns:
+three entries for two columns are invalid even when every row has cell overrides.
+Never change recorded values to pass checking, or drop required research outcomes.
+
+- Read real JSON/CSV/TSV files or original plain `.txt`/`.log` research logs in each
+  row's `source_paths`. Do not cite a Markdown summary or invent a source filename.
+- `selector` is an exact CSV/TSV header (e.g. `energy`) or a JSON pointer such as
+  `/runs/*/energy` or `/runs/0/energy`. Escape JSON keys with `~0` for `~` and `~1`
+  for `/`. Selectors are paths, never formulas, JSONPath filters or code.
+- CSV header selection uses the exact row label when it occurs in the records;
+  if none match, all records are considered. An explicit JSON pointer selects
+  directly from the row's source files and does NOT filter by row label. Scope
+  source files or use indexed pointers to avoid mixing methods, splits or units.
+- `direct` needs a single distinct recorded value. For repeated observations use
+  the appropriate supported operation. `range` means the minimum and maximum
+  endpoints, not their difference; format the cell as `"1.20 to 3.40"`.
+- `mean_std` cells use `"2.30 +/- 0.40"`. For `std` and `mean_std`, set `ddof`
+  explicitly: 0 for population or 1 for sample; enough measurements must exist.
+- For a directly recorded log scalar, use `{"selector":"text:<literal line prefix>",
+  "operation":"direct","index":0}`. The controller requires exactly ONE matching
+  line across the original `source/*.txt`/`.log` files in that row's `source_paths`.
+  Prefixes must match from the start of the original line, including whitespace;
+  they are not regexes, substrings or searches for a desired number. `index` is a
+  zero-based numeric token AFTER the prefix, not a line occurrence. Omit it only
+  if exactly one numeric token follows the prefix. An absent, repeated, non-finite
+  or out-of-range match fails. No Markdown/normalized-text substitute or aggregation
+  over log lines is supported. `index` is invalid for JSON/CSV selectors.
+- Optional `decimals` is an integer from 0 to 100 for fixed-point display rounding,
+  including tiny scientific-notation measurements that need more than 12 places.
+  It may exceed the digits written in a numeric JSON value (trailing zeros are
+  immaterial). Preserve supported precision; it does not authorize changing units,
+  inventing significant digits, or changing a measurement to satisfy the verifier.
+- `calculation` may remain empty with explicit metadata. Vague calculation prose
+  is not sufficient. Unsupported transforms (including ratios, weighted means,
+  differences and unit conversions) cannot be made valid by describing them.
+  Keep only justified, verifiable cells; never guess a derived result. If needed
+  evidence cannot be verified, record the gap instead of fabricating a table.
+
+Example table entry:
 ```json
 {
-  "citation_target": 34,
-  "plotting_plan": [
-    {
-      "figure_id": "fig_teaser_fig_cross_modal_alignment_performance",
-      "title": "Teaser: Cross-Modal Alignment Performance",
-      "plot_type": "plot",
-      "render_route": "code",
-      "data_source": [".brain/input/tables/table_le.tex"],
-      "objective": "Visual summary (Radar Chart) demonstrating that our method achieves SOTA balance across 5 metrics.",
-      "generation_prompt": "",
-      "aspect_ratio": "16:9"
-    }
-  ],
-  "intro_related_work_plan": {
-    "introduction_strategy": {
-      "hook_hypothesis": "Video-LLMs are currently the dominant paradigm for short clips.",
-      "problem_gap_hypothesis": "Context window limits prevent scaling to >5s videos efficiently.",
-      "search_directions": [
-        "Find highly cited papers establishing the real-world impact of context limits in video generation",
-        "Search for published 'long-context video generation' surveys",
-        "Identify foundational papers establishing causal video generation"
-      ]
-    },
-    "related_work_strategy": {
-      "overview": "Investigate three specific paradigms to build a graph proving the necessity of our Sliding-Window approach.",
-      "subsections": [
-        {
-          "subsection_title": "2.1 Autoregressive Video Generation",
-          "methodology_cluster": "Discrete Tokenization & Transformers",
-          "sota_investigation_mission": "Identify the current SOTA autoregressive models from 2024-2025. Determine their maximum stable generation length.",
-          "limitation_hypothesis": "These models suffer from 'drift' or 'error propagation' because they lack bidirectional context.",
-          "limitation_search_queries": [
-            "Autoregressive video generation error propagation metrics",
-            "Causal masking limitations in temporal video transformers"
-          ],
-          "bridge_to_our_method": "Our method introduces bidirectional blocks to fix the hypothesized drift issue."
-        },
-        {
-          "subsection_title": "2.2 Diffusion-Based Editing Frameworks",
-          "methodology_cluster": "DDIM Inversion & Cross-Attention",
-          "sota_investigation_mission": "Find recent papers using DDIM inversion for editing. Identify the standard benchmarks they use.",
-          "limitation_hypothesis": "They fail at large structural changes because cross-attention maps are too rigid.",
-          "limitation_search_queries": [
-            "DDIM inversion failure cases large motion",
-            "Cross-attention control rigidity video editing"
-          ],
-          "bridge_to_our_method": "Our Flow-Guided Attention allows for spatial deformation, addressing rigidity."
-        }
-      ]
-    }
-  },
-  "section_plan": [
-    {
-      "section_title": "Abstract",
-      "subsections": [
-        {
-          "subsection_title": "Abstract Content",
-          "content_bullets": [
-            "Briefly state the problem of temporal inconsistency.",
-            "Introduce the proposed method.",
-            "Highlight key results."
-          ],
-          "citation_hints": []
-        }
-      ]
-    },
-    {
-      "section_title": "3. Methodology",
-      "subsections": [
-        {
-          "subsection_title": "3.1 Temporal-Aware Attention Mechanism",
-          "content_bullets": ["Define the query-key matching logic", "Explain the masking strategy"],
-          "citation_hints": [
-            "Vaswani et al. (Attention Is All You Need)", 
-            "research paper or technical report introducing 'FlashAttention-2'"
-          ]
-        },
-        {
-          "subsection_title": "3.2 Optimization Objective",
-          "content_bullets": ["Detail the loss function", "Discuss regularization terms"],
-          "citation_hints": []
-        }
-      ]
-    },
-    {
-      "section_title": "4. Experiments",
-      "subsections": [
-        {
-           "subsection_title": "4.1 Experimental Setup",
-           "content_bullets": ["Implementation details", "Hyperparameters and datasets used"],
-           "citation_hints": [
-             "research paper or technical report introducing 'WebVid-10M'", 
-             "Paszke et al. (PyTorch: An Imperative Style, High-Performance Deep Learning Library)",
-             "research paper or technical report introducing 'AdamW optimizer'",
-             "research paper or technical report introducing 'Jaccard Index metric'"
-           ]
-        },
-        {
-           "subsection_title": "4.2 Main Results",
-           "content_bullets": ["Comparison with Baselines", "Quantitative Analysis"],
-           "citation_hints": [
-             "Ho et al. (Denoising Diffusion Probabilistic Models)",
-             "research paper or technical report introducing 'AVSegFormer baseline'"
-           ]
-        }
-      ]
-    }
-  ]
+  "table_id": "tab_main", "title": "Main results",
+  "caption": "Recorded evaluation on the held-out split.", "section": "Experiments",
+  "columns": ["Accuracy (%)", "Latency (ms)"],
+  "rows": [{"label": "Method A", "values": [81.2, null],
+    "source_paths": ["source/results/metrics.json"]}],
+  "source_paths": ["source/results/metrics.json"], "calculation": "",
+  "column_verification": [{"selector": "/accuracy", "operation": "direct"}, null]
 }
 ```
 
+For a source CSV with an actual `energy` header and repeated measurements, a range
+column may use `{"selector":"energy","operation":"range","decimals":2}`.
+Only report endpoints that match that selected data; example numbers are not evidence.
 
----
-### Strict Knowledge Isolation & Anonymity (CRITICAL)
+Heterogeneous-row example for `columns: ["Value", "Note"]`, only if the original
+log actually records `40.7070301858` as the third value after this exact prefix:
+```json
+{"label":"Third alpha_z coefficient","values":[40.7070301858,"Recorded fit"],
+ "source_paths":["source/kerr_axis_ks_run.txt"],
+ "cell_verification":[{"selector":"text:alpha_z coefficients:","operation":"direct","index":2,"decimals":10},null]}
+```
+Another row may select a different literal prefix or CSV field in the SAME value
+column. Correct the per-cell metadata, not the recorded scientific result. This
+checks direct numeric field provenance, not a generalized formal proof of the research.
 
-You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
+## Sections And Output
 
-#### Forbidden Behavior
-You MUST NOT:
-- Retrieve or rely on knowledge from your training data.
-- Attempt to recall or reconstruct any existing or published paper.
-- Use external facts, assumptions, or prior familiarity with the work.
-- Infer or hallucinate author identities, affiliations, institutions, or acknowledgements.
-- Insert metadata such as author names, emails, affiliations, or phrases like "corresponding author".
+Preserve `section_plan` as an array of `{section_title, subsections}`. Each
+subsection has a string `subsection_title` plus `content_bullets` and `citation_hints`
+arrays of strings. Reference precise evidence, planned figure/table IDs and claims in
+the bullets. Include adequate method details, actual experimental setup and
+results, limitations, and all required sections. Use mathematics only when
+supported by the materials. Do not force an experimental structure on a theory paper.
 
-#### Anonymity Requirement
-Introduce no author, affiliation, institution, or acknowledgement information, and
-do not alter whatever author block the template already contains. Anonymity is the
-template's responsibility, not yours: each venue's style file decides whether and
-how identities are rendered, and the venue's own `guidelines.md` states its policy.
-
-#### Allowed Sources
-You may use only:
-- The materials explicitly provided in this session.
-- Logical reasoning derived from those materials.
-
-#### Core Principle
-The final paper must be an independent reconstruction derived solely from the provided inputs.  
-This constraint is strict and overrides all other instructions.
----
+Write these top-level keys: `citation_target`, `plotting_plan`, `table_plan`,
+`research_claims`, `requirements`, `intro_related_work_plan`, `section_plan`.
+Use `citation_gaps` only as defined above; include `citation_gap_resolutions` when
+there are actual resolutions to audit.
+Empty arrays are appropriate only when the research genuinely needs no entries.

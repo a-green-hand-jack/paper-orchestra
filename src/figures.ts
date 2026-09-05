@@ -1,6 +1,7 @@
 import { execa } from "execa";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { constants, copyFileSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { homedir } from "node:os";
 
 /**
  * Controller-owned execution of model-written matplotlib scripts.
@@ -37,6 +38,7 @@ export function resolveFigureRoute(spec: {
   plot_type: "plot" | "diagram";
   render_route?: "auto" | FigureRoute;
 }): FigureRoute {
+  if (spec.plot_type === "plot") return "code";
   if (spec.render_route === "code" || spec.render_route === "text_to_image") {
     return spec.render_route;
   }
@@ -73,6 +75,29 @@ export interface RenderRequest {
   readonly code: string;
   /** Directory the script runs in and writes to. Created if absent. */
   readonly workDir: string;
+  /** Controller-selected absolute inputs, staged under data/<relative name>. */
+  readonly dataFiles?: readonly { path: string; name: string }[];
+}
+
+/** Pure publication filename validation; uniqueness belongs to the figure plan. */
+export function figurePublicationName(figureId: string, extension = ".pdf"): string {
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(figureId) ||
+    !IMAGE_EXTENSIONS.some((allowed) => allowed === extension)) {
+    throw new Error("unsafe figure ID or publication extension");
+  }
+  return `${figureId}${extension}`;
+}
+
+function rejectSymlinkTraversal(path: string): void {
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) throw new Error("symlink traversal is not allowed");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
 }
 
 export interface RenderResult {
@@ -123,13 +148,17 @@ export function suspiciousPaths(code: string): string[] {
  *
  * `MPLBACKEND=Agg` because there is no display and the default backend would
  * fail or block. `MPLCONFIGDIR` is scoped so a script cannot leave state in
- * the user's matplotlib config between runs. The proxy variables are cleared
- * rather than set: a plotting script has no business fetching anything, and an
- * inherited proxy is the usual reason one appears to hang.
+ * the user's matplotlib config between runs. Only PATH is inherited to retain
+ * the selected Python installation; credentials and Python startup settings are
+ * never inherited. HOME and caches belong to this attempt.
  */
 function renderEnv(workDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: workDir,
+    LANG: "C.UTF-8",
+    PYTHONNOUSERSITE: "1",
+    XDG_CACHE_HOME: join(workDir, ".cache"),
     MPLBACKEND: "Agg",
     MPLCONFIGDIR: join(workDir, ".mplconfig"),
     // Python imports workDir/sitecustomize.py before the generated script.
@@ -137,11 +166,6 @@ function renderEnv(workDir: string): NodeJS.ProcessEnv {
     // an OS network namespace is unavailable to an unprivileged process.
     PYTHONPATH: workDir,
   };
-  for (const key of [
-    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy",
-  ]) {
-    delete env[key];
-  }
   return env;
 }
 
@@ -150,7 +174,7 @@ function producedImages(workDir: string): string[] {
   return readdirSync(workDir)
     .filter((name) => name.toLowerCase().endsWith(".pdf"))
     .map((name) => join(workDir, name))
-    .filter((path) => statSync(path).isFile())
+    .filter((path) => lstatSync(path).isFile())
     .sort((a, b) => statSync(b).size - statSync(a).size);
 }
 
@@ -162,8 +186,41 @@ function producedImages(workDir: string): string[] {
  * other figures can still complete.
  */
 export async function renderFigure(request: RenderRequest): Promise<RenderResult> {
-  const { figureId, workDir } = request;
+  const { figureId } = request;
+  const workDir = resolve(request.workDir);
   const code = extractPythonCode(request.code);
+
+  try {
+    figurePublicationName(figureId);
+    rejectSymlinkTraversal(workDir);
+    const names: string[] = [];
+    for (const file of request.dataFiles ?? []) {
+      if (!isAbsolute(file.path) || file.path.split(/[\\/]/).includes("..")) {
+        throw new Error("data input path must be absolute without parent traversal");
+      }
+      if (!file.name || file.name.includes("\\") || file.name.includes(":") ||
+        /[\x00-\x1f\x7f]/.test(file.name) ||
+        file.name.split("/").some((part) => !part || part === "." || part === "..")) {
+        throw new Error("unsafe data file name");
+      }
+      const name = file.name.toLowerCase();
+      if (names.some((other) => other === name || other.startsWith(`${name}/`) || name.startsWith(`${other}/`))) {
+        throw new Error("data output path collision");
+      }
+      names.push(name);
+      const source = resolve(file.path);
+      if (source === workDir || source.startsWith(`${workDir}${sep}`)) {
+        throw new Error("data input collides with the render output directory");
+      }
+      rejectSymlinkTraversal(source);
+      if (!lstatSync(source).isFile()) throw new Error("data input must be a regular file");
+    }
+  } catch (error) {
+    return {
+      figureId, ok: false, imagePath: null, bytes: 0,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 
   if (!code) {
     return {
@@ -185,111 +242,136 @@ export async function renderFigure(request: RenderRequest): Promise<RenderResult
       error:
         `the script contains ${suspicious.join(" and ")}. Write a self-contained ` +
         "script that only saves into its own directory with a relative filename, " +
-        "and that fetches nothing: embed the data as literals in the script.",
+        "and that fetches nothing: read selected inputs from relative data/<name> paths.",
     };
   }
 
   // Rebuild the directory each time so a previous attempt's output cannot be
   // mistaken for this one's -- the same reasoning as the LaTeX build dir.
-  rmSync(workDir, { recursive: true, force: true });
-  mkdirSync(workDir, { recursive: true });
-
-  const scriptPath = join(workDir, `${figureId}.py`);
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(
-    join(workDir, "sitecustomize.py"),
-    [
-      "import socket",
-      "def _paper_orchestra_network_disabled(*args, **kwargs):",
-      "    raise RuntimeError('network disabled by PaperOrchestra')",
-      "socket.create_connection = _paper_orchestra_network_disabled",
-      "socket.getaddrinfo = _paper_orchestra_network_disabled",
-      "socket.socket.connect = _paper_orchestra_network_disabled",
-      "socket.socket.connect_ex = _paper_orchestra_network_disabled",
-    ].join("\n"),
-    "utf8",
-  );
-  writeFileSync(scriptPath, code, "utf8");
-
-  let stderr = "";
   try {
-    // The script's basename, not `scriptPath`: `cwd` is already `workDir`, so a
-    // path here would be resolved against it. When `workDir` is relative that
-    // produced `<workDir>/<workDir>/<figureId>.py` and python3 could not open
-    // its own script. Passing the basename is correct whatever `workDir` is,
-    // and keeps host paths out of any error text the model is shown.
-    const result = await execa("python3", [basename(scriptPath)], {
-      cwd: workDir,
-      env: renderEnv(workDir),
-      timeout: RENDER_TIMEOUT_MS,
-      reject: false,
-    });
-    stderr = result.stderr ?? "";
-
-    if (result.exitCode !== 0) {
-      return {
-        figureId,
-        ok: false,
-        imagePath: null,
-        bytes: 0,
-        error: `the script exited ${result.exitCode}: ${lastTraceback(stderr)}`,
-      };
+    rmSync(workDir, { recursive: true, force: true });
+    mkdirSync(workDir, { recursive: true });
+    for (const file of request.dataFiles ?? []) {
+      const target = join(workDir, "data", file.name);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(file.path, target, constants.COPYFILE_EXCL);
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("ENOENT")) {
-      return {
-        figureId,
-        ok: false,
-        imagePath: null,
-        bytes: 0,
-        error: "python3 is not on PATH, so no figure can be rendered",
-      };
-    }
-    return {
-      figureId,
-      ok: false,
-      imagePath: null,
-      bytes: 0,
-      error: `the script did not finish within ${RENDER_TIMEOUT_MS / 1000}s`,
-    };
-  }
 
-  const images = producedImages(workDir);
-  const best = images[0];
-  if (!best) {
-    const rasterOnly = readdirSync(workDir).some((name) =>
-      [".png", ".jpg", ".jpeg"].some((ext) => name.toLowerCase().endsWith(ext)),
+    const scriptPath = join(workDir, `${figureId}.py`);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(workDir, "sitecustomize.py"),
+      [
+        "import socket",
+        "def _paper_orchestra_network_disabled(*args, **kwargs):",
+        "    raise RuntimeError('network disabled by PaperOrchestra')",
+        "socket.create_connection = _paper_orchestra_network_disabled",
+        "socket.getaddrinfo = _paper_orchestra_network_disabled",
+        "socket.socket.connect = _paper_orchestra_network_disabled",
+        "socket.socket.connect_ex = _paper_orchestra_network_disabled",
+      ].join("\n"),
+      "utf8",
     );
+    writeFileSync(scriptPath, code, "utf8");
+
+    let stderr = "";
+    try {
+      const env = renderEnv(workDir);
+      // Locate installed user libraries without loading site hooks or executing
+      // source material. Adding the directory directly does not process .pth files.
+      const libraries = await execa("python3", ["-I", "-S", "-c",
+        "import site; print(site.getusersitepackages())"], {
+        cwd: workDir,
+        env: { PATH: env.PATH, HOME: homedir() },
+        extendEnv: false,
+        timeout: 30_000,
+      });
+      const userSite = libraries.stdout.trim();
+      if (isAbsolute(userSite)) env.PYTHONPATH = `${workDir}${delimiter}${userSite}`;
+      // The script's basename, not `scriptPath`: `cwd` is already `workDir`, so a
+      // path here would be resolved against it. When `workDir` is relative that
+      // produced `<workDir>/<workDir>/<figureId>.py` and python3 could not open
+      // its own script. Passing the basename is correct whatever `workDir` is,
+      // and keeps host paths out of any error text the model is shown.
+      const result = await execa("python3", [basename(scriptPath)], {
+        cwd: workDir,
+        env,
+        extendEnv: false,
+        timeout: RENDER_TIMEOUT_MS,
+        reject: false,
+      });
+      stderr = result.stderr ?? "";
+
+      if (result.exitCode !== 0) {
+        return {
+          figureId,
+          ok: false,
+          imagePath: null,
+          bytes: 0,
+          error: `the script exited ${result.exitCode}: ${lastTraceback(stderr)}`,
+        };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("ENOENT")) {
+        return {
+          figureId,
+          ok: false,
+          imagePath: null,
+          bytes: 0,
+          error: "python3 is not on PATH, so no figure can be rendered",
+        };
+      }
+      return {
+        figureId,
+        ok: false,
+        imagePath: null,
+        bytes: 0,
+        error: `the script did not finish within ${RENDER_TIMEOUT_MS / 1000}s`,
+      };
+    }
+
+    const images = producedImages(workDir);
+    const best = images[0];
+    if (!best) {
+      const rasterOnly = readdirSync(workDir).some((name) =>
+        [".png", ".jpg", ".jpeg"].some((ext) => name.toLowerCase().endsWith(ext)),
+      );
+      return {
+        figureId,
+        ok: false,
+        imagePath: null,
+        bytes: 0,
+        error:
+          (rasterOnly
+            ? "the code-generation route must produce a PDF, but the script saved only a raster image. "
+            : "the script ran without error but saved no PDF. ") +
+          "End it with " +
+          `plt.savefig("${figureId}.pdf", bbox_inches="tight", dpi=300) using a ` +
+          "relative filename.",
+      };
+    }
+
+    const bytes = statSync(best).size;
+    if (bytes < MIN_FIGURE_BYTES) {
+      return {
+        figureId,
+        ok: false,
+        imagePath: best,
+        bytes,
+        error:
+          `the saved image is only ${bytes} bytes, which means an empty canvas. ` +
+          "Plot the data before saving, and do not call plt.close() or plt.clf() first.",
+      };
+    }
+
+    return { figureId, ok: true, imagePath: best, bytes, error: null };
+  } catch (error) {
     return {
-      figureId,
-      ok: false,
-      imagePath: null,
-      bytes: 0,
-      error:
-        (rasterOnly
-          ? "the code-generation route must produce a PDF, but the script saved only a raster image. "
-          : "the script ran without error but saved no PDF. ") +
-        "End it with " +
-        `plt.savefig("${figureId}.pdf", bbox_inches="tight", dpi=300) using a ` +
-        "relative filename.",
+      figureId, ok: false, imagePath: null, bytes: 0,
+      error: error instanceof Error ? error.message : String(error)
     };
   }
-
-  const bytes = statSync(best).size;
-  if (bytes < MIN_FIGURE_BYTES) {
-    return {
-      figureId,
-      ok: false,
-      imagePath: best,
-      bytes,
-      error:
-        `the saved image is only ${bytes} bytes, which means an empty canvas. ` +
-        "Plot the data before saving, and do not call plt.close() or plt.clf() first.",
-    };
-  }
-
-  return { figureId, ok: true, imagePath: best, bytes, error: null };
 }
 
 /**

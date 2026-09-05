@@ -8,7 +8,7 @@ Controller-substituted placeholders: {figure_id}, {title}, {objective}, {aspect_
 -->
 
 Role: Lead Visual Designer for a top-tier AI conference (CVPR/NeurIPS/ICLR).
-Task: Write a self-contained Python script that renders ONE publication-quality figure.
+Task: Write a Python script that renders ONE publication-quality figure from actual results.
 
 ## The figure to produce
 
@@ -19,9 +19,17 @@ Task: Write a self-contained Python script that renders ONE publication-quality 
 * **data source**: {data_source}
 
 Read the files named by `data_source` to obtain the actual numbers. They are
-workspace-relative paths into the author's own materials under `.brain/input/`.
+workspace-relative paths into the author's permitted source or extracted results.
 If `data_source` names no file, the figure is conceptual and must not assert a
 measured value.
+
+These source paths are for your workspace reading tools. At execution, the
+controller copies this figure's declared `data_source` files into the script's
+work directory under `data/`. Use the controller-supplied source-to-runtime mapping
+for script reads; do not guess whether a copy uses a basename or preserved path.
+The mapping describes files available when the controller runs the script, not
+additional workspace files for you to create. If a required mapping or source is
+missing, report that blocker rather than inventing data or an execution path.
 
 ## Absolute rules about data
 
@@ -31,13 +39,22 @@ measured value.
   a fabricated result, and it is worse than no figure at all.
 - If the materials do not carry enough data for the stated objective, render the
   subset that IS supported and keep the axes honest about it. Do not pad.
-- Embed the data as **literals in the script**. Do not read any external file,
-  fetch any URL, or import a dataset. The script must run with no network.
+- Load numeric arrays from the declared files copied under `data/`, using their
+  exact runtime paths. Do not retype datasets as literals or use synthetic fallback
+  arrays. Read actual CSV headers/JSON fields, and select the intended method,
+  split and units. Missing data must fail explicitly, not become zero.
+- Read no undeclared files, absolute paths or parent directories. Do not fetch
+  any URL or import a new dataset. The script runs with no network.
+- Calculations on existing measurements may use numpy, with source operands and
+  the calculation documented in script comments. Never run new experiments.
+- This per-figure code route is for exact numeric charts. GPT-generated conceptual
+  diagrams use a separate controller route and must not fabricate numerical evidence.
+- Never read or reuse inherited finished manuscript prose or its extracted equivalents.
 
 ## What the script must do
 
-- Use `matplotlib` (`numpy` is available). Do not import seaborn, pandas,
-  scienceplots or any package beyond matplotlib and numpy.
+- Use `matplotlib` and `numpy`, with Python standard-library readers such as
+  `csv` and `json`. Do not import seaborn, pandas, scienceplots or other third-party packages.
 - Save with `plt.savefig("{figure_id}.pdf", bbox_inches="tight", dpi=300)`,
   a **relative** filename, into the current directory. PDF is mandatory for
   this route; a PNG or JPEG output is rejected.
@@ -65,6 +82,10 @@ measured value.
 
 ## Output
 
-Return the complete script in one ```python fenced block, and nothing else.
-The controller executes it directly; any prose outside the fence is discarded,
-and a partial script simply fails.
+Return the complete script in one ```python fenced block, followed by one line
+beginning `Caption:` with the figure's plain-text caption (no `Figure N:` prefix).
+Describe the research evidence, not PaperOrchestra, scaffolds, workspaces or
+automatic template selection. Preserve explicitly required research provenance
+when relevant to the figure; do not invent personal declarations or author metadata.
+Do not write files with editing tools. The controller executes the script and
+writes the per-figure artifacts from what actually rendered.

@@ -3,7 +3,8 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 
 import { UserFacingError } from "./errors.js";
 import { walkFiles } from "./files.js";
-import { isNoiseDir } from "./input.js";
+import { isNoiseDir, isSensitive, materialRole } from "./input.js";
+import { safeSourcePath } from "./input-extraction.js";
 // The author/vendor boundary lives in one place. Template discovery needs the
 // same judgement the bibliography and figure searches need, and for the same
 // reason: a vendored dependency can contain a complete paper, a bibliography,
@@ -144,23 +145,26 @@ function scoreCandidate(root: string, rel: string, density: number): number {
 }
 
 /** Files `\input` or `\include`d by a template, resolved within the input. */
-function referencedFragments(root: string, main: string): string[] {
+function referencedFragments(root: string, main: string, allowed: ReadonlySet<string>): string[] {
   const found = new Set<string>();
   const queue = [main];
   while (queue.length > 0) {
     const current = queue.shift() as string;
     let body: string;
     try {
-      body = readFileSync(join(root, current), "utf8");
+      body = readFileSync(safeSourcePath(root, current), "utf8");
     } catch {
-      continue;
+      throw new UserFacingError(`unreadable template fragment: ${current}`);
     }
     for (const match of body.matchAll(/\\(?:input|include)\s*\{([^}]+)\}/g)) {
       const raw = (match[1] ?? "").trim();
-      if (!raw || raw.startsWith("/") || raw.includes("..")) continue;
+      if (!raw || raw.startsWith("/") || raw.includes("..") || raw.includes("\\")) {
+        throw new UserFacingError(`unsafe template reference in ${current}`);
+      }
       const withExt = extname(raw) ? raw : `${raw}.tex`;
       const rel = join(dirname(current), withExt);
-      if (found.has(rel) || !existsSync(join(root, rel))) continue;
+      if (!allowed.has(rel)) throw new UserFacingError(`excluded or missing template reference in ${current}`);
+      if (found.has(rel)) continue;
       found.add(rel);
       queue.push(rel);
     }
@@ -245,7 +249,7 @@ function supportFilesFor(
   for (const rel of sources) {
     let body: string;
     try {
-      body = readFileSync(join(root, rel), "utf8");
+      body = readFileSync(safeSourcePath(root, rel), "utf8");
     } catch {
       continue;
     }
@@ -286,7 +290,7 @@ function proximity(home: string, rel: string): number {
  * Everything belonging to the discovered template.
  */
 function attribute(root: string, main: string, all: readonly string[]): string[] {
-  const fragments = referencedFragments(root, main);
+  const fragments = referencedFragments(root, main, new Set(all));
   const claimed = new Set<string>([main, ...fragments]);
 
   for (const rel of supportFilesFor(root, [main, ...fragments], all)) claimed.add(rel);
@@ -313,8 +317,16 @@ export function discoverTemplate(input: string): TemplateDiscovery | null {
   const root = resolve(input);
   const all = walkFiles(root, {
     skipDirs: INTERNAL_DIRS,
-    skipDir: isNoiseDir,
+    skipDir: (name) => isNoiseDir(name) || isSensitive(name),
     onUnsafe: "skip",
+  }).filter((rel) => {
+    if (isSensitive(rel) || materialRole(rel) === "manuscript") return false;
+    if (extname(rel).toLowerCase() !== ".tex") return true;
+    try {
+      const abs = safeSourcePath(root, rel);
+      if (statSync(abs).size > 256 * 1024) return false;
+      return materialRole(rel, readFileSync(abs, "utf8")) !== "manuscript";
+    } catch { return false; }
   });
 
   const candidates: TemplateCandidate[] = [];
@@ -322,11 +334,15 @@ export function discoverTemplate(input: string): TemplateDiscovery | null {
     if (extname(rel).toLowerCase() !== ".tex") continue;
     let body: string;
     try {
-      body = readFileSync(join(root, rel), "utf8");
+      body = readFileSync(safeSourcePath(root, rel), "utf8");
     } catch {
       continue;
     }
     if (!isMainDocument(body)) continue;
+    if (materialRole(rel, body) !== "template") continue;
+    // Validate the complete include graph, not only the main file's edges.
+    try { referencedFragments(root, rel, new Set(all)); }
+    catch { continue; }
     const density = proseDensity(body);
     candidates.push({
       path: rel,

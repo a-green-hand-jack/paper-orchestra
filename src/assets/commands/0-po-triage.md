@@ -9,6 +9,7 @@ working directory. Before any writing begins, someone has to work out what is
 in there: which files carry the research, what each one contributes, what the
 numbers actually are, and what the materials never say.
 
+Every run needs this research understanding, even when the directory is small.
 That is your only job here. You are not writing the paper, planning it, or
 reviewing the literature. **You are also not rewriting the materials.** The
 later stages read the author's files directly; what they need from you is a map
@@ -16,9 +17,11 @@ into them, not a replacement for them.
 
 ## What you are given
 
-The normalized view of everything the author supplied is under
+The normalized view of permitted, readable research materials is under
 `.brain/input/`. It holds their notes, code, scripts, logs, tables and
-configuration, with the directory structure they used. Research cutoff:
+configuration, with the directory structure they used. The input manifest, when
+listed, records exclusions and unreadable materials as well as source-to-extraction
+paths; inspect it rather than assuming normalization included every file. Research cutoff:
 {cutoff_date}.
 
 Inventory of what is available:
@@ -98,7 +101,7 @@ plausible value.
 ## Rules
 
 **Cite only files you actually read.** Every `path` and every `source_path`
-must be a real path under `.brain/input/`. A validator checks each one exists,
+must be a real permitted workspace-relative source or extracted-result path. A validator checks each one exists,
 and a later stage will try to open it.
 
 **Missing is not the same as zero.** If the materials do not record something,
@@ -116,3 +119,23 @@ and quote the one number that identifies it. The writer will open the file.
 **Say what the materials support.** A thin directory produces a short `reading`
 list and a populated `unresolved`, and that is the correct outcome. There is no
 minimum length here, and nothing is improved by padding.
+
+## Research Understanding And Coverage
+
+Read original source and controller-extracted results listed in the workspace
+contract, not only convenient Markdown. Link method code, experiment settings,
+run identifiers, baseline results, splits and units. Before calling something
+missing, search the inventory and open the likely result files. Never run new
+experiments or read an inherited finished manuscript, PDF or extracted equivalent.
+
+Add `research_claims`: objects with `claim`, nonempty `evidence_paths` arrays,
+and `limitations` arrays. These describe the supported research story, not a
+replacement manuscript. Add `requirements`: objects with `requirement`, `source`
+(`cli`, `brief`, `template`, `inferred`) and `verification`. Read the commissioning
+brief and template rules; preserve explicit constraints and label inferences.
+
+Add `coverage`: objects with `path`, `status` and `reason`. Status is `read`,
+`unread`, `unreadable`, `excluded`, `computable` or `missing`. Account for critical
+unread/skipped/oversized materials and explain what is still needed. Distinguish
+not yet read, not yet found, derivable from existing results, and genuinely absent.
+Do not claim the research is understood while key result files remain unread.

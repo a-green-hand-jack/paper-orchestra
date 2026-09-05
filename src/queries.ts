@@ -26,25 +26,28 @@ import type { Outline } from "./artifacts.js";
  * needing a source.
  */
 export function plannedCitationCount(outline: Outline): number {
-  const seen = new Set<string>();
-  const add = (values: readonly string[] | undefined): void => {
+  const hints = new Set<string>();
+  const keys = new Set<string>();
+  const add = (seen: Set<string>, values: readonly string[] | undefined, tidy = false): void => {
     for (const value of values ?? []) {
-      const key = value.trim().toLowerCase().replace(/\s+/g, " ");
+      const key = tidy ? fingerprint(tidyQuery(value)) : value.trim();
       if (key) seen.add(key);
     }
   };
   for (const section of outline.section_plan) {
     for (const subsection of section.subsections) {
-      add(subsection.citation_hints);
-      add(subsection.citation_candidates);
+      add(hints, subsection.citation_hints, true);
+      add(keys, subsection.citation_candidates);
     }
   }
   const plan = outline.intro_related_work_plan;
-  add(plan.introduction_strategy.citation_candidates);
+  add(keys, plan.introduction_strategy.citation_candidates);
   for (const subsection of plan.related_work_strategy.subsections) {
-    add(subsection.citation_candidates);
+    add(keys, subsection.citation_candidates);
   }
-  return seen.size;
+  // Hints and keys are two representations of the same demand. Without a
+  // hint-to-key mapping their union double counts resolved dependencies.
+  return Math.max(hints.size, keys.size);
 }
 
 export function collectQueries(outline: Outline): string[] {
@@ -94,6 +97,18 @@ export function collectQueries(outline: Outline): string[] {
  * with the subject than with the instruction wrapper.
  */
 export function tidyQuery(query: string): string {
+  const instruction = /^\s*(?:cite\b|use\b|connect to\b|prioritize\b|no citation\b)/i.test(query);
+  if (instruction) {
+    query = query.split(";")[0] ?? query;
+    query = query
+      .replace(/^\s*no citation is required.*$/i, "")
+      .replace(/^\s*(?:cite|use|connect to|prioritize)\s+/i, "")
+      .replace(/\b(?:retrieved by (?:the )?controller|independently retrieved|actually retrieved)\b/gi, "")
+      .replace(/\s+(?:only\s+(?:if|where|for|when)|if\b|to contextualize|needed for).*$/i, "")
+      .replace(/\b(?:the|an?|core|relevant|canonical|only|any|minimum)\b/gi, " ")
+      .replace(/\b(?:sources?|references?|citations?|prior-work)\b/gi, " ")
+      .replace(/\s+/g, " ");
+  }
   return query
     // The outline prompt mandates "research paper or technical report
     // introducing '<X>'" for anti-hallucination, so the wrapper can name
@@ -104,6 +119,8 @@ export function tidyQuery(query: string): string {
     )
     .replace(/^\s*find\s+/i, "")
     .replace(/["'“”]/g, "")
+    .replace(/\.\s+(?:Identify|Find|Cite|Use)\b[\s\S]*$/i, "")
+    .replace(/[.;\s]+$/, "")
     .trim()
     .slice(0, 300);
 }
@@ -185,25 +202,20 @@ function acronymContext(acronym: string, outline: Outline): string | null {
  * paying for calls already known to be ambiguous and expands short acronyms
  * with context already present in the outline.
  */
-export function planQueries(outline: Outline): QueryPlan {
+export function planQueries(outline: Outline, requestedQueries?: readonly string[]): QueryPlan {
   const decisions: QueryDecision[] = [];
   const queries: string[] = [];
   const seen = new Set<string>();
 
-  for (const original of collectQueries(outline)) {
-    const tidied = tidyQuery(original);
-    if (!tidied) continue;
-    if (isGenericConcept(tidied)) {
-      decisions.push({
-        original,
-        query: null,
-        action: "dropped",
-        reason: "generic concept is ambiguous in the general-science index",
-      });
-      continue;
-    }
-
-    const contextual = isShortAcronym(tidied) ? acronymContext(tidied, outline) : null;
+  for (const original of requestedQueries ?? collectQueries(outline)) {
+    const domain = outline.intro_related_work_plan.introduction_strategy.hook_hypothesis ||
+      outline.intro_related_work_plan.related_work_strategy.overview;
+    if (!original.trim()) continue;
+    const tidied = tidyQuery(original) || tidyQuery(domain) || "research methodology foundational literature";
+    const generic = isGenericConcept(tidied);
+    const contextual = generic
+      ? `${tidied} foundational paper ${domain}`.trim().slice(0, 300)
+      : isShortAcronym(tidied) ? acronymContext(tidied, outline) : null;
     const query = contextual && fingerprint(contextual) !== fingerprint(tidied) ? contextual : tidied;
     const key = fingerprint(query);
     if (seen.has(key)) {
@@ -220,8 +232,10 @@ export function planQueries(outline: Outline): QueryPlan {
     decisions.push({
       original,
       query,
-      action: query === tidied ? "kept" : "contextualized",
-      reason: query === tidied ? "specific query" : `expanded short acronym ${tidied} from outline context`,
+      action: query === original.trim() ? "kept" : "contextualized",
+      reason: query === tidied ? (query === original.trim() ? "specific query" : "citation instruction reduced to its topical demand") : generic
+        ? "dependency retained with foundational-paper and outline context"
+        : `expanded short acronym ${tidied} from outline context`,
     });
   }
 

@@ -8,6 +8,8 @@ import {
   readSync,
   readdirSync,
   statSync,
+  writeFileSync,
+  unlinkSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { ARTIFACTS, SOURCE_DIR } from "./paths.js";
@@ -19,65 +21,126 @@ import {
   statKind,
   UnsafePathError,
   walkFiles,
+  writeJsonAtomic,
+  digestFile,
 } from "./files.js";
 import { INTERNAL_DIRS, paths } from "./paths.js";
 import { authoredFiles, depthOf } from "./salience.js";
+import { EXTRACTABLE, FIGURE_DIR_NAMES, extractData, inspectPdf, isManuscriptPath, isSensitive, safeSourcePath } from "./input-extraction.js";
+export { isSensitive } from "./input-extraction.js";
 
-/**
- * Files that must never be copied into a workspace, because a workspace is
- * git-initialized and checkpointed: a credential imported once is in the run's
- * history permanently. Matched against the basename, case-insensitively.
- */
-const SENSITIVE = [
-  /^\.env$/i,
-  /^\.env\.(local|development|production|test)$/i,
-  /^\.npmrc$/i,
-  /^\.netrc$/i,
-  /^auth\.json$/i,
-  /(^|[._-])(id_rsa|id_ed25519|id_ecdsa|id_dsa)($|[._-])/i,
-  /\.(pem|p12|pfx|jks|keystore)$/i,
-];
+export type MaterialRole = "research" | "figure" | "template" | "manuscript" | "sensitive" | "unknown";
 
-/**
- * Deliberately NOT here: a word list over filenames.
- *
- * This used to also match `(tokens?|secrets?|credentials?|passwords?|apikeys?)`
- * bounded by delimiters, on the theory that a delimiter-bounded word is
- * specific enough. Measured against 63 tasks of a real corpus, it discarded 6
- * files, and every one of them was research material:
- *
- *   token_efficiency_main.jpg          one of the author's seven figures
- *   token_efficiency_analysis_lcp.jpg  another of them
- *   train_token_amber.{py,sh}          that task's training scripts
- *   eval_token_amber.{py,sh}           its evaluation scripts
- *
- * In machine learning, "token" is what a model reads, not what authenticates
- * one. The same is true of "secret" in cryptography papers and "password" in
- * usable-security papers -- the words a filter treats as credentials are the
- * subject matter of the fields this tool writes for.
- *
- * The lesson generalises past this one list: guessing a file's MEANING from its
- * name has no stopping point, and each new pattern buys one true positive and
- * an unknown number of silent, unreported losses. Deciding what the materials
- * contain is the triage stage's job -- it reads them.
- *
- * What is left is not guessing. `.pem`, `id_rsa` and `.env` are credential
- * FORMATS, not words that suggest a topic; nothing in a paper's materials is
- * shaped like a PEM private key by accident. `.key` is gone from the extension
- * list for the same reason the word list is: a `.key` file is a Keynote
- * presentation as often as it is a key.
- *
- * An `.example`, `.sample` or `.template` suffix is exempt: those files exist
- * to be committed and hold placeholders, and three tasks in the corpus lost
- * `code/.env.example`, which is the only record of what configuration the
- * experiment needs.
- */
-const PLACEHOLDER_SUFFIXES = new Set([".example", ".sample", ".template", ".dist"]);
+/** A neutral document name is unknown, not evidence of a manuscript. PDFs
+ * require controller inspection; a research-like filename cannot admit prose. */
+export function materialRole(rel: string, body?: string): MaterialRole {
+  if (isSensitive(rel)) return "sensitive";
+  const ext = extname(rel).toLowerCase();
+  const document = /\.(?:pdf|tex|md|txt|rst|org|html?|docx?|odt|rtf|ipynb|json)$/i.test(rel);
+  if (!document) return "research";
+  if (isManuscriptPath(rel)) return "manuscript";
+  if (ext === ".tex" && body !== undefined && /\\documentclass|\\begin\{document\}/.test(body)) {
+    const inner = body.includes("\\begin{document}") ? body.slice(body.indexOf("\\begin{document}")) : body;
+    const prose = inner.replace(/%.*/g, "").replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?/g, "").replace(/[\s{}\[\]$&_^~#\\]+/g, " ").trim();
+    const placeholders = body.match(/(?:abstract|introduction|conclusion|methodology|related work|results|discussion|acknowledgements|contributions) here\.|(?:TODO|write here|placeholder)/gi) ?? [];
+    // Sparse structure alone is not evidence of a template. Positive scaffold
+    // markers are required once there is more than a few words of prose.
+    return prose.length === 0 || (/template|example|sample|skeleton/i.test(rel) && prose.length < 600 && placeholders.length >= 2)
+      ? "template" : "manuscript";
+  }
+  if (body !== undefined) {
+    const text = /\.(?:html?|rtf)$/i.test(rel) ? body.replace(/<[^>]*>/g, "\n").replace(/\\[a-z]+\d*\s?/gi, "\n") : body;
+    const headings = ["abstract", "introduction", "related work", "methods?", "experiments?|results", "conclusions?", "references"];
+    const sections = headings.filter((h) => new RegExp(`(?:^|\\n)\\s*(?:#{1,6}\\s*|\\\\(?:sub)*section\\*?\\{)?(?:[0-9.]+\\s+)?(?:${h})(?:[\\s}:]|$)`, "im").test(text)).length;
+    if (sections >= 4 || (/\\begin\{abstract\}/.test(body) && /\\(?:sub)*section\{(?:Introduction|Conclusion)/i.test(body))) return "manuscript";
+  }
+  const research = /(?:^|[\/_. -])(?:notes?|ideas?|research_overview|results?|measurements?|metrics?|experiments?|logs?|figures?|figs?|plots?|tables?|equations?|derivations?)(?:$|[\/_. -])/i.test(rel);
+  if (ext === ".pdf") return "unknown";
+  if ([".doc", ".docx", ".odt", ".rtf"].includes(ext)) return research ? "research" : "unknown";
+  if (ext === ".tex") {
+    if (body === undefined) return "research";
+    const support = /(?:^|[\/_. -])(?:preamble|math_commands)(?:$|[\/_. -])/i.test(rel) ||
+      (/\\(?:newcommand|renewcommand|providecommand|DeclareMathOperator|usepackage)\b/.test(body) && !/\\(?:section|chapter)\b/.test(body));
+    const emptyScaffold = body.replace(/%.*/g, "").replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?/g, "").replace(/[\s{}]+/g, "") === "";
+    return research || support || emptyScaffold || (/template|example|sample|skeleton/i.test(rel) && body.length < 400 && /here\.|TODO|placeholder/i.test(body)) ? "research" : "manuscript";
+  }
+  return "research";
+}
 
-export function isSensitive(relPath: string): boolean {
-  const name = basename(relPath);
-  if (PLACEHOLDER_SUFFIXES.has(extname(name).toLowerCase())) return false;
-  return SENSITIVE.some((re) => re.test(name));
+function roleOfFile(root: string, rel: string): MaterialRole {
+  const role = materialRole(rel);
+  if (role !== "research") return role;
+  if (/\.(?:tex|md|txt|rst|org|html?|rtf)$/i.test(rel)) {
+    const abs = safeSourcePath(root, rel);
+    const fd = openSync(abs, "r");
+    try {
+      const buffer = Buffer.alloc(256 * 1024);
+      return materialRole(rel, buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString("utf8"));
+    } finally { closeSync(fd); }
+  }
+  return role;
+}
+
+interface InputEntry {
+  source: string;
+  bytes?: number;
+  role: MaterialRole;
+  status: "readable" | "unreadable" | "excluded";
+  normalized?: string;
+  extractor?: string;
+  reason?: string;
+  /** Safe controller-derived source file, when original bytes were withheld. */
+  imported?: string;
+  sha256?: string;
+  sufficiency?: "partial" | "unresolved" | "not-evidence";
+}
+
+function allocateInputPath(preferred: string, reserved: Set<string>): string {
+  let candidate = preferred;
+  let suffix = 0;
+  while ([...reserved].some(rel => rel === candidate || rel.startsWith(candidate + sep) || candidate.startsWith(rel + sep))) {
+    candidate = `${preferred.slice(0, -3)}.${++suffix}.md`;
+  }
+  reserved.add(candidate);
+  return candidate;
+}
+
+const IMPORT_MANIFEST = "input-import-manifest.json";
+const INPUT_MANIFEST = "input-manifest.json";
+
+function manifestPath(workspace: string, name: string): string {
+  return join(dirname(paths(workspace).brainInput), name);
+}
+
+function readManifest(workspace: string, name: string): InputEntry[] {
+  try {
+    const value: unknown = JSON.parse(readFileSync(manifestPath(workspace, name), "utf8"));
+    return Array.isArray(value) ? value as InputEntry[] : [];
+  } catch { return []; }
+}
+
+/** Unlike the digest walk, report inaccessible directories without aborting a
+ * useful import. Sensitive directories are recorded but never traversed. */
+function inputCandidates(root: string, note: (rel: string, reason: string) => void): string[] {
+  const files: string[] = [];
+  const visit = (dir: string): void => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch { note(relative(root, dir) || ".", "unreadable directory"); return; }
+    for (const entry of entries) {
+      const abs = join(dir, entry.name);
+      const rel = relative(root, abs);
+      if (isSensitive(rel)) { note(rel, "sensitive"); continue; }
+      if (entry.isSymbolicLink()) { note(rel, "symlink"); continue; }
+      if (entry.isDirectory()) {
+        if (INTERNAL_DIRS.includes(entry.name) || isNoiseDir(entry.name)) note(rel, "excluded directory");
+        else visit(abs);
+      } else if (entry.isFile()) files.push(rel);
+      else note(rel, "special file");
+    }
+  };
+  visit(root);
+  return files.sort();
 }
 
 /**
@@ -200,16 +263,17 @@ export interface ImportResult {
 }
 
 /**
- * Copy a directory into the workspace, then lock it.
+ * Import a directory into the workspace, then lock it. PDF originals are the
+ * exception: only checked figure assets or numeric previews enter source/. Unknown
+ * PDFs remain at the raw input location, with metadata-only unresolved entries.
  *
  * Unsafe entries are skipped rather than refused: this walk is over the user's
  * own directory, so a symlink here is never copied and therefore never enters
  * the digest set (see `walkFiles`). The digest walk over `source/` keeps the
  * throwing default.
  *
- * Importing nothing is an error. A materials directory that yields zero files
- * used to print a list of skips and exit 0, leaving the failure to surface
- * later as an outline agent reading a path that does not exist.
+ * Importing nothing is normally an error. An unknown-PDF-only input instead
+ * retains its inventory so triage can report insufficient/unresolved evidence.
  */
 export interface ImportOptions {
   /**
@@ -229,6 +293,10 @@ export function importDirectory(
   to: string,
   options: ImportOptions = {},
 ): ImportResult {
+  const workspace = dirname(resolve(to));
+  if (basename(resolve(to)) === SOURCE_DIR && (resolve(from) === workspace || resolve(from).startsWith(workspace + sep))) {
+    throw new UnsafePathError("raw inputs must be outside the writer workspace so quarantined originals are not accessible there");
+  }
   if (!existsSync(from)) {
     throw new UnsafePathError(`input directory does not exist: ${from}`);
   }
@@ -237,21 +305,24 @@ export function importDirectory(
   }
 
   const skipped: string[] = [];
+  const skippedEntries: { source: string; reason: string }[] = [];
   const skippedByReason: Record<string, number> = {};
   const note = (rel: string, reason: string): void => {
     skipped.push(`${rel} (${reason})`);
+    skippedEntries.push({ source: rel, reason });
     skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
   };
 
-  const candidates = walkFiles(from, {
-    skipDirs: INTERNAL_DIRS,
-    skipDir: isNoiseDir,
-    onUnsafe: "skip",
-    onSkip: (rel, reason) => note(rel, reason),
-  });
+  const candidates = inputCandidates(from, note);
+  const reserved = new Set(candidates);
+  const pdfEntries = new Map<string, InputEntry>();
+  const pdfPreviews = new Map<string, string>();
+  const inspectionStart = performance.now();
+  let pdfInspections = 0;
 
   const keep: string[] = [];
   let bytes = 0;
+  let hasUnknownDocument = false;
 
   for (const rel of candidates) {
     if (options.exclude?.has(rel)) {
@@ -263,16 +334,42 @@ export function importDirectory(
       continue;
     }
 
-    const abs = join(from, rel);
-    const size = statSync(abs).size;
+    let size: number;
+    try {
+      const abs = safeSourcePath(from, rel);
+      size = statSync(abs).size;
+      if (size > MAX_FILE_BYTES) {
+        note(rel, `too large (${size} bytes, cap ${MAX_FILE_BYTES})`);
+        continue;
+      }
+      const role = roleOfFile(from, rel);
+      if (extname(rel).toLowerCase() === ".pdf" && role === "unknown") {
+        const inspected: ReturnType<typeof inspectPdf> = pdfInspections >= 32 || performance.now() - inspectionStart > 60000
+          ? { role: "unknown" as const, reason: "PDF inspection budget exhausted (32 documents or 60 seconds); evidence unresolved" }
+          : inspectPdf(from, rel);
+        pdfInspections++;
+        const figure = inspected.role === "figure";
+        const entry: InputEntry = { source: rel, bytes: size, role: inspected.role,
+          status: figure || inspected.preview ? "readable" : "excluded", reason: inspected.reason,
+          extractor: figure ? "pdf-figure-v1" : "pdf-numeric-v1", sha256: inspected.sha256,
+          sufficiency: inspected.role === "manuscript" ? "not-evidence" : figure || inspected.preview ? "partial" : "unresolved" };
+        pdfEntries.set(rel, entry);
+        if (!figure && !inspected.preview) { note(rel, `${inspected.role}: ${inspected.reason}`); continue; }
+        entry.imported = figure ? rel : allocateInputPath(`${rel}.text.md`, reserved);
+        if (inspected.preview) pdfPreviews.set(rel, inspected.preview);
+      } else if (role === "manuscript" || role === "sensitive" || role === "unknown" || (role === "template" && basename(to) !== "template")) {
+        if (role === "unknown") hasUnknownDocument = true;
+        note(rel, role);
+        continue;
+      }
+      // Probe readability without pulling any content into an error message.
+      const fd = openSync(abs, "r");
+      closeSync(fd);
+    } catch { note(rel, "unreadable or unsafe source"); continue; }
     if (size > MAX_FILE_BYTES) {
       note(rel, `too large (${size} bytes, cap ${MAX_FILE_BYTES})`);
       continue;
     }
-
-    // No third test. What the author handed over is what `source/` records;
-    // whether a given file is worth reading is decided later, by something
-    // that can actually read it.
 
     keep.push(rel);
     bytes += size;
@@ -293,7 +390,7 @@ export function importDirectory(
     }
   }
 
-  if (keep.length === 0) {
+  if (keep.length === 0 && !hasUnknownDocument && ![...pdfEntries.values()].some(entry => entry.role === "unknown")) {
     const reasons = Object.entries(skippedByReason)
       .sort((a, b) => b[1] - a[1])
       .map(([reason, count]) => `${count} ${reason}`)
@@ -306,14 +403,40 @@ export function importDirectory(
   }
 
   ensureDir(to);
+  const written: string[] = [];
   for (const rel of keep) {
-    const target = assertInside(to, rel);
+    const entry = pdfEntries.get(rel);
+    const destination = entry?.imported ?? rel;
+    const target = assertInside(to, destination);
     ensureDir(dirname(target));
-    copyFileSync(join(from, rel), target);
+    try {
+      const preview = pdfPreviews.get(rel);
+      if (preview !== undefined) writeFileSync(target, preview, { flag: "wx" });
+      else copyFileSync(safeSourcePath(from, rel), target);
+      if (entry?.role === "figure" && digestFile(target) !== entry.sha256) {
+        unlinkSync(target);
+        throw new UnsafePathError("figure changed after inspection");
+      }
+      written.push(destination);
+    } catch {
+      note(rel, "unreadable or unsafe source during copy");
+      if (entry) { entry.status = "unreadable"; entry.sufficiency = "unresolved"; entry.reason = "could not write safe PDF preview"; }
+    }
   }
-  makeReadOnly(to, keep);
+  if (written.length === 0 && keep.length > 0) throw new UserFacingError("no readable material could be copied");
+  bytes = written.reduce((sum, rel) => sum + statSync(assertInside(to, rel)).size, 0);
+  makeReadOnly(to, written);
+  if (basename(resolve(to)) === SOURCE_DIR) {
+    const exclusions: InputEntry[] = skippedEntries.map(({ source, reason }): InputEntry => {
+      return { source, status: reason.startsWith("unreadable") ? "unreadable" : "excluded", reason,
+        role: reason === "sensitive" ? "sensitive" : reason === "manuscript" ? "manuscript" : reason === "unknown" ? "unknown" : reason.includes("template") ? "template" : "research",
+        ...(reason === "manuscript" ? { sufficiency: "not-evidence" } : {}),
+        ...(reason === "unknown" ? { sufficiency: "unresolved", reason: "unknown document role; original withheld, evidence unresolved" } : {}) };
+    }).filter(entry => !pdfEntries.has(entry.source));
+    writeJsonAtomic(manifestPath(dirname(resolve(to)), IMPORT_MANIFEST), [...exclusions, ...pdfEntries.values()]);
+  }
 
-  return { files: keep, skipped, skippedByReason, bytes };
+  return { files: written, skipped, skippedByReason, bytes };
 }
 
 /** Name the directories contributing most files, so a cap error is actionable. */
@@ -339,6 +462,11 @@ export function importTemplateFiles(
   const root = resolve(from);
   const taken = new Map<string, string>();
   for (const [rel, destination] of layout) {
+    safeSourcePath(root, rel);
+    const role = roleOfFile(root, rel);
+    if (role === "sensitive" || role === "manuscript" || role === "unknown") {
+      throw new UnsafePathError(`refusing ${role} as template: ${rel}`);
+    }
     const owner = taken.get(destination);
     if (owner) {
       throw new UserFacingError(
@@ -356,7 +484,7 @@ export function importTemplateFiles(
   for (const [rel, destination] of layout) {
     const target = assertInside(to, destination);
     ensureDir(dirname(target));
-    copyFileSync(join(root, rel), target);
+    copyFileSync(safeSourcePath(root, rel), target);
     written.push(destination);
     try {
       bytes += statSync(target).size;
@@ -419,25 +547,23 @@ export async function assertArchiveSafe(path: string, destination: string): Prom
   return members;
 }
 
-/**
- * Convert a PDF into markdown for the agent to read. Poppler's `pdftotext` is
- * used rather than PyMuPDF because it is present without a Python environment,
- * and the layout flag keeps tables legible enough to be quoted.
- *
- * `relPath` namespaces the output by its source path. Writing a flat
- * `basename.md` means `notes/results.pdf` and `data/results.pdf` silently
- * overwrite each other -- unlikely with two hand-picked documents, normal once
- * a whole directory is the input, and data loss either way.
- */
+/** Emit only a controller-approved numeric preview, never PDF prose. The
+ * historical name is retained; .pdf.text.md is now a partial data view. */
 export async function convertPdfToText(
   pdf: string,
   outDir: string,
   relPath?: string,
 ): Promise<string> {
   const rel = relPath ?? basename(pdf);
-  const target = assertInside(outDir, join(dirname(rel), `${basename(rel, extname(rel))}.md`));
+  const source = safeSourcePath(dirname(resolve(pdf)), basename(pdf));
+  const target = assertInside(outDir, `${rel}.text.md`);
+  if (["manuscript", "sensitive"].includes(materialRole(rel))) throw new UnsafePathError(`excluded PDF role: ${rel}`);
   ensureDir(dirname(target));
-  await execa("pdftotext", ["-layout", pdf, target]);
+  if (existsSync(target)) throw new UnsafePathError(`refusing to overwrite PDF text: ${rel}`);
+  if (materialRole(basename(source)) === "manuscript") throw new UnsafePathError("excluded PDF source role");
+  const inspected = inspectPdf(dirname(source), basename(source));
+  if (!inspected.preview) throw new UnsafePathError(`${inspected.role}: ${inspected.reason}`);
+  writeFileSync(target, inspected.preview, { flag: "wx" });
   return target;
 }
 
@@ -446,10 +572,11 @@ export interface BrainInputResult {
   /** Files that could not be normalized, with the reason. */
   readonly skipped: string[];
   /**
-   * Files present in `source/` whose bytes are not text, so no readable copy
-   * exists. Not a failure and not hidden -- the inventory names them.
+   * Imported files with no readable view, plus unknown/quarantined original
+   * documents. These are evidence gaps, not evidence that a paper is sufficient.
    */
   readonly unreadable: string[];
+  readonly manifest: string;
 }
 
 /**
@@ -457,33 +584,66 @@ export interface BrainInputResult {
  * reads. `source/` stays pristine and read-only; anything derived lands here so
  * the lock over `source/` is never disturbed by our own preprocessing.
  *
- * Every text-tier file is mirrored, not just `.md`/`.txt`. Anything left out of
- * this view is invisible to a stage that reads only the normalized tree, which
- * previously stranded `.csv`, `.json`, `.bib` and `.yaml` inside `source/`.
- *
- * A PDF that will not convert is skipped rather than fatal. `pdftotext` exits
- * non-zero on a malformed or encrypted file, and this runs inside
- * `prepareWorkspace`, so one unreadable PDF used to abort the whole run before
- * it started -- a small risk with two hand-picked documents, a likely one once
- * a whole directory is the input.
+ * PDF originals must pass through importDirectory's controller inspection;
+ * only checked figure assets or numeric previews are imported. Refuse other raw PDFs in source/
+ * rather than silently leave potentially finished prose accessible to writers.
  */
 export async function prepareBrainInput(workspace: string): Promise<BrainInputResult> {
   const p = paths(workspace);
   ensureDir(p.brainInput);
   const produced: string[] = [];
   const skipped: string[] = [];
-  const unreadable: string[] = [];
+  const entries: InputEntry[] = readManifest(workspace, IMPORT_MANIFEST);
+  const unreadable: string[] = entries.filter(entry => entry.role === "unknown" || entry.status === "unreadable").map(entry => entry.source);
+  const sources = walkFiles(p.source);
+  if (sources.some(rel => extname(rel).toLowerCase() === ".pdf" && !entries.some(entry =>
+    entry.role === "figure" && entry.imported === rel && entry.source === rel &&
+    entry.sha256 === digestFile(safeSourcePath(p.source, rel)) && inspectPdf(p.source, rel).role === "figure"))) {
+    throw new UnsafePathError("raw PDFs in source/ bypass controller quarantine; reimport the raw directory into a new workspace with importDirectory");
+  }
+  const reserved = new Set([...sources, ...walkFiles(p.brainInput)]);
+  const allocate = (preferred: string): string => allocateInputPath(preferred, reserved);
 
-  for (const rel of walkFiles(p.source)) {
-    const abs = join(p.source, rel);
+  for (const rel of sources) {
+    const abs = safeSourcePath(p.source, rel);
     const extension = extname(rel).toLowerCase();
+    const importedEntry = entries.find(entry => entry.imported === rel);
+    const role = importedEntry?.role ?? roleOfFile(p.source, rel);
+    const entry: InputEntry = importedEntry ?? { source: rel, bytes: statSync(abs).size, role, status: "unreadable" };
+    if (!importedEntry) entries.push(entry);
+    if (role === "figure") {
+      const target = assertInside(p.brainInput, allocate(`${rel}.asset.md`));
+      ensureDir(dirname(target));
+      writeFileSync(target, `# Supplied figure asset\n\nSource: ${JSON.stringify(rel)}\n` +
+        `Publishing path: ${JSON.stringify(join(SOURCE_DIR, rel))}\nSHA256: ${entry.sha256}\n\n` +
+        "Controller-checked single-page vector figure. Original retained for publishing; no PDF prose mirrored.\n" +
+        "Figure availability is not evidence sufficiency. Use independent raw records for measurements and interpretation.\n", { flag: "wx" });
+      produced.push(target);
+      entry.status = "readable";
+      entry.normalized = relative(workspace, target);
+      continue;
+    }
+    if (role !== "research") {
+      entry.status = "excluded";
+      entry.reason = role;
+      skipped.push(`${rel} (${role})`);
+      continue;
+    }
 
-    if (extension === ".pdf") {
+    if (EXTRACTABLE.has(extension)) {
       try {
-        produced.push(await convertPdfToText(abs, p.brainInput, rel));
-      } catch (error) {
-        const detail = error instanceof Error ? error.message.split("\n")[0] : String(error);
-        skipped.push(`${rel} (pdf could not be converted: ${detail})`);
+        const text = await extractData(p.source, rel);
+        const target = assertInside(p.brainInput, allocate(`${rel}.summary.md`));
+        ensureDir(dirname(target));
+        writeFileSync(target, text, { flag: "wx" });
+        produced.push(target);
+        entry.status = "readable";
+        entry.normalized = relative(workspace, target);
+        entry.extractor = "python-data-v1 (bounded sample)";
+      } catch {
+        entry.reason = "data extraction failed, dependency unavailable, or exceeded limits";
+        skipped.push(`${rel} (${entry.reason})`);
+        unreadable.push(rel);
       }
       continue;
     }
@@ -494,6 +654,7 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
     // the agent knows a `runs.npy` exists and that it cannot read it.
     if (!looksLikeText(abs)) {
       unreadable.push(rel);
+      entry.reason = "no supported text extractor";
       continue;
     }
 
@@ -501,9 +662,17 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
     ensureDir(dirname(target));
     copyFileSync(abs, target);
     produced.push(target);
+    entry.status = "readable";
+    entry.normalized = relative(workspace, target);
+    entry.extractor ??= "text mirror";
   }
-  return { files: produced.map((path) => relative(workspace, path)), skipped, unreadable };
+  const manifest = manifestPath(workspace, INPUT_MANIFEST);
+  writeJsonAtomic(manifest, entries);
+  return { files: produced.map((path) => relative(workspace, path)), skipped, unreadable, manifest: relative(workspace, manifest) };
 }
+
+/** Public name for controller-owned input normalization. */
+export const normalizeInput = prepareBrainInput;
 
 /** Extensions a supplied figure can arrive as. */
 const FIGURE_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg"]);
@@ -518,7 +687,6 @@ const FIGURE_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg"]);
  * `\includegraphics`'d, so a stray logo becomes a figure the writer is
  * REQUIRED to place.
  */
-const FIGURE_DIR_NAMES = new Set(["figures", "figure", "figs", "fig", "images", "imgs", "plots"]);
 
 /**
  * Where the author put the figures they drew, workspace-relative, or null.
@@ -535,9 +703,12 @@ const FIGURE_DIR_NAMES = new Set(["figures", "figure", "figs", "fig", "images", 
  */
 export function suppliedFiguresDir(workspace: string): string | null {
   const root = paths(workspace).source;
+  const admitted = readManifest(workspace, IMPORT_MANIFEST);
   const byDir = new Map<string, number>();
   for (const rel of authoredFiles(root)) {
     if (!FIGURE_EXTENSIONS.has(extname(rel).toLowerCase())) continue;
+    if (extname(rel).toLowerCase() === ".pdf" && !admitted.some(entry => entry.role === "figure" && entry.imported === rel &&
+      entry.sha256 === digestFile(safeSourcePath(root, rel)))) continue;
     const dir = dirname(rel);
     const base = dir.split(sep).pop()?.toLowerCase();
     if (base === undefined || !FIGURE_DIR_NAMES.has(base)) continue;
@@ -550,42 +721,22 @@ export function suppliedFiguresDir(workspace: string): string | null {
   return join(SOURCE_DIR, best);
 }
 
-/**
- * Ceilings under which the materials can simply be read in full.
- *
- * The triage stage exists to make a large input tractable: it says which of
- * several hundred files are worth opening. A handful of notes needs none of
- * that -- every stage can read all of it -- and running a model to produce a
- * map of three files would spend tokens to restate a directory listing.
- *
- * This replaces the previous router, which asked whether the author had
- * supplied two files with particular names. That question only had an answer
- * for inputs shaped the way one benchmark shapes them; "is this small enough to
- * read whole" has an answer for any input, which is the property a general
- * tool needs.
- *
- * Both ceilings, because either alone is escapable in a way that matters: 400
- * tiny files are small in bytes and still need a map, and one 5 MB log is a
- * single file nobody can read whole.
- *
- * Measured against the corpus this is tuned on, no task qualifies -- the
- * smallest holds 133 KB of text across 30 files. That is the correct outcome
- * and worth stating: these tasks are exactly the case the mapping stage is for.
- */
+/** Read-whole size hints only. Small inputs still require triage/sufficiency
+ * assessment; a tiny preview or quarantined document is not complete evidence. */
 export const READ_WHOLE_MAX_BYTES = 64 * 1024;
 export const READ_WHOLE_MAX_FILES = 25;
 
-/**
- * Can every stage just read all of the normalized materials?
- *
- * Deterministic and recomputed rather than recorded, so the controller's
- * decision to skip the mapping stage and the validator's expectation of a
- * missing map cannot disagree. A flag in `.brain/` would be writable by the
- * agent being validated; a flag in `run.json` would freeze a decision that
- * depends on a tree the run can still be resumed against.
- */
+/** Whether the complete readable view fits the size budget. This is not an
+ * authorization to bypass triage or a trusted evidence-sufficiency verdict. */
 export function materialsFitWhole(workspace: string): boolean {
   const p = paths(workspace);
+  const manifest = readManifest(workspace, INPUT_MANIFEST);
+  const sources = walkFiles(p.source, { onUnsafe: "skip" });
+  // A tiny readable subset does not mean the entire import can be read whole.
+  if (sources.some((source) => !manifest.some((entry) => entry.source === source && entry.status === "readable" &&
+    entry.extractor === "text mirror" && entry.normalized && existsSync(assertInside(workspace, entry.normalized))))) return false;
+  if (manifest.some((entry) => entry.role === "unknown" || entry.sufficiency === "partial" || entry.sufficiency === "unresolved" ||
+    entry.status === "unreadable" || entry.reason?.includes("unreadable"))) return false;
   const files = walkFiles(p.brainInput, { onUnsafe: "skip" });
   if (files.length === 0 || files.length > READ_WHOLE_MAX_FILES) return false;
   let bytes = 0;
@@ -614,6 +765,23 @@ export function materialsFitWhole(workspace: string): boolean {
  */
 export function materialsInventory(workspace: string, maxEntries = 200): string {
   const p = paths(workspace);
+  const manifest = readManifest(workspace, INPUT_MANIFEST);
+  if (manifest.length > 0) {
+    const counts = { readable: 0, unreadable: 0, excluded: 0 };
+    for (const entry of manifest) counts[entry.status]++;
+    const cap = Math.max(1, Math.min(1000, Math.floor(maxEntries)));
+    return [
+      `Input inventory: ${counts.readable} readable, ${counts.unreadable} unreadable, ${counts.excluded} excluded.`,
+      `Full provenance: ${relative(workspace, manifestPath(workspace, INPUT_MANIFEST))}. Excluded manuscripts must not be read.`,
+      "Unknown documents are quarantined outside the writer workspace, not established manuscripts. Do not open their originals; record their potential evidence as unresolved.",
+      "Extracted summaries are partial evidence, not complete datasets or proof of sufficiency. Missing labels/context must be resolved from independent raw records; never infer results.",
+      ...manifest.slice(0, cap).map((entry) => `  ${JSON.stringify(entry.source)} [${entry.role}; ${entry.status}]` +
+        (entry.bytes === undefined ? "" : ` (${entry.bytes} bytes)`) +
+        (entry.sufficiency ? ` [sufficiency: ${entry.sufficiency}]` : "") +
+        (entry.normalized ? ` -> ${JSON.stringify(entry.normalized)} (${entry.extractor})` : `: ${entry.reason ?? "no readable copy"}`)),
+      ...(manifest.length > cap ? [`  ... ${manifest.length - cap} more entries in the manifest.`] : []),
+    ].join("\n");
+  }
 
   // Walked over `source/`, not over the mirrored tree. `source/` is what the
   // author gave us; `.brain/input/` is what happens to be readable. Listing
@@ -624,8 +792,7 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
   const readable = (rel: string): boolean => {
     if (mirrored.has(rel)) return true;
     // A PDF is mirrored as markdown beside its own path.
-    const asMarkdown = join(dirname(rel), `${basename(rel, extname(rel))}.md`);
-    return mirrored.has(asMarkdown);
+    return extname(rel).toLowerCase() === ".pdf" && mirrored.has(`${rel}.text.md`);
   };
 
   const files = walkFiles(p.source, { onUnsafe: "skip" }).map((rel) => ({
@@ -689,22 +856,19 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
  */
 export function materialSurvey(rawMaterials: string, budgetChars: number): string {
   const root = resolve(rawMaterials);
-  const candidates = walkFiles(root, {
-    skipDirs: INTERNAL_DIRS,
-    skipDir: isNoiseDir,
-    onUnsafe: "skip",
-  }).filter((rel) => {
+  const candidates = inputCandidates(root, () => {}).filter((rel) => {
     // This survey is quoted into a prompt, so it wants text and only text --
     // decided by reading the bytes, which is also the only test that works for
     // a format nobody listed.
     if (isSensitive(rel)) return false;
-    const abs = join(root, rel);
     try {
+      const abs = safeSourcePath(root, rel);
       if (statSync(abs).size > MAX_FILE_BYTES) return false;
+      if (roleOfFile(root, rel) !== "research") return false;
+      return looksLikeText(abs);
     } catch {
       return false;
     }
-    return looksLikeText(abs);
   });
 
   if (candidates.length === 0) return "(no readable material found)";
@@ -729,7 +893,7 @@ export function materialSurvey(rawMaterials: string, budgetChars: number): strin
     if (used >= budgetChars) break;
     let body: string;
     try {
-      body = readFileSync(join(root, rel), "utf8").slice(0, perFile);
+      body = readFileSync(safeSourcePath(root, rel), "utf8").slice(0, perFile);
     } catch {
       continue;
     }

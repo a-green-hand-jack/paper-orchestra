@@ -3,13 +3,15 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
 } from "node:fs";
-import { dirname, extname, join } from "node:path";
-import { ensureDir, walkFiles } from "./files.js";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { digestFile, ensureDir, walkFiles, writeJsonAtomic } from "./files.js";
 import { ARTIFACTS, paths } from "./paths.js";
 
 /**
@@ -282,6 +284,47 @@ function copyWritable(from: string, to: string): void {
   chmodSync(to, 0o644);
 }
 
+/** Shared by build staging, stale-build checks and portable export. No scripts or run metadata. */
+export function isLatexDependency(rel: string): boolean {
+  return !rel.split(/[\\/]/).some((part) => part.startsWith(".")) &&
+    !/(?:secret|credential|token|auth)(?:[._-]|$)/i.test(rel) &&
+    /\.(tex|bib|bbl|sty|cls|bst|bbx|cbx|lbx|clo|def|cfg|fd|ltx|png|jpe?g|pdf|eps|svg|otf|ttf|tfm|pfb|enc|map)$/i.test(rel);
+}
+
+export function manuscriptDependencies(workspace: string, texSource: string): string[] {
+  const root = paths(workspace).brainManuscript;
+  if (realpathSync(root) !== resolve(root)) throw new Error("Refusing symlinked manuscript directory");
+  const excluded = new Set([ARTIFACTS.rawDraft, ARTIFACTS.finalTex, ARTIFACTS.finalPdf]
+    .map((rel) => relative(root, join(workspace, rel))));
+  excluded.add(relative(root, resolve(texSource)));
+  return walkFiles(root).filter((rel) => isLatexDependency(rel) && !excluded.has(rel));
+}
+
+/** The exact source set, including precedence, used both to stage and to reject stale builds. */
+export function latexBuildInputs(workspace: string, texSource: string, jobName = "manuscript"): Map<string, string> {
+  const p = paths(workspace);
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(jobName)) throw new Error("Unsafe LaTeX job name");
+  const dependencies = manuscriptDependencies(workspace, texSource);
+  if (realpathSync(p.template) !== resolve(p.template) ||
+      !realpathSync(texSource).startsWith(realpathSync(p.brainManuscript) + sep) ||
+      !lstatSync(texSource).isFile()) throw new Error("Unsafe LaTeX source/template path");
+  const inputs = new Map<string, string>();
+  for (const rel of walkFiles(p.template)) {
+    if (isLatexDependency(rel) && rel !== "template.tex" && rel !== `${jobName}.pdf` && rel !== `${jobName}.tex`) inputs.set(rel, join(p.template, rel));
+  }
+  for (const rel of dependencies) {
+    if (rel === `${jobName}.tex` || rel === `${jobName}.pdf`) throw new Error(`Reserved build output: ${rel}`);
+    inputs.set(rel, join(p.brainManuscript, rel));
+  }
+  const generatedBib = join(workspace, ARTIFACTS.references);
+  if (existsSync(generatedBib)) {
+    if (realpathSync(generatedBib) !== resolve(generatedBib) || !lstatSync(generatedBib).isFile()) throw new Error("Unsafe generated bibliography path");
+    inputs.set("references.bib", generatedBib);
+  }
+  inputs.set(`${jobName}.tex`, texSource);
+  return new Map([...inputs].sort(([a], [b]) => a.localeCompare(b)));
+}
+
 /**
  * Stage a build directory: the template's support files plus the manuscript.
  *
@@ -296,6 +339,10 @@ export function stageBuildDir(
 ): string {
   const p = paths(workspace);
   const buildDir = join(p.brainTmp, "build");
+  const inputs = latexBuildInputs(workspace, texSource, jobName);
+  if (existsSync(p.brainTmp) && realpathSync(p.brainTmp) !== resolve(p.brainTmp)) {
+    throw new Error("Refusing symlinked build scratch directory");
+  }
 
   // Always build from scratch. Two reasons, one of which is a correctness
   // issue rather than hygiene:
@@ -309,38 +356,13 @@ export function stageBuildDir(
   rmSync(buildDir, { recursive: true, force: true });
   ensureDir(buildDir);
 
-  for (const rel of walkFiles(p.template)) {
-    // Skip the template's own main file: the manuscript replaces it.
-    if (rel === "template.tex") continue;
+  for (const [rel, from] of inputs) {
     const target = join(buildDir, rel);
     ensureDir(dirname(target));
-    copyWritable(join(p.template, rel), target);
+    copyWritable(from, target);
   }
-
-  const figuresDir = join(p.brainManuscript, "figures");
-  if (existsSync(figuresDir)) {
-    const figuresOut = join(buildDir, "figures");
-    ensureDir(figuresOut);
-    for (const name of readdirSync(figuresDir)) {
-      if (extname(name) === ".json") continue;
-      copyWritable(join(figuresDir, name), join(figuresOut, name));
-    }
-  }
-
-  // The generated bibliography must overwrite the template's stub.
-  //
-  // Templates ship a placeholder `references.bib`, and the manuscript cites via
-  // `\bibliography{references}`, which resolves inside the build directory. Copy
-  // only the template's copy and bibtex reads the stub: it emits "I didn't find
-  // a database entry" for every key, writes an empty .bbl, and the paper renders
-  // `[?]` where each citation should be -- while every artifact on disk looks
-  // correct. That is exactly what happened on a 94-source run.
-  const generatedBib = join(workspace, ARTIFACTS.references);
-  if (existsSync(generatedBib)) {
-    copyWritable(generatedBib, join(buildDir, "references.bib"));
-  }
-
-  copyWritable(texSource, join(buildDir, `${jobName}.tex`));
+  writeJsonAtomic(join(buildDir, ".po-inputs.json"), Object.fromEntries([...inputs.keys()]
+    .map((rel) => [rel, digestFile(join(buildDir, rel))])));
   return buildDir;
 }
 
