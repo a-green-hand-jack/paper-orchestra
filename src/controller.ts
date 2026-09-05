@@ -51,7 +51,7 @@ import {
   type VisualReview,
 } from "./figures.js";
 import { generateTextImage, textToImageCapability } from "./imagegen.js";
-import { materialsInventory, suppliedMaterials } from "./input.js";
+import { materialsFitWhole, materialsInventory, suppliedFiguresDir } from "./input.js";
 import {
   bibliographyOriginNote,
   suppliedBibliography,
@@ -255,72 +255,54 @@ async function runStage(
 
   say(options, "");
 
-  // Triage with both documents supplied needs no model at all: the author
-  // already wrote them, so the controller records that and lets the validators
-  // confirm. Same shape as plotting-with-generation-off below, and the same
-  // reason -- prompting here would spend tokens to restate what is on disk.
+  // A small input needs no map: every stage can read all of it, so producing a
+  // map of three files would spend a model call to restate a directory
+  // listing. Same shape as plotting-with-generation-off below, and the same
+  // reason -- prompting here would buy nothing the filesystem does not say.
   //
-  // triage.json is written either way, which is what lets `materialPaths` stay
-  // branch-free: downstream reads one file, not two possible layouts.
-  if (stage === "triage") {
-    const supplied = suppliedMaterials(workspace, state.scope);
-    if (supplied) {
-      say(options, `>> ${TITLES[stage]} (${stage})  materials supplied, no model call`);
-      writeJsonAtomic(join(workspace, ARTIFACTS.triageReport), {
-        mode: "supplied",
-        idea_path: supplied.idea,
-        experimental_log_path: supplied.experimentalLog,
-        materials_considered: 2,
-        sources: [
-          { path: supplied.idea, role: "idea", why: "supplied by the author" },
-          {
-            path: supplied.experimentalLog,
-            role: "experimental_log",
-            why: "supplied by the author",
-          },
-        ],
-        claims: [],
-        unresolved: [],
-      });
-      say(options, `   using ${supplied.idea} and ${supplied.experimentalLog}`);
+  // Nothing is written on this path. An artifact synthesized by the controller
+  // to keep the shape uniform would be a map nobody made, and the stages that
+  // read it cannot tell the difference; `stageInputs` names materials.json only
+  // when it exists, so absence is the honest signal.
+  if (stage === "triage" && materialsFitWhole(workspace)) {
+    say(options, `>> ${TITLES[stage]} (${stage})  materials read whole, no model call`);
 
-      const checks = validateStage(workspace, stage, state.scope);
-      const failed = checks.filter((check) => !check.passed);
-      reportChecks(options, checks);
-      if (failed.length > 0) {
-        updateStage(workspace, stage, (s) => ({
-          ...s,
-          status: "failed",
-          attempts: s.attempts + 1,
-          error: failed.map((c) => `${c.name}: ${c.detail}`).join("; "),
-        }));
-        throw new UserFacingError(
-          `stage "${stage}" failed validation: ` +
-            failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
-        );
-      }
-
-      const completed = updateStage(workspace, stage, (s) => ({
+    const checks = validateStage(workspace, stage, state.scope);
+    const blockers = blocking(checks);
+    reportChecks(options, checks);
+    if (blockers.length > 0) {
+      updateStage(workspace, stage, (s) => ({
         ...s,
-        status: "completed",
+        status: "failed",
         attempts: s.attempts + 1,
-        started_at: s.started_at ?? new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-        notes: "Author supplied both documents; no synthesis needed.",
+        error: blockers.map((c) => `${c.name}: ${c.detail}`).join("; "),
       }));
-      const sha = await checkpoint({
-        workspace,
-        runId: completed.run_id,
-        stage,
-        status: "completed",
-        mode: completed.mode,
-        checks,
-      });
-      say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
-      // Gated like any other completed stage: in collaborative mode the user
-      // should confirm we picked the right files, even on the free path.
-      return resolveGate(options, stage, completed, signal);
+      throw new UserFacingError(
+        `stage "${stage}" failed validation: ` +
+          blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
+      );
     }
+
+    const completed = updateStage(workspace, stage, (s) => ({
+      ...s,
+      status: "completed",
+      attempts: s.attempts + 1,
+      started_at: s.started_at ?? new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      notes: "Materials small enough to read in full; no map synthesized.",
+    }));
+    const sha = await checkpoint({
+      workspace,
+      runId: completed.run_id,
+      stage,
+      status: "completed",
+      mode: completed.mode,
+      checks,
+    });
+    say(options, `   ok  ${checks.length} checks  ckpt=${sha.slice(0, 12)}`);
+    // Gated like any other completed stage: in collaborative mode the user
+    // should still get to see what the run decided.
+    return resolveGate(options, stage, completed, signal);
   }
 
   // Plotting with generation ON runs a per-figure loop rather than the single
@@ -338,18 +320,18 @@ async function runStage(
     say(options, `   published ${published} supplied figure(s)`);
 
     const checks = validateStage(workspace, stage, state.scope);
-    const failed = checks.filter((check) => !check.passed);
+    const blockers = blocking(checks);
     reportChecks(options, checks);
-    if (failed.length > 0) {
+    if (blockers.length > 0) {
       updateStage(workspace, stage, (s) => ({
         ...s,
         status: "failed",
         attempts: s.attempts + 1,
-        error: failed.map((c) => `${c.name}: ${c.detail}`).join("; "),
+        error: blockers.map((c) => `${c.name}: ${c.detail}`).join("; "),
       }));
       throw new UserFacingError(
         `stage "${stage}" failed validation: ` +
-          failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+          blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
       );
     }
 
@@ -415,7 +397,12 @@ async function runStage(
     // off-domain tail into the manuscript. `citation_floor` enforces the same
     // number at the END of the pipeline, so refinement cannot quietly undo it.
     extra.paper_count = String(relevant);
-    extra.min_cite_paper_count = String(citationFloor(relevant, state.scope));
+    // The outline is on disk and schema-checked by the time this runs, so the
+    // floor the model is told matches the one the validators will enforce.
+    const plan = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outline)));
+    extra.min_cite_paper_count = String(
+      citationFloor(relevant, state.scope, plan.success ? plan.data : null),
+    );
     extra.bibliography_origin = bibliographyOriginNote(workspace);
   }
   if (stage === "section_writing" || stage === "refinement") {
@@ -468,11 +455,20 @@ async function runStage(
   const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
   const notes = (await lastAssistantText(runtime, sessionId)).split("\n")[0]?.slice(0, 200) ?? "";
 
-  if (failed.length > 0) {
+  const blockers = blocking(checks);
+  if (blockers.length > 0) {
     updateStage(workspace, stage, (s) => ({ ...s, usage, notes }));
     throw new UserFacingError(
       `stage "${stage}" failed validation after ${budget} remediation attempt(s): ` +
-        failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+        blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
+    );
+  }
+  const remaining = checks.filter((check) => !check.passed);
+  if (remaining.length > 0) {
+    say(
+      options,
+      `   ${remaining.length} advisory finding(s) remain: ` +
+        remaining.map((check) => check.name).join(", "),
     );
   }
 
@@ -505,8 +501,21 @@ async function runStage(
 
 function reportChecks(options: ControllerOptions, checks: readonly Check[]): void {
   for (const check of checks) {
-    if (!check.passed) say(options, `   FAIL ${check.name}: ${check.detail}`);
+    if (check.passed) continue;
+    say(options, `   ${check.advisory ? "WARN" : "FAIL"} ${check.name}: ${check.detail}`);
   }
+}
+
+/**
+ * The failures that end a stage.
+ *
+ * Every failed check is handed to remediation, but only a blocking one decides
+ * that the stage did not happen. Otherwise a finished, compiling, fully cited
+ * manuscript is thrown away over a table that is 19pt too wide -- which is what
+ * used to happen, twice in a five-task sample.
+ */
+function blocking(checks: readonly Check[]): Check[] {
+  return checks.filter((check) => !check.passed && !check.advisory);
 }
 
 /**
@@ -933,7 +942,7 @@ async function runPlottingGeneration(
                 title: spec.title,
                 objective: spec.objective,
                 aspect_ratio: spec.aspect_ratio,
-                data_source: spec.data_source,
+                data_source: spec.data_source.join(", ") || "(no data file named; the figure is conceptual)",
               })
             : `The code-generated figure \`${spec.figure_id}\` failed: ${failure}\n\n` +
               "Return a complete corrected script in one ```python block and the caption as before.";
@@ -1047,14 +1056,14 @@ async function runPlottingGeneration(
 
   const usage = usageDelta(before, await sessionUsage(runtime, sessionId));
   const checks = validateStage(workspace, stage, state.scope);
-  const failed = checks.filter((check) => !check.passed);
+  const blockers = blocking(checks);
   reportChecks(options, checks);
 
-  if (failed.length > 0) {
+  if (blockers.length > 0) {
     updateStage(workspace, stage, (s) => ({ ...s, status: "failed", usage }));
     throw new UserFacingError(
       `stage "${stage}" failed validation: ` +
-        failed.map((check) => `${check.name}: ${check.detail}`).join("; "),
+        blockers.map((check) => `${check.name}: ${check.detail}`).join("; "),
     );
   }
 
@@ -1118,14 +1127,15 @@ function stripCaptionLabel(line: string): string {
 
 function publishSuppliedFigures(workspace: string): number {
   const p = paths(workspace);
-  const sourceFigures = join(p.source, "figures");
+  const suppliedRel = suppliedFiguresDir(workspace);
   const target = join(p.brainManuscript, "figures");
   ensureDir(target);
 
-  if (!existsSync(sourceFigures)) {
+  if (suppliedRel === null) {
     writeJsonAtomic(join(workspace, ARTIFACTS.figuresInfo), []);
     return 0;
   }
+  const sourceFigures = join(workspace, suppliedRel);
 
   const supplied = readdirSync(sourceFigures).filter((name) =>
     [".pdf", ".png", ".jpg", ".jpeg"].includes(extname(name).toLowerCase()),

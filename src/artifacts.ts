@@ -26,7 +26,15 @@ export const PlotSpecSchema = z
     plot_type: z.enum(["plot", "diagram"]).default("plot"),
     /** Selected by the outline agent; `auto` is resolved deterministically by the controller. */
     render_route: FigureRouteSchema.default("auto"),
-    data_source: z.string().default("both"),
+    /**
+     * Workspace-relative paths to the files holding this figure's numbers.
+     *
+     * Was one of the three strings "idea.md", "experimental_log.md" or "both",
+     * which named documents a triage stage synthesized rather than anything the
+     * author wrote. The plotting stage is handed this value and told to read
+     * it, so it has to be a path that exists.
+     */
+    data_source: z.array(z.string()).default([]),
     objective: z.string().default(""),
     /** Provider-ready visual brief for the text-to-image route. */
     generation_prompt: z.string().default(""),
@@ -83,6 +91,21 @@ export const SectionPlanEntrySchema = z
 
 export const OutlineSchema = z
   .object({
+    /**
+     * How many distinct sources this paper's argument needs.
+     *
+     * Decided here because it is a property of the paper, not of the tool. A
+     * fixed CLI default of 20 was wrong in both directions on measured tasks:
+     * one graded paper's reference cites 22 and ours cited 29, costing
+     * precision; another cites 62 and ours cited 47, costing recall. The stage
+     * that has read the materials and written the section plan is the one that
+     * can say how much support the argument takes.
+     *
+     * The controller bounds it rather than trusting it outright -- see
+     * `citationFloor`. Zero means "no opinion", and the plan's own citation
+     * hints then decide.
+     */
+    citation_target: z.number().int().nonnegative().default(0),
     plotting_plan: z.array(PlotSpecSchema).default([]),
     intro_related_work_plan: z
       .object({
@@ -256,30 +279,55 @@ export const BuildReportSchema = z
 export type BuildReport = z.infer<typeof BuildReportSchema>;
 
 /**
- * `triage.json` — how the pre-writing documents came to be.
+ * `materials.json` — a map into the author's materials.
  *
- * Two jobs. It records which of the user's files fed which document, so a run's
- * provenance survives; and it carries the quotes that make a synthesis
- * checkable. `mode` distinguishes the two paths: `"supplied"` when the user
- * handed over both documents and no model ran, `"synthesized"` when triage
- * wrote them.
+ * NOT a rewrite of them. The stage that produces this used to synthesize two
+ * fixed documents, `idea.md` and `experimental_log.md`, because the five
+ * downstream prompts were ported from a Python pipeline that named those two
+ * files in 25 places. That made the stage an adapter for legacy prompts rather
+ * than a capability: an arbitrary input was compressed into a shape it may not
+ * have, every later stage read only the compression, and whatever did not
+ * survive it was invisible for the rest of the run.
  *
- * `claims` is what a byte floor can never buy. A model that invented a number
- * cannot produce a quote that is really in a file, and a substring test is a
- * fact about the filesystem rather than a second model's opinion -- the same
- * rule the rest of the validators follow.
+ * So the product is a map, and the stages read the materials themselves. Three
+ * parts, each earning its place:
+ *
+ *  * `reading` says which files matter and what each one offers, so a stage
+ *    with hundreds of files in front of it knows where to look. This is the
+ *    part that makes a large input tractable, and it is the only reason a
+ *    model runs here at all.
+ *  * `facts` is the shared ledger of measured numbers, each carrying text
+ *    copied verbatim from the file it came from. It replaces the prose digest
+ *    for the one job the digest genuinely did -- keeping five stages from each
+ *    inventing their own account of the experiments -- and does it better,
+ *    because prose drifts and a quoted number does not.
+ *  * `unresolved` records what the materials do not say, so a later stage
+ *    reports its absence rather than inventing a plausible value.
+ *
+ * There is no fixed number of documents and no required length, because the
+ * materials decide those. A theory paper has no experimental record; a dataset
+ * paper has no methodology in the usual sense. The previous shape required at
+ * least 400 bytes of each, which forced exactly the padding its own prompt
+ * forbade.
  */
-export const TriageSourceSchema = z
+export const MaterialEntrySchema = z
   .object({
+    /** Workspace-relative path to a file worth reading. */
     path: z.string().min(1),
-    role: z.enum(["idea", "experimental_log", "both", "discarded"]),
-    why: z.string().default(""),
+    /** What this file offers, in the author's terms: "main benchmark results". */
+    contributes: z.string().min(1),
   })
   .passthrough();
 
-export const TriageClaimSchema = z
+/**
+ * A measured claim, with text copied verbatim from its source.
+ *
+ * The quote is what a byte floor can never buy. A model that invented a number
+ * cannot produce a quote that is really in a file, and a substring test is a
+ * fact about the filesystem rather than a second model's opinion.
+ */
+export const MaterialFactSchema = z
   .object({
-    /** What the synthesized document asserts. */
     statement: z.string().min(1),
     /** The file the statement came from, workspace-relative. */
     source_path: z.string().min(1),
@@ -288,17 +336,20 @@ export const TriageClaimSchema = z
   })
   .passthrough();
 
-export const TriageReportSchema = z
+export const MaterialsMapSchema = z
   .object({
-    mode: z.enum(["synthesized", "supplied"]),
-    /** Workspace-relative path to the idea document downstream stages read. */
-    idea_path: z.string().min(1),
-    experimental_log_path: z.string().min(1),
+    /** How many files were looked at, so `reading` can be read as a selection. */
     materials_considered: z.number().int().nonnegative().default(0),
-    sources: z.array(TriageSourceSchema).min(1),
-    claims: z.array(TriageClaimSchema).default([]),
+    /**
+     * A few sentences of orientation. Deliberately unvalidated for length: the
+     * moment a floor is put on it, it becomes the synthesized document this
+     * artifact exists to remove.
+     */
+    summary: z.string().default(""),
+    reading: z.array(MaterialEntrySchema).min(1),
+    facts: z.array(MaterialFactSchema).default([]),
     /** Questions the materials could not answer, carried forward honestly. */
     unresolved: z.array(z.string()).default([]),
   })
   .passthrough();
-export type TriageReport = z.infer<typeof TriageReportSchema>;
+export type MaterialsMap = z.infer<typeof MaterialsMapSchema>;

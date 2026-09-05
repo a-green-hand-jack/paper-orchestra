@@ -13,6 +13,40 @@ import type { Outline } from "./artifacts.js";
  * introduction directions come last -- they improve framing, but a manuscript
  * survives thin framing and does not survive an unresolvable \cite key.
  */
+/**
+ * How many distinct sources the outline's own plan asks for.
+ *
+ * Counts the citation hints and resolved candidates the plan attaches to its
+ * sections -- the things it said would each need supporting. Used as a FLOOR
+ * under whatever `citation_target` the model proposes, so a stage cannot
+ * quietly excuse its successor from citing the work its own plan called for.
+ *
+ * Deliberately not `collectQueries`: that includes search directions and
+ * methodology clusters, which are retrieval phrasings rather than claims
+ * needing a source.
+ */
+export function plannedCitationCount(outline: Outline): number {
+  const seen = new Set<string>();
+  const add = (values: readonly string[] | undefined): void => {
+    for (const value of values ?? []) {
+      const key = value.trim().toLowerCase().replace(/\s+/g, " ");
+      if (key) seen.add(key);
+    }
+  };
+  for (const section of outline.section_plan) {
+    for (const subsection of section.subsections) {
+      add(subsection.citation_hints);
+      add(subsection.citation_candidates);
+    }
+  }
+  const plan = outline.intro_related_work_plan;
+  add(plan.introduction_strategy.citation_candidates);
+  for (const subsection of plan.related_work_strategy.subsections) {
+    add(subsection.citation_candidates);
+  }
+  return seen.size;
+}
+
 export function collectQueries(outline: Outline): string[] {
   const hints: string[] = [];
   const limitations: string[] = [];

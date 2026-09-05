@@ -24,6 +24,7 @@ import { adaptVenueKit, installOfficialVenue, manualCcfAdapter } from "./venue-i
 import { AUTO_TEMPLATE, resolveTemplateSelection } from "./template-selection.js";
 import { discoverTemplate } from "./template-discovery.js";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import { runResult } from "./automation.js";
 
 let jsonErrors = false;
@@ -181,6 +182,11 @@ program
     "template directory or immutable adapter id; default auto selects from the paper topic",
     AUTO_TEMPLATE,
   )
+  .option(
+    "--brief <file>",
+    "a written brief for this paper -- venue, length, per-section requirements; " +
+      "use - to read it from stdin",
+  )
   .option("-o, --output <dir>", "workspace directory (default: ./po-run-<timestamp>)")
   .addOption(
     new Option("--mode <mode>", "gate behaviour").choices(["autonomous", "collaborative"]).default(
@@ -197,12 +203,6 @@ program
     [] as string[],
   )
   .option("--research-cutoff <yyyy-mm>", "literature cutoff (default: current month)")
-  .option("--idea-filename <name>", "idea document within raw materials", "idea_sparse.md")
-  .option(
-    "--experimental-log-filename <name>",
-    "experimental log within raw materials",
-    "experimental_log.md",
-  )
   .addOption(
     new Option("--network-policy <policy>", "whether stages may reach the network")
       .choices(["online", "offline"])
@@ -241,6 +241,21 @@ program
 
     const defaultModel = options.model ? parseModelRef(options.model as string) : null;
 
+    // Read here rather than in `prepare`, so a missing or unreadable brief
+    // fails before a workspace exists to half-prepare.
+    let brief: string | null = null;
+    if (options.brief) {
+      const from = options.brief as string;
+      try {
+        brief = from === "-" ? readFileSync(0, "utf8") : readFileSync(from, "utf8");
+      } catch (error) {
+        fail(`cannot read the brief from ${from === "-" ? "stdin" : from}: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+      }
+      if (brief.trim().length === 0) fail(`the brief from ${from === "-" ? "stdin" : from} is empty`);
+    }
+
     // A template the author already has beats one we would go and choose. Only
     // when the input holds none does the selector run -- and that is the one
     // path here that costs a model call and may need the network, so skipping
@@ -257,15 +272,15 @@ program
       : await resolveTemplateSelection({
           requested,
           rawMaterials,
-          ideaFilename: options.ideaFilename as string,
-          experimentalLogFilename: options.experimentalLogFilename as string,
           model: defaultModel,
+          networkPolicy: options.networkPolicy as "online" | "offline",
         });
 
     const result = await prepareWorkspace({
       workspace,
       rawMaterials,
       templateDir: selectedTemplate?.directory ?? null,
+      brief,
       templateId: selectedTemplate?.templateId,
       templateSelection: selectedTemplate?.mode,
       templateRationale: selectedTemplate?.rationale,
@@ -273,8 +288,6 @@ program
       headless: Boolean(options.headless),
       usePlotting: Boolean(options.usePlotting),
       researchCutoff: (options.researchCutoff as string | undefined) ?? currentYearMonth(),
-      ideaFilename: options.ideaFilename as string,
-      experimentalLogFilename: options.experimentalLogFilename as string,
       networkPolicy: options.networkPolicy as "online" | "offline",
       defaultModel,
       stageModels: parseStageModels(options.stageModel as string[]),
@@ -446,22 +459,26 @@ program
       : validateRun(workspace, state.scope.plan, state.scope);
 
     const failed = checks.filter((check) => !check.passed);
+    const blockers = failed.filter((check) => !check.advisory);
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify({ checks, failed: failed.length }, null, 2)}\n`);
     } else {
       for (const check of checks) {
-        process.stdout.write(`${check.passed ? "pass" : "FAIL"}  ${check.name}\n`);
+        const label = check.passed ? "pass" : check.advisory ? "warn" : "FAIL";
+        process.stdout.write(`${label}  ${check.name}\n`);
         if (!check.passed) process.stdout.write(`      ${check.detail}\n`);
       }
       process.stdout.write(`\n${checks.length - failed.length}/${checks.length} passed\n`);
     }
 
-    if (failed.length > 0) {
+    if (blockers.length > 0) {
       // Exit 2 rather than 1 so a script can distinguish "validation failed"
-      // from "the command could not run".
+      // from "the command could not run". Advisory findings are printed as
+      // `warn` and do not change the exit status: they are things to look at,
+      // not reasons to call the run broken.
       throw new ValidationFailedError(
-        `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
+        `${blockers.length} check(s) failed: ${blockers.map((c) => c.name).join(", ")}`,
       );
     }
   });

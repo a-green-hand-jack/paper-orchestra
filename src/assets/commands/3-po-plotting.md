@@ -18,8 +18,10 @@ Task: Write a self-contained Python script that renders ONE publication-quality 
 * **aspect ratio**: {aspect_ratio}
 * **data source**: {data_source}
 
-Read the materials named by `data_source` from the workspace to obtain the
-actual numbers. `.brain/input/` holds the normalized idea and experimental log.
+Read the files named by `data_source` to obtain the actual numbers. They are
+workspace-relative paths into the author's own materials under `.brain/input/`.
+If `data_source` names no file, the figure is conceptual and must not assert a
+measured value.
 
 ## Absolute rules about data
 

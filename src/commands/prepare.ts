@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { chmodSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { checkpoint, initGit } from "../checkpoints.js";
 import { compactStamp } from "../timestamp.js";
 import { opencodeVersion } from "../doctor.js";
 import { ensureDir } from "../files.js";
+import { UserFacingError } from "../errors.js";
 import { importDirectory, importTemplateFiles, prepareBrainInput } from "../input.js";
 import {
   discoverTemplate,
@@ -12,7 +13,7 @@ import {
   type TemplateDiscovery,
 } from "../template-discovery.js";
 import { formatModelRef } from "../model.js";
-import { paths } from "../paths.js";
+import { BRIEF_FILE, paths } from "../paths.js";
 import { STAGES, type StageId } from "../stages.js";
 import { ScopeSchema, type ModelRef, type RunState, type Scope } from "../state/schema.js";
 import {
@@ -37,6 +38,12 @@ export interface PrepareOptions {
    * and no way to name a second.
    */
   readonly templateDir: string | null;
+  /**
+   * The commissioning brief's text, or null. Written into `source/` before the
+   * lock so it is an input like any other, rather than an argument only one
+   * stage happens to see.
+   */
+  readonly brief?: string | null;
   /** Immutable adapter id or user-supplied directory label selected before preparation. */
   readonly templateId?: string;
   readonly templateSelection?: "automatic" | "explicit";
@@ -45,8 +52,6 @@ export interface PrepareOptions {
   readonly headless: boolean;
   readonly usePlotting: boolean;
   readonly researchCutoff: string;
-  readonly ideaFilename: string;
-  readonly experimentalLogFilename: string;
   readonly networkPolicy: "online" | "offline";
   readonly defaultModel: ModelRef | null;
   readonly stageModels: Record<string, ModelRef>;
@@ -147,17 +152,40 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
   const discovered = options.templateDir === null ? discoverTemplate(raw) : null;
   const claimed = new Set(discovered?.templateFiles ?? []);
 
+  // Either discovery found a template or the caller named one. The CLI
+  // guarantees this -- `resolveTemplateSelection` runs precisely when discovery
+  // comes back empty -- but saying so here turns a caller's mistake into a
+  // sentence instead of `paths[0] must be of type string`, which is what an
+  // input holding no LaTeX at all used to produce three frames deep.
+  if (!discovered && options.templateDir === null) {
+    throw new UserFacingError(
+      `found no LaTeX template in ${raw} and none was supplied. Pass ` +
+        "`--template <venue|dir>` to name one, or `--template auto` to have one chosen " +
+        "from the paper's topic.",
+    );
+  }
+
   const source = importDirectory(raw, p.source, { exclude: claimed });
   const template = discovered
     ? importTemplateFiles(raw, p.template, templateLayout(discovered))
     : importDirectory(resolve(options.templateDir as string), p.template);
 
+  // Before `computeLockDigests`, so the brief is inside the lock. After the
+  // imports, so it cannot be shadowed by a file of the same name in the input
+  // -- if the author already has a `source/BRIEF.md`, an explicit `--brief`
+  // is the more specific instruction and wins.
+  if (options.brief) {
+    const briefPath = join(workspace, BRIEF_FILE);
+    ensureDir(dirname(briefPath));
+    rmSync(briefPath, { force: true });
+    writeFileSync(briefPath, options.brief.endsWith("\n") ? options.brief : `${options.brief}\n`, "utf8");
+    chmodSync(briefPath, 0o444);
+  }
+
   const scope: Scope = ScopeSchema.parse({
     plan: planFor(options.until ?? null),
     use_plotting: options.usePlotting,
     research_cutoff: options.researchCutoff,
-    idea_filename: options.ideaFilename,
-    experimental_log_filename: options.experimentalLogFilename,
     venue: templateLabel(options, discovered),
     ...(options.templateId ? { template_id: options.templateId } : {}),
     ...(options.templateSelection || discovered

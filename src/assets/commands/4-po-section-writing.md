@@ -16,8 +16,7 @@ Your job is to generate the LaTeX code for the missing sections only, based on t
 
 INPUTS:
 * 'outline.json': Your MASTER PLAN. Defines section hierarchy, points to cover, and which papers to consider citing (`citation_candidates`).
-* 'idea.md': Technical details of the Methodology.
-* 'experimental_log.md': Raw data for tables and qualitative analysis for text.
+* **The author's materials** under `.brain/input/`: the technical details of the methodology, and the raw data for every table and number. Read the files. `.brain/raw/materials.json`, when present, maps them: `reading` says which file holds what, and `facts` is the ledger of measured numbers with a verbatim quote for each.
 * 'citation_map.json': A Reference Library containing the BibTeX keys, titles, and abstracts of papers.
 * 'conference_guidelines.md': Formatting rules.
 * 'figures_list': Available figure files.
@@ -32,7 +31,7 @@ CRITICAL INSTRUCTIONS:
 
 2. Data & Tables:
    - You are responsible for creating LaTeX tables.
-   - Extract numerical data directly from 'experimental_log.md'.
+   - Extract numerical data directly from the author's files. Where `materials.json` carries a fact, its quote is the authority; where it does not, open the file the `reading` list points at. Never round, interpolate, or fill a gap.
    - Use the `booktabs` package format (\toprule, \midrule, \bottomrule).
    - Do not hallucinate numbers. Use the exact values provided in the log.
    - Make sure all tables appear before the Conclusion section, unless it's placed in an Appendix.
@@ -78,7 +77,7 @@ IMPORTANT NOTE:
 ### Strict Knowledge Isolation & Anonymity (CRITICAL)
 
 You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session (e.g., idea.md, experimental_log.md, figures, and other inputs). Treat these inputs as the only available source of information.
+Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
 
 #### Forbidden Behavior
 You MUST NOT:

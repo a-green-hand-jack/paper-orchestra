@@ -75,8 +75,6 @@ export const ScopeSchema = z.object({
   plan: z.array(z.enum(STAGES)),
   use_plotting: z.boolean(),
   research_cutoff: z.string().regex(/^\d{4}-\d{2}$/, "expected YYYY-MM"),
-  idea_filename: z.string().min(1),
-  experimental_log_filename: z.string().min(1),
   venue: z.string().min(1),
   /** Selected immutable adapter id or the user-supplied template path label. */
   template_id: z.string().min(1).optional(),
@@ -92,20 +90,20 @@ export const ScopeSchema = z.object({
    */
   max_lkm_calls: z.number().int().nonnegative().default(40),
   /**
-   * How many distinct sources the manuscript should cite.
+   * A USER-SUPPLIED override for how many distinct sources to cite, or absent.
    *
-   * Replaces the Python's rule of citing 90% of whatever retrieval returned
-   * (`literature_review_agent.py:492`). That rule is only defensible when
-   * retrieval is precise: against LKM's general-science corpus it read as "put
-   * 90% of the off-topic hits into the paper", and two measured runs cited 84
-   * of 94 and 67 of 74 sources in ~2150 words -- roughly one citation per 25
-   * words, which is citation stuffing rather than academic prose.
+   * Absent is the normal case. This used to default to 20, and a single
+   * constant was measurably wrong in both directions: on graded tasks whose
+   * reference papers cite 22, 47 and 62, ours cited 29 (precision 0.31), 34
+   * (recall 0.51) and 47 (recall 0.66). How much support an argument needs is
+   * a property of the paper, so the outline stage proposes it
+   * (`Outline.citation_target`) and the controller bounds it -- see
+   * `citationFloor`.
    *
-   * A target rather than a ratio, so the number a reader sees is a property of
-   * the paper and not of how large a retrieval budget the run happened to have.
-   * The effective floor is `min(target, sources actually available)`.
+   * Set only by `--target-citations`, and then it wins outright: an explicit
+   * instruction is not a thing to second-guess.
    */
-  target_citations: z.number().int().nonnegative().default(20),
+  target_citations: z.number().int().nonnegative().optional(),
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 
@@ -168,5 +166,20 @@ export const CheckSchema = z.object({
   name: z.string(),
   passed: z.boolean(),
   detail: z.string(),
+  /**
+   * A failed check that must not end the run.
+   *
+   * Some things are worth telling the model to fix without being worth
+   * throwing a finished manuscript away for. Column overflow is the case that
+   * forced this: overfull boxes are endemic in real LaTeX, and a fixed points
+   * threshold was deciding that a complete, compiling, fully cited paper was
+   * unacceptable -- it killed two of five runs on a corpus sample, one of them
+   * over a single block 19pt too wide.
+   *
+   * An advisory failure still goes into the remediation prompt, so the model
+   * gets its chance; it simply does not turn "the paper has a wide table" into
+   * "there is no paper".
+   */
+  advisory: z.boolean().default(false),
 });
 export type Check = z.infer<typeof CheckSchema>;

@@ -12,22 +12,43 @@ You are a senior AI researcher drafting a paper for a top-tier conference (e.g.,
 Your task is to convert the provided methodology and experimental logs into a detailed, venue-compliant paper outline. You must output a single JSON object.
 
 Your inputs are:
-1.  `idea.md`: A detailed summary of the methodology, core contributions, and theoretical framework.
-2.  `experimental_log.md`: A summary of experimental results, including raw data points, ablation studies, and performance metrics.
+1.  **The author's materials**, under `.brain/input/`: their notes, code, scripts, tables and logs, in the structure they used. This is the ground truth for both the methodology and every measured number. Read the files themselves.
+2.  `.brain/raw/materials.json`, when it is present: a map into those materials. `reading` says which files are worth opening and what each contributes, `facts` is the ledger of measured numbers with a verbatim quote for each, and `unresolved` records what the materials never say. Use it to find your way; it is an index, not a substitute for the files. When it is absent the materials are small enough to read in full.
 3.  `template.tex`: The target structure. You must use the section commands (e.g., `\section{...}`) found here as your primary skeleton.
-4.  `conference_guidelines.md`: Formatting rules, specific page limits (for word count calculation), and mandatory sections.
+4.  `guidelines.md`, when the template ships one: Formatting rules, specific page limits (for word count calculation), and mandatory sections.
 
 ### Processing Directives
 
 Global Instruction: Do not analyze inputs in isolation. You must synthesize information across all provided documents for every step.
 
+#### Directive 0: Citation Target
+
+Set `citation_target` to the number of DISTINCT sources this paper's argument
+actually needs. Judge it from the work, not from a habit:
+
+* Every dataset, metric, optimizer, baseline and foundational architecture the
+  paper names needs a source.
+* Every claim about what prior work does or fails to do needs a source.
+* A related-work section that surveys a field needs more than one that
+  positions against three specific competitors.
+
+Do not pad it and do not lowball it. A paper that cites far more sources than
+its argument uses reads as padding; one that cites far fewer reads as
+unresearched. The controller enforces a floor derived from this number and from
+the citation hints you attach below, capped by how many sources retrieval
+actually found -- so a number well above what the plan supports simply makes
+the writing stage's job impossible.
+
 #### Directive 1: Plotting & Visualization Plan
-Synthesize `experimental_log.md` and `idea.md` to identify the most compelling evidence.
+Synthesize the materials to identify the most compelling evidence.
 * Determine which figures are essential to visually prove the hypothesis (e.g., convergence rates, qualitative visual comparisons).
 * The `plot_type` MUST be exactly "plot" or "diagram". If it is a plot, specify the specific chart type (e.g., Radar Chart) inside the `objective`.
 * Choose `render_route` as `code` for quantitative plots whose exact values must remain auditable, or `text_to_image` for conceptual diagrams that benefit from image generation. Use `auto` only when either route is genuinely acceptable.
 * For `text_to_image`, provide a precise `generation_prompt` that describes the intended scientific content, labels, spatial relationships, and visual hierarchy without inventing results.
-* The `data_source` MUST be exactly "idea.md", "experimental_log.md", or "both".
+* The `data_source` MUST be a list of workspace-relative paths to the files holding the
+  numbers this figure plots, for example `[".brain/input/tables/table_le.tex"]`. The
+  plotting stage is given exactly these paths and reads them for the data, so name the
+  file the numbers are actually in. An empty list means the figure needs no data.
 * Determine the ideal `aspect_ratio` for each figure. The aspect_ratio MUST be exactly one of: "1:1", "1:4", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9".
 * The `figure_id` MUST be a semantically meaningful string identifier summarizing the plot contents, like "fig_framework_overview" or "fig_ablation_study_parameter_sensitivity". It MUST NOT contain the word "Figure".
 * Output Focus: Create an array of objects for the `plotting_plan` key.
@@ -40,7 +61,7 @@ Prevent Citation Overlap: Strictly separate the scope of the Introduction from R
 *   Related Work: Focuses on micro-level technical comparisons (recent SOTA baselines, benchmarks). 
 
 * Introduction Strategy (Macro-Level Context, 10-20 papers):
-    * Hypotheses: Define the "Hook" (broad context) and "Problem Gap" to be verified. CRITICAL: Strictly scope the problem gap and claims to match the specific datasets and evaluations present in `experimental_log.md`. Do not over-claim generalization.
+    * Hypotheses: Define the "Hook" (broad context) and "Problem Gap" to be verified. CRITICAL: Strictly scope the problem gap and claims to match the specific datasets and evaluations the materials actually record. Do not over-claim generalization.
     * Search Directions: Provide 3-5 specific queries to find: 
         1. Papers establishing the real-world impact or urgency of the problem gap.
         2. Good survey or review papers on the topic.
@@ -49,8 +70,8 @@ Prevent Citation Overlap: Strictly separate the scope of the Introduction from R
     * Divide the field into 2-4 distinct methodology clusters that directly compete with or precede our approach.
     * For each cluster, define:
         1.  Methodology Cluster Name: The technical category.
-        2.  SOTA Investigation: Instructions to find recent papers for conceptual context. CRITICAL TIMELINE RULE: Do not instruct searches for any papers published after {cutoff_date}. Furthermore, do NOT instruct the search for new "competitors" to beat if they are not exclusively in `experimental_log.md`.
-        3.  Limitation Hypothesis: The suspected failure point of these competing methods, based on `idea.md`.
+        2.  SOTA Investigation: Instructions to find recent papers for conceptual context. CRITICAL TIMELINE RULE: Do not instruct searches for any papers published after {cutoff_date}. Furthermore, do NOT instruct the search for new "competitors" to beat if the materials do not record an evaluation against them.
+        3.  Limitation Hypothesis: The suspected failure point of these competing methods, based on the author's own account of their approach.
         4.  Limitation Search Queries: Highly specific, narrow queries to find papers documenting these exact limitations.
         5.  The Bridge: How our proposed method resolves this specific limitation.
 * Output Focus: Populate the `intro_related_work_plan` key.
@@ -61,9 +82,9 @@ Outline the remaining sections (Abstract, Methodology, Experiments, Conclusion, 
 * Structural Hierarchy: If Subsection X.1 is created, X.2 is mandatory. Do not create orphaned subsections. Omit subsections entirely if a section does not require division.
 * Content Specificity: Explicitly reference source materials. 
     * *Avoid:* "Describe the model."
-    * *Require:* "Formalize the Temporal-Aware Attention mechanism using Eq. 3 from idea.md."
+    * *Require:* "Formalize the Temporal-Aware Attention mechanism using Eq. 3 from `.brain/input/research_overview.md`."
 * Mandatory Citations (`citation_hints`): You must provide targeted citation hints for all external dependencies. Every hint must point to a single, unambiguous canonical paper. 
-    * Required Coverage (EXHAUSTIVE): You MUST explicitly create a targeted `citation_hints` query for EVERY SINGLE dataset, optimizer, metric, and foundational architecture/model you mention, no matter how ubiquitous or obvious it seems (e.g., AdamW, ResNet, ImageNet, CLIP, Transformer, LLaMA, GPT, LLaVA). If it is in the `experimental_log.md` or `idea.md`, it MUST have a citation hint.
+    * Required Coverage (EXHAUSTIVE): You MUST explicitly create a targeted `citation_hints` query for EVERY SINGLE dataset, optimizer, metric, and foundational architecture/model you mention, no matter how ubiquitous or obvious it seems (e.g., AdamW, ResNet, ImageNet, CLIP, Transformer, LLaMA, GPT, LLaVA). If it appears anywhere in the materials, it MUST have a citation hint.
         1. All baseline methods compared against.
         2. All datasets evaluated on.
         3. All standard metrics utilized.
@@ -72,22 +93,23 @@ Outline the remaining sections (Abstract, Methodology, Experiments, Conclusion, 
 * Output Focus: Populate the `section_plan` key.
 
 Guidelines on Scientific Depth & Mathematical Rigor:
-- Grounded Formalization: Propose explicit subsections for rigorous mathematical formulations (e.g., loss functions, core algorithms, theoretical proofs). You must base these strictly on `idea.md` and `experimental_log.md`; do not instruct the writing agent to include hallucinated variables or unsupported math.
+- Grounded Formalization: Propose explicit subsections for rigorous mathematical formulations (e.g., loss functions, core algorithms, theoretical proofs). You must base these strictly on the materials; do not instruct the writing agent to include hallucinated variables or unsupported math.
 
 ### Strict Output Format (JSON)
-You must output a single, valid JSON object with the following three top-level keys: "plotting_plan", "intro_related_work_plan", and "section_plan".
+You must output a single, valid JSON object with the following four top-level keys: "citation_target", "plotting_plan", "intro_related_work_plan", and "section_plan".
 
 Example Output:
 
 ```json
 {
+  "citation_target": 34,
   "plotting_plan": [
     {
       "figure_id": "fig_teaser_fig_cross_modal_alignment_performance",
       "title": "Teaser: Cross-Modal Alignment Performance",
       "plot_type": "plot",
       "render_route": "code",
-      "data_source": "experimental_log.md",
+      "data_source": [".brain/input/tables/table_le.tex"],
       "objective": "Visual summary (Radar Chart) demonstrating that our method achieves SOTA balance across 5 metrics.",
       "generation_prompt": "",
       "aspect_ratio": "16:9"
@@ -196,7 +218,7 @@ Example Output:
 ### Strict Knowledge Isolation & Anonymity (CRITICAL)
 
 You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session (e.g., idea.md, experimental_log.md, figures, and other inputs). Treat these inputs as the only available source of information.
+Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
 
 #### Forbidden Behavior
 You MUST NOT:

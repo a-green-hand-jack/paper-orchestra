@@ -16,7 +16,7 @@ Your job is to fill in two sections: Introduction and Related Work. Leave all th
 
 INPUTS:
 * 'intro_related_work_plan': This is your PRIMARY guide for structure and arguments.
-* 'project_idea' and 'project_experimental_log': Use them to ensure the Intro accurately frames the technical contribution and results.
+* **The author's materials** under `.brain/input/`, mapped by `.brain/raw/materials.json` when it is present: use them to ensure the Intro accurately frames the technical contribution and the results it actually reports.
 * 'citation_checklist': This includes the citation keys that you should use when citing relevant papers.
 * 'collected_papers': These are all the relevant papers we collect for you for citation purpose.
 
@@ -38,7 +38,7 @@ CITATION REQUIREMENTS:
 - Related Work: Do deep comparative citations. Group distinct works (e.g., "Several methods [A, B, C]...").
 - Ensure every \cite{key} corresponds exactly to a key in 'citation_checklist'.
 - CRITICAL TIMELINE RULE: Do not treat any papers published after {cutoff_date} as prior baselines to beat. Treat them strictly as concurrent work.
-- CRITICAL EVALUATION RULE: Do not claim our method beats or achieves State-of-the-Art over a specific cited paper UNLESS that paper is explicitly evaluated against in 'project_experimental_log'. Frame other recent papers strictly as concurrent, orthogonal, or conceptual work.
+- CRITICAL EVALUATION RULE: Do not claim our method beats or achieves State-of-the-Art over a specific cited paper UNLESS the author's materials record an explicit evaluation against that paper. Frame other recent papers strictly as concurrent, orthogonal, or conceptual work.
 - You need to return the full code for the new 'template.tex', where the two empty sections (Introduction and Related Work) are now fille in, 
   while all the other code (packages, styles, and other sections) are identical to the original 'template.tex'.
 
@@ -53,7 +53,7 @@ You must return the code for the updated 'template.tex', Make sure to wrap the c
 ### Strict Knowledge Isolation & Anonymity (CRITICAL)
 
 You MUST write this paper as if you have no prior knowledge of the topic, method, experiments, or results.
-Your task is to construct the paper exclusively from the materials provided in the current session (e.g., idea.md, experimental_log.md, figures, and other inputs). Treat these inputs as the only available source of information.
+Your task is to construct the paper exclusively from the materials provided in the current session -- the author's own files under `.brain/input/`, the figures, and the artifacts named in your read list. Treat these inputs as the only available source of information.
 
 #### Forbidden Behavior
 You MUST NOT:

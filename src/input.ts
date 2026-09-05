@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { ARTIFACTS, SOURCE_DIR } from "./paths.js";
-import { TriageReportSchema, type TriageReport } from "./artifacts.js";
 import { UserFacingError } from "./errors.js";
 import {
   assertInside,
@@ -22,6 +21,7 @@ import {
   walkFiles,
 } from "./files.js";
 import { INTERNAL_DIRS, paths } from "./paths.js";
+import { authoredFiles, depthOf } from "./salience.js";
 
 /**
  * Files that must never be copied into a workspace, because a workspace is
@@ -29,23 +29,54 @@ import { INTERNAL_DIRS, paths } from "./paths.js";
  * history permanently. Matched against the basename, case-insensitively.
  */
 const SENSITIVE = [
-  /^\.env($|\.)/i,
+  /^\.env$/i,
+  /^\.env\.(local|development|production|test)$/i,
   /^\.npmrc$/i,
   /^\.netrc$/i,
   /^auth\.json$/i,
   /(^|[._-])(id_rsa|id_ed25519|id_ecdsa|id_dsa)($|[._-])/i,
-  /\.(pem|key|p12|pfx|jks|keystore)$/i,
-  // Delimiter-bounded rather than a bare substring. An unanchored
-  // /(token|secret|...)/ discards `tokenizer_notes.md` and
-  // `secrets_rotation_design.md` as credentials -- real false positives on a
-  // notes repository, and invisible ones, because a skipped file is only ever
-  // reported as a line of prose. Every name the test table asserts is still
-  // caught: `slack-token.md`, `my_api_key.txt`, `db_credentials.json`.
-  /(^|[._-])(tokens?|secrets?|credentials?|passwords?|apikeys?|api[_-]?keys?)($|[._-])/i,
+  /\.(pem|p12|pfx|jks|keystore)$/i,
 ];
+
+/**
+ * Deliberately NOT here: a word list over filenames.
+ *
+ * This used to also match `(tokens?|secrets?|credentials?|passwords?|apikeys?)`
+ * bounded by delimiters, on the theory that a delimiter-bounded word is
+ * specific enough. Measured against 63 tasks of a real corpus, it discarded 6
+ * files, and every one of them was research material:
+ *
+ *   token_efficiency_main.jpg          one of the author's seven figures
+ *   token_efficiency_analysis_lcp.jpg  another of them
+ *   train_token_amber.{py,sh}          that task's training scripts
+ *   eval_token_amber.{py,sh}           its evaluation scripts
+ *
+ * In machine learning, "token" is what a model reads, not what authenticates
+ * one. The same is true of "secret" in cryptography papers and "password" in
+ * usable-security papers -- the words a filter treats as credentials are the
+ * subject matter of the fields this tool writes for.
+ *
+ * The lesson generalises past this one list: guessing a file's MEANING from its
+ * name has no stopping point, and each new pattern buys one true positive and
+ * an unknown number of silent, unreported losses. Deciding what the materials
+ * contain is the triage stage's job -- it reads them.
+ *
+ * What is left is not guessing. `.pem`, `id_rsa` and `.env` are credential
+ * FORMATS, not words that suggest a topic; nothing in a paper's materials is
+ * shaped like a PEM private key by accident. `.key` is gone from the extension
+ * list for the same reason the word list is: a `.key` file is a Keynote
+ * presentation as often as it is a key.
+ *
+ * An `.example`, `.sample` or `.template` suffix is exempt: those files exist
+ * to be committed and hold placeholders, and three tasks in the corpus lost
+ * `code/.env.example`, which is the only record of what configuration the
+ * experiment needs.
+ */
+const PLACEHOLDER_SUFFIXES = new Set([".example", ".sample", ".template", ".dist"]);
 
 export function isSensitive(relPath: string): boolean {
   const name = basename(relPath);
+  if (PLACEHOLDER_SUFFIXES.has(extname(name).toLowerCase())) return false;
   return SENSITIVE.some((re) => re.test(name));
 }
 
@@ -55,71 +86,6 @@ export function isSensitive(relPath: string): boolean {
  * caches in them, and copying an unknown binary into a digested, read-only tree
  * is never what the user meant.
  */
-const ALLOWED_EXTENSIONS = new Set([
-  ".md",
-  ".txt",
-  ".tex",
-  ".bib",
-  ".sty",
-  ".cls",
-  ".bst",
-  ".json",
-  ".csv",
-  ".tsv",
-  ".yaml",
-  ".yml",
-  ".pdf",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".svg",
-  ".eps",
-]);
-
-const ALLOWED_NAMES = new Set(["Makefile", "makefile", "latexmkrc", ".latexmkrc"]);
-
-/**
- * Text formats a research directory carries that are not paper material.
- *
- * Kept as a second tier rather than folded into `ALLOWED_EXTENSIONS` so the
- * distinction stays legible: the first tier is what a manuscript is built from,
- * this one is what the experimental record is described in. A benchmark task
- * whose materials are a research overview plus a training repository is 60%
- * `.py` by file count, and that is where the experimental setup lives.
- */
-const TEXT_EXTENSIONS = new Set([
-  ".py",
-  ".ipynb",
-  ".r",
-  ".jl",
-  ".sh",
-  ".bash",
-  ".zsh",
-  ".log",
-  ".jsonl",
-  ".ndjson",
-  ".rst",
-  ".org",
-  ".toml",
-  ".cfg",
-  ".ini",
-  ".c",
-  ".h",
-  ".cc",
-  ".cpp",
-  ".hpp",
-  ".go",
-  ".rs",
-  ".java",
-  ".sql",
-  ".xml",
-  ".html",
-  ".css",
-  ".js",
-  ".ts",
-]);
-
 /**
  * Directories that are never research material.
  *
@@ -164,9 +130,17 @@ export function isNoiseDir(name: string): boolean {
   return NOISE_DIRS.has(name) || name.startsWith(WORKSPACE_DIR_PREFIX);
 }
 
-/** Per-file ceilings. Text is capped low; a figure or PDF legitimately is not. */
-const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_BINARY_FILE_BYTES = 64 * 1024 * 1024;
+/**
+ * One per-file ceiling, for every kind of file.
+ *
+ * There were two, chosen by whether the extension looked binary -- 2 MiB for
+ * text and 64 MiB otherwise. That distinction required classifying the file
+ * first, and classifying is what this module is getting out of the business of
+ * doing. A 40 MiB CSV of measurements is as legitimate as a 40 MiB figure, and
+ * the ceiling's actual job is to keep one pathological file out of a
+ * digest-locked tree, which is a question about size alone.
+ */
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
  * Whole-import ceilings.
@@ -217,49 +191,6 @@ export function looksLikeText(path: string): boolean {
   }
 }
 
-export function isImportable(relPath: string): boolean {
-  const name = basename(relPath);
-  if (ALLOWED_NAMES.has(name)) return true;
-  const extension = extname(name).toLowerCase();
-  if (NEVER_IMPORT_EXTENSIONS.has(extension)) return false;
-  return ALLOWED_EXTENSIONS.has(extension) || TEXT_EXTENSIONS.has(extension);
-}
-
-/** Whether an unknown extension may be admitted by sniffing its content. */
-function mayBeSniffed(relPath: string): boolean {
-  const extension = extname(basename(relPath)).toLowerCase();
-  return !NEVER_IMPORT_EXTENSIONS.has(extension) && !isBinaryMaterial(relPath);
-}
-
-/**
- * Extensions that are never research material, whatever their bytes look like.
- *
- * The sniff tier exists for *unknown* extensions. Without this list it would
- * also admit build artifacts and archives whose leading bytes happen to decode
- * as text -- an empty `.pyc`, a text-shaped `.dat` -- and "the sample looked
- * like text" is not a reason to import a compiled object. Checked before the
- * sniff, so the decision never depends on file content for a format we can
- * already name.
- */
-const NEVER_IMPORT_EXTENSIONS = new Set([
-  ".so", ".pyc", ".pyo", ".pyd", ".whl", ".egg", ".exe", ".dll", ".dylib",
-  ".a", ".o", ".obj", ".class", ".jar", ".war",
-  ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar",
-  ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
-  ".pkl", ".pickle", ".npy", ".npz", ".pt", ".pth", ".ckpt", ".safetensors",
-  ".h5", ".hdf5", ".onnx", ".pb", ".tflite",
-  ".woff", ".woff2", ".ttf", ".otf",
-  ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", ".wav", ".flac",
-  ".iso", ".dmg", ".deb", ".rpm",
-]);
-
-/** Extensions whose content is not text and must not be sniffed. */
-function isBinaryMaterial(relPath: string): boolean {
-  return [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".eps"].includes(
-    extname(relPath).toLowerCase(),
-  );
-}
-
 export interface ImportResult {
   readonly files: string[];
   readonly skipped: string[];
@@ -286,9 +217,9 @@ export interface ImportOptions {
    *
    * Used to keep the discovered template out of `source/`. The exclusion is
    * load-bearing rather than tidy: `suppliedBibliography` and
-   * `suppliedFigures` decide whether the author handed us a bibliography or
-   * figures by looking for `source/references.bib` and `source/figures/`, so a
-   * venue's stub left among the materials would impersonate the author's own.
+   * `suppliedFiguresDir` decide whether the author handed us a bibliography or
+   * figures by searching the material tree, so a venue's stub left among the
+   * materials would impersonate the author's own.
    */
   readonly exclude?: ReadonlySet<string>;
 }
@@ -334,21 +265,14 @@ export function importDirectory(
 
     const abs = join(from, rel);
     const size = statSync(abs).size;
-    const binary = isBinaryMaterial(rel);
-    const cap = binary ? MAX_BINARY_FILE_BYTES : MAX_TEXT_FILE_BYTES;
-    if (size > cap) {
-      note(rel, `too large (${size} bytes, cap ${cap})`);
+    if (size > MAX_FILE_BYTES) {
+      note(rel, `too large (${size} bytes, cap ${MAX_FILE_BYTES})`);
       continue;
     }
 
-    if (!isImportable(rel)) {
-      // Unknown extension, or none at all: admit it if it reads as text. This
-      // is what lets README/LICENSE/Dockerfile through without a name list.
-      if (!mayBeSniffed(rel) || !looksLikeText(abs)) {
-        note(rel, "not importable");
-        continue;
-      }
-    }
+    // No third test. What the author handed over is what `source/` records;
+    // whether a given file is worth reading is decided later, by something
+    // that can actually read it.
 
     keep.push(rel);
     bytes += size;
@@ -521,6 +445,11 @@ export interface BrainInputResult {
   readonly files: string[];
   /** Files that could not be normalized, with the reason. */
   readonly skipped: string[];
+  /**
+   * Files present in `source/` whose bytes are not text, so no readable copy
+   * exists. Not a failure and not hidden -- the inventory names them.
+   */
+  readonly unreadable: string[];
 }
 
 /**
@@ -543,6 +472,7 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
   ensureDir(p.brainInput);
   const produced: string[] = [];
   const skipped: string[] = [];
+  const unreadable: string[] = [];
 
   for (const rel of walkFiles(p.source)) {
     const abs = join(p.source, rel);
@@ -557,114 +487,117 @@ export async function prepareBrainInput(workspace: string): Promise<BrainInputRe
       }
       continue;
     }
-    if (isBinaryMaterial(rel)) continue;
+    // Mirrored only if the bytes really are text. This is the one place a
+    // readability judgement belongs, it is made from content rather than from a
+    // name, and being left out here is not being hidden: `materialsInventory`
+    // lists every file in `source/` and marks the ones it could not mirror, so
+    // the agent knows a `runs.npy` exists and that it cannot read it.
+    if (!looksLikeText(abs)) {
+      unreadable.push(rel);
+      continue;
+    }
 
     const target = assertInside(p.brainInput, rel);
     ensureDir(dirname(target));
     copyFileSync(abs, target);
     produced.push(target);
   }
-  return { files: produced.map((path) => relative(workspace, path)), skipped };
+  return { files: produced.map((path) => relative(workspace, path)), skipped, unreadable };
 }
 
-/** Figure assets supplied by the user, used when plotting is disabled. */
-export function suppliedFigures(workspace: string): string[] {
-  const dir = join(paths(workspace).source, "figures");
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
-  return readdirSync(dir)
-    .filter((name) => [".pdf", ".png", ".jpg", ".jpeg"].includes(extname(name).toLowerCase()))
-    .sort();
+/** Extensions a supplied figure can arrive as. */
+const FIGURE_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg"]);
+
+/**
+ * Directory names an author uses for the figures they drew themselves.
+ *
+ * A name list rather than "any directory holding images", because a repository
+ * is full of images that are not this paper's figures -- a README banner, a
+ * screenshot in a docs folder, an icon. Publishing those would put them in the
+ * manuscript: `figureCoverage` requires every figure in `info.json` to be
+ * `\includegraphics`'d, so a stray logo becomes a figure the writer is
+ * REQUIRED to place.
+ */
+const FIGURE_DIR_NAMES = new Set(["figures", "figure", "figs", "fig", "images", "imgs", "plots"]);
+
+/**
+ * Where the author put the figures they drew, workspace-relative, or null.
+ *
+ * SEARCHED, for the same reason `suppliedBibliography` is: reading exactly
+ * `source/figures/` finds nothing when the input is a repository whose
+ * materials sit one level down, and "no figures supplied" is indistinguishable
+ * from "the author drew none". Seven figures then go unpublished and
+ * `figureCoverage` passes trivially over the empty set.
+ *
+ * Vendored directories are excluded by `salience.ts`. That matters here as much
+ * as it does for bibliographies: one corpus input's bundled tool ships both
+ * `assets/overview.png` and `frontend/examples/cvpr_example_figure.png`.
+ */
+export function suppliedFiguresDir(workspace: string): string | null {
+  const root = paths(workspace).source;
+  const byDir = new Map<string, number>();
+  for (const rel of authoredFiles(root)) {
+    if (!FIGURE_EXTENSIONS.has(extname(rel).toLowerCase())) continue;
+    const dir = dirname(rel);
+    const base = dir.split(sep).pop()?.toLowerCase();
+    if (base === undefined || !FIGURE_DIR_NAMES.has(base)) continue;
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+  }
+  if (byDir.size === 0) return null;
+  const best = [...byDir.keys()].sort(
+    (a, b) => depthOf(a) - depthOf(b) || a.localeCompare(b),
+  )[0] as string;
+  return join(SOURCE_DIR, best);
 }
 
 /**
- * Where the pre-writing documents actually are.
+ * Ceilings under which the materials can simply be read in full.
  *
- * `triage.json` is the single source of truth once it exists, which is what
- * lets both paths -- supplied and synthesized -- present an identical contract
- * downstream, so `stageInputs` needs no branch of its own. The fallback to
- * `source/<filename>` keeps a `--until`-truncated plan and any workspace
- * prepared before triage existed working unchanged.
+ * The triage stage exists to make a large input tractable: it says which of
+ * several hundred files are worth opening. A handful of notes needs none of
+ * that -- every stage can read all of it -- and running a model to produce a
+ * map of three files would spend tokens to restate a directory listing.
+ *
+ * This replaces the previous router, which asked whether the author had
+ * supplied two files with particular names. That question only had an answer
+ * for inputs shaped the way one benchmark shapes them; "is this small enough to
+ * read whole" has an answer for any input, which is the property a general
+ * tool needs.
+ *
+ * Both ceilings, because either alone is escapable in a way that matters: 400
+ * tiny files are small in bytes and still need a map, and one 5 MB log is a
+ * single file nobody can read whole.
+ *
+ * Measured against the corpus this is tuned on, no task qualifies -- the
+ * smallest holds 133 KB of text across 30 files. That is the correct outcome
+ * and worth stating: these tasks are exactly the case the mapping stage is for.
  */
-export interface MaterialPaths {
-  /** Workspace-relative path to the idea document. */
-  readonly idea: string;
-  readonly experimentalLog: string;
-}
-
-export function materialPaths(
-  workspace: string,
-  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
-): MaterialPaths {
-  const report = readTriageReport(workspace);
-  if (report) {
-    return { idea: report.idea_path, experimentalLog: report.experimental_log_path };
-  }
-  return {
-    idea: join(SOURCE_DIR, scope.idea_filename),
-    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
-  };
-}
-
-function readTriageReport(workspace: string): TriageReport | null {
-  const path = join(workspace, ARTIFACTS.triageReport);
-  if (!existsSync(path)) return null;
-  const parsed = TriageReportSchema.safeParse(
-    JSON.parse(readFileSync(path, "utf8")) as unknown,
-  );
-  return parsed.success ? parsed.data : null;
-}
+export const READ_WHOLE_MAX_BYTES = 64 * 1024;
+export const READ_WHOLE_MAX_FILES = 25;
 
 /**
- * Whether a supplied document has content the author actually put there.
+ * Can every stage just read all of the normalized materials?
  *
- * Not a byte floor. The question is whether the file was filled in at all, and
- * a length threshold answers a different question -- whether they wrote
- * *enough* -- which is a quality judgement, and quality is what triage is for.
- * Every threshold I tried also sat wrong on some real boundary: a one-line
- * idea is around 30 bytes, so any floor big enough to feel meaningful rejects
- * documents a user legitimately wrote.
- *
- * The error directions are not symmetric either. A terse document routed to
- * synthesis is at least still read; a usable one routed away is silently
- * replaced by a rewrite the author never asked for.
+ * Deterministic and recomputed rather than recorded, so the controller's
+ * decision to skip the mapping stage and the validator's expectation of a
+ * missing map cannot disagree. A flag in `.brain/` would be writable by the
+ * agent being validated; a flag in `run.json` would freeze a decision that
+ * depends on a tree the run can still be resumed against.
  */
-function hasAuthoredContent(path: string): boolean {
-  try {
-    return readFileSync(path, "utf8").trim().length > 0;
-  } catch {
-    return false;
+export function materialsFitWhole(workspace: string): boolean {
+  const p = paths(workspace);
+  const files = walkFiles(p.brainInput, { onUnsafe: "skip" });
+  if (files.length === 0 || files.length > READ_WHOLE_MAX_FILES) return false;
+  let bytes = 0;
+  for (const rel of files) {
+    try {
+      bytes += statSync(join(p.brainInput, rel)).size;
+    } catch {
+      return false;
+    }
+    if (bytes > READ_WHOLE_MAX_BYTES) return false;
   }
-}
-
-/**
- * The two documents, when the user supplied both and triage can be skipped.
- *
- * Returns paths rather than a boolean so the controller can write them straight
- * into `triage.json` and keep that file the only place downstream reads.
- *
- * A byte floor is defensible here in a way it is not for artifact validation,
- * because this is a ROUTING decision: getting it wrong costs one triage call,
- * not a bad paper. Deliberately excluded is any judgement about content --
- * "did the user hand us these two documents" is a question about the
- * filesystem, and a content heuristic would make an expensive model call depend
- * on something the user cannot predict.
- */
-export function suppliedMaterials(
-  workspace: string,
-  scope: { readonly idea_filename: string; readonly experimental_log_filename: string },
-): MaterialPaths | null {
-  const candidate: MaterialPaths = {
-    idea: join(SOURCE_DIR, scope.idea_filename),
-    experimentalLog: join(SOURCE_DIR, scope.experimental_log_filename),
-  };
-  for (const rel of [candidate.idea, candidate.experimentalLog]) {
-    const abs = join(workspace, rel);
-    if (!existsSync(abs)) return null;
-    if (statKind(abs) !== "file") return null;
-    if (!looksLikeText(abs)) return null;
-    if (!hasAuthoredContent(abs)) return null;
-  }
-  return candidate;
+  return true;
 }
 
 /**
@@ -672,8 +605,8 @@ export function suppliedMaterials(
  *
  * Given to the model rather than left to be discovered, so it starts with a map
  * instead of spending a turn globbing, and so `materials_considered` in
- * `triage.json` has something to be checked against. Sizes are included because
- * they are the cheapest signal about which files carry substance.
+ * `materials.json` has something to be checked against. Sizes are included
+ * because they are the cheapest signal about which files carry substance.
  *
  * Bounded: a repository can hold thousands of files, and the inventory must not
  * crowd out the materials themselves. Directories are summarized once the list
@@ -681,19 +614,42 @@ export function suppliedMaterials(
  */
 export function materialsInventory(workspace: string, maxEntries = 200): string {
   const p = paths(workspace);
-  const files = walkFiles(p.brainInput)
-    .filter((rel) => !rel.startsWith(`synthesized${sep}`) && rel !== "synthesized")
-    .map((rel) => ({ rel, bytes: statSync(join(p.brainInput, rel)).size }));
 
-  if (files.length === 0) return "(no normalized material found)";
+  // Walked over `source/`, not over the mirrored tree. `source/` is what the
+  // author gave us; `.brain/input/` is what happens to be readable. Listing
+  // only the latter told the agent that the unreadable files did not exist,
+  // which is the one thing an inventory must never do -- a `runs.npy` holding
+  // the results then goes unmentioned rather than being reported as a gap.
+  const mirrored = new Set(walkFiles(p.brainInput, { onUnsafe: "skip" }));
+  const readable = (rel: string): boolean => {
+    if (mirrored.has(rel)) return true;
+    // A PDF is mirrored as markdown beside its own path.
+    const asMarkdown = join(dirname(rel), `${basename(rel, extname(rel))}.md`);
+    return mirrored.has(asMarkdown);
+  };
 
-  const header = `${files.length} file(s) under .brain/input/`;
+  const files = walkFiles(p.source, { onUnsafe: "skip" }).map((rel) => ({
+    rel,
+    bytes: statSync(join(p.source, rel)).size,
+    readable: readable(rel),
+  }));
+
+  if (files.length === 0) return "(no imported material found)";
+
+  const unreadable = files.filter((f) => !f.readable).length;
+  const note = (f: { rel: string; bytes: number; readable: boolean }): string =>
+    `  ${f.rel}  (${f.bytes} bytes${f.readable ? "" : ", binary -- no text copy"})`;
+
+  const header =
+    `${files.length} file(s) under source/, mirrored for reading under .brain/input/` +
+    (unreadable > 0
+      ? `. ${unreadable} of them are not text, so no readable copy exists -- expected for ` +
+        "images and data blobs, and not a problem by itself. If one of them holds something " +
+        "the paper needs and you cannot read it, say so in `unresolved` rather than guessing."
+      : ".");
+
   if (files.length <= maxEntries) {
-    return [
-      header,
-      "",
-      ...files.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
-    ].join("\n");
+    return [header, "", ...files.map(note)].join("\n");
   }
 
   const byDir = new Map<string, { count: number; bytes: number }>();
@@ -704,7 +660,7 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
   }
   const largest = [...files].sort((a, b) => b.bytes - a.bytes).slice(0, 40);
   return [
-    `${header}, too many to list individually. Directory summary:`,
+    `${header} Too many to list individually. Directory summary:`,
     "",
     ...[...byDir.entries()]
       .sort((a, b) => b[1].count - a[1].count)
@@ -712,7 +668,7 @@ export function materialsInventory(workspace: string, maxEntries = 200): string 
     "",
     "Largest files:",
     "",
-    ...largest.map((f) => `  ${f.rel}  (${f.bytes} bytes)`),
+    ...largest.map(note),
     "",
     "Use glob and read to explore the rest.",
   ].join("\n");
@@ -738,17 +694,17 @@ export function materialSurvey(rawMaterials: string, budgetChars: number): strin
     skipDir: isNoiseDir,
     onUnsafe: "skip",
   }).filter((rel) => {
+    // This survey is quoted into a prompt, so it wants text and only text --
+    // decided by reading the bytes, which is also the only test that works for
+    // a format nobody listed.
     if (isSensitive(rel)) return false;
-    if (isBinaryMaterial(rel)) return false;
-    const extension = extname(rel).toLowerCase();
-    if (NEVER_IMPORT_EXTENSIONS.has(extension)) return false;
     const abs = join(root, rel);
     try {
-      if (statSync(abs).size > MAX_TEXT_FILE_BYTES) return false;
+      if (statSync(abs).size > MAX_FILE_BYTES) return false;
     } catch {
       return false;
     }
-    return isImportable(rel) || looksLikeText(abs);
+    return looksLikeText(abs);
   });
 
   if (candidates.length === 0) return "(no readable material found)";
