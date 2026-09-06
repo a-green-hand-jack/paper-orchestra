@@ -80,7 +80,11 @@ try {
   const network = process.env.PO_DOCKER_NETWORK ?? 'bridge';
   if (!/^[A-Za-z0-9_.-]+$/.test(network) || network === 'host') throw new Error('PO_DOCKER_NETWORK must be bridge, none or a named Docker network, never host/container networking');
   report.network = network;
-  exit = docker('build', ['build', '--progress=plain', '--tag', image, '.']).code;
+  if (process.env.PO_DOCKER_SKIP_BUILD === '1') {
+    if (!/^sha256:[a-f0-9]{64}$/.test(image) || mode === 'build') throw new Error('Skip-build requires an immutable local image ID and a non-build mode');
+  } else {
+    exit = docker('build', ['build', '--progress=plain', '--tag', image, '.']).code;
+  }
   if (!exit) {
     const info = docker('image-id', ['image', 'inspect', '--format', '{{.Id}}', image], 30000, true);
     exit = info.code;
