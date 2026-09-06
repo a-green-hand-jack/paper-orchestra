@@ -221,10 +221,14 @@ paper-orchestra resume ./paper-run --headless --allow-lkm-spend
 
 完整流程成功后，优先查看工作区的 `submission/`：
 
+系统也会在审阅前生成该目录，供检查真实交付文件。因此，目录存在并不代表完成：`submission-status.json` 的 `review_pending` 表示待审阅，`completed` 才表示控制器已在检查通过后完成交付。不要手工修改这个标记。
+
 ```text
 paper-run/
 ├── submission/
 │   ├── final.pdf          # 交付 PDF
+│   ├── final_paper.pdf    # 同一 PDF 的兼容文件名
+│   ├── submission-status.json # 控制器记录的交付状态
 │   ├── main.tex           # 可编辑的论文入口
 │   ├── references.bib
 │   ├── figures/

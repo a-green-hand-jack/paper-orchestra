@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const report = { schema_version: 1, kind: 'real-cli', ok: false, started_at: new Date().toISOString(), steps: [] };
 const save = () => writeFileSync('/output/runtime-acceptance.json', JSON.stringify(report, null, 2) + '\n');
@@ -36,8 +36,10 @@ if (!exit) {
     report.validation = JSON.parse(validation.stdout).checks.map(({ name, passed, advisory }) => ({ name, passed, advisory }));
     const result = writing.stdout.trim().split('\n').map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean).at(-1);
     report.submission_ready = result?.submission_ready === true;
-    report.export_present = ['main.tex', 'references.bib', 'final.pdf', 'README.md'].every(file => existsSync(`/output/workspace/submission/${file}`));
-    if (state.status !== 'completed' || !report.submission_ready || !report.export_present) exit ||= 2;
+    report.export_present = ['main.tex', 'references.bib', 'final.pdf', 'final_paper.pdf', 'submission-status.json', 'README.md'].every(file => existsSync(`/output/workspace/submission/${file}`));
+    report.submission_status = report.export_present
+      ? JSON.parse(readFileSync('/output/workspace/submission/submission-status.json', 'utf8')).status : null;
+    if (state.status !== 'completed' || !report.submission_ready || !report.export_present || report.submission_status !== 'completed') exit ||= 2;
   } catch { exit ||= 2; }
 }
 report.ok = exit === 0;

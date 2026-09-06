@@ -36,10 +36,10 @@ import { assertInside, digestFile, digestValue, readJson, writeJsonAtomic } from
 import { retrieveForLiterature, UnmetLiteratureError } from "./literature-controller.js";
 import { preflightRun } from "./preflight.js";
 import { manuscriptReadiness, reviewManuscript, reviewRepairTargets } from "./manuscript-review.js";
-import { analyzeSourceTables, exportSubmission, publishTables } from "./presentation.js";
+import { analyzeSourceTables, bindPlannedTables, exportSubmission, publishTables, submissionArtifacts } from "./presentation.js";
 import { compileLatex, stageBuildDir } from "./latexbuild.js";
 import { renderPdfPages } from "./latexbuild.js";
-import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, resolve } from "node:path";
 import { FigureInfoSchema } from "./artifacts.js";
 import { ensureDir } from "./files.js";
@@ -199,7 +199,9 @@ async function drive(
     if (state.scope.plan.includes("refinement")) {
       const ready = manuscriptReadiness(workspace);
       if (!ready.passed) throw new UserFacingError(ready.detail);
-      exportSubmission(workspace);
+      exportSubmission(workspace, { ready: true });
+      const delivery = submissionArtifacts(workspace, true);
+      if (!delivery.passed) throw new UserFacingError(delivery.detail);
     }
     state = updateRunState(workspace, (current) => ({
       ...current,
@@ -394,6 +396,10 @@ async function runStage(
     await reviewManuscript({ runtime, workspace, sourceRel: reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft,
       model, timeoutMs, signal, onProgress: (line) => say(options, line) });
     await repairReviewedFigures(runtime, options, sessions, signal, reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft);
+    if (priorError) {
+      const current = validateStage(workspace, stage, state.scope).filter((check) => !check.passed);
+      priorError = current.length ? current.map((check) => `${check.name}: ${check.detail}`).join("; ") : null;
+    }
   }
 
   await prompt(runtime, {
@@ -632,6 +638,28 @@ async function buildIfManuscriptStage(
   if (!existsSync(sourceAbs)) return; // artifact_exists reports this better.
   try {
     publishTables(workspace);
+    const reachable = new Map<string, string>();
+    const visit = (file: string): void => {
+      if (reachable.has(file)) return;
+      if (realpathSync(file) !== file) throw new Error("Refusing symlinked manuscript source");
+      const text = readFileSync(file, "utf8");
+      reachable.set(file, text);
+      for (const match of text.replace(/(?<!\\)%[^\n]*/g, "").matchAll(/\\(?:input|include)\s*\{([^{}]+)\}/g)) {
+        const rel = match[1]!.trim();
+        const child = assertInside(paths(workspace).brainManuscript, rel.endsWith(".tex") ? rel : `${rel}.tex`);
+        if (child.startsWith(join(paths(workspace).brainManuscript, "tables") + "/")) continue;
+        if (existsSync(child)) visit(child); // Template includes remain read-only; the compiler resolves them.
+      }
+    };
+    visit(sourceAbs);
+    const files = [...reachable.keys()];
+    const originals = [...reachable.values()];
+    // Detect repeated canonical bindings across included sections before editing.
+    bindPlannedTables(workspace, originals.join("\n"));
+    const bound = originals.map((source) => bindPlannedTables(workspace, source));
+    files.forEach((file, index) => {
+      if (bound[index] !== originals[index]) writeFileSync(file, bound[index]!, "utf8");
+    });
   } catch (error) {
     writeJsonAtomic(join(workspace, ARTIFACTS.buildReport), { ok: false, source: sourceRel,
       pdf: null, pages: null, errors: [`Invalid table_presentation.json or table plan: ${String(error)}`],
@@ -659,6 +687,7 @@ async function buildIfManuscriptStage(
 
   if (result.pdf) {
     copyFileSync(result.pdf, join(workspace, ARTIFACTS.finalPdf));
+    if (result.ok) exportSubmission(workspace, { sourceRel, ready: false });
     say(
       options,
       `   compiled ${sourceRel} -> ${result.pages ?? "?"} page(s)` +

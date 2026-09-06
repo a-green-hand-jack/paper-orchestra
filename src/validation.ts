@@ -1050,6 +1050,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "refinement":
       return [
+        submissionArtifacts(workspace),
         validateResearch(workspace),
         tableCoverage(workspace, ARTIFACTS.finalTex),
         manuscriptReadiness(workspace),
@@ -1096,4 +1097,4 @@ export const validators = {
   noUnresolvedMarkers,
 };
 import { manuscriptReadiness } from "./manuscript-review.js";
-import { tableCoverage, tablePlanCheck } from "./presentation.js";
+import { tableCoverage, tablePlanCheck, submissionArtifacts } from "./presentation.js";

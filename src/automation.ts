@@ -5,6 +5,7 @@ import { resumeStage } from "./state/store.js";
 import type { RunState } from "./state/schema.js";
 import { manuscriptReadiness } from "./manuscript-review.js";
 import { readBudget } from "./budget.js";
+import { submissionArtifacts } from "./presentation.js";
 
 /** Stable result envelope consumed by other agents and automation systems. */
 export function runResult(workspace: string, state: RunState): Record<string, unknown> {
@@ -23,7 +24,7 @@ export function runResult(workspace: string, state: RunState): Record<string, un
     exit_status: state.status === "failed" || state.status === "interrupted" ? 1 : 0,
     plan_completed: state.status === "completed",
     submission_ready: state.status === "completed" && state.scope.plan.includes("refinement") &&
-      manuscriptReadiness(absolute).passed,
+      manuscriptReadiness(absolute).passed && submissionArtifacts(absolute, true).passed,
     workspace: absolute,
     run_id: state.run_id,
     run_state: state.status,

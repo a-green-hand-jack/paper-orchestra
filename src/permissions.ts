@@ -57,6 +57,7 @@ export function permissionsFor(mode: "autonomous" | "collaborative"): Permission
       ".brain/raw/plotting_results.json": "deny",
       ".brain/manuscript/figures/**": "deny",
       ".brain/manuscript/review.json": "deny",
+      ".brain/manuscript/submission-status.json": "deny",
       ".brain/manuscript/tables/**": "deny",
       ".po-run/**": "deny",
       "submission/**": "deny",

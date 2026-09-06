@@ -246,7 +246,17 @@ PO_ALLOW_PAID=1 PO_OUTPUT_DIR=/absolute/previous-output npm run test:docker -- r
 ```
 
 Fresh acceptance runs the same installed CLI through doctor, autonomous headless
-write, status and validate. Writing must complete, report `submission_ready`,
+write and review. Each successful manuscript build prepares a real provisional
+`submission/` with `main.tex`, controller `references.bib`, both `final.pdf` and
+`final_paper.pdf`, figure/table dependencies, and `submission-status.json` marked
+`review_pending`. The reviewer receives the actual inventory and hashes; it must
+not require a completed status before giving its approval. The controller promotes
+the unchanged reviewed content to `completed` only after all required checks pass.
+Prior controller-owned package generations are archived; user edits are never
+silently overwritten. Table rounding is a presentation-only `decimals` setting,
+not permission to change source values or replace verified rows.
+
+The acceptance driver then runs status and validate. Writing must complete, report `submission_ready`,
 and export actual LaTeX/bibliography/figures/PDF. A separate, credential-free,
 network-disabled container copies that export and recompiles from source without
 prebuilt main PDFs or shell escape, then reads the new PDF with Poppler. That

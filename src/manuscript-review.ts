@@ -9,6 +9,7 @@ import { ARTIFACTS, BRIEF_FILE, paths } from "./paths.js";
 import type { Check, ModelRef, Usage } from "./state/schema.js";
 import { citedKeys } from "./latex.js";
 import { CandidatesSchema } from "./artifacts.js";
+import { submissionArtifacts, submissionEvidence } from "./presentation.js";
 
 const REVIEW = ".brain/manuscript/review.json";
 const LEDGER = ".po-run/review-issues.json";
@@ -29,7 +30,7 @@ export function reviewInputDependencies(workspace: string, sourceRel = ARTIFACTS
   const files = new Set([sourceRel, ARTIFACTS.finalPdf, BRIEF_FILE, ARTIFACTS.outlineV1,
     ARTIFACTS.plottingResults, ARTIFACTS.figuresInfo, ARTIFACTS.candidates, ARTIFACTS.references,
     ARTIFACTS.materialsMap, ARTIFACTS.citationMap, ".brain/input-manifest.json", ".brain/raw/data_analysis.json",
-    ".brain/manuscript/table_presentation.json"]);
+    ".brain/manuscript/table_presentation.json", ".po-run/submission-content.json"]);
   for (const root of ["source", ".brain/input", "template", ".brain/manuscript/tables", ".brain/manuscript/figures"]) {
     for (const rel of walkFiles(join(workspace, root))) files.add(`${root}/${rel}`);
   }
@@ -140,10 +141,14 @@ function reviewContext(workspace: string, sourceRel: string, attempt: string) {
     const state = readJson<{scope: unknown; mode: string}>(statePath);
     const contract = join(attempt, "requirements.json");
     writeFileSync(contract, JSON.stringify({ scope: state.scope, mode: state.mode,
-      brief: BRIEF_FILE, note: "Controller-locked options; model-authored outline requirement labels are not authoritative CLI input." }, null, 2),
+      brief: BRIEF_FILE, output_workspace: workspace, submission_directory: join(workspace, "submission"),
+      note: "Controller-locked options; the CLI output workspace maps the brief's submission root. Model-authored outline requirement labels are not authoritative CLI input." }, null, 2),
     { flag: "wx", mode: 0o444 });
     add(relative(workspace, contract), true, "actual controller-locked writing requirements");
   }
+  const deliveryPath = join(attempt, "submission-evidence.json");
+  writeFileSync(deliveryPath, JSON.stringify(submissionEvidence(workspace), null, 2), { flag: "wx", mode: 0o444 });
+  add(relative(workspace, deliveryPath), true, "actual provisional submission files and bibliography");
   if (existsSync(join(workspace, ARTIFACTS.candidates))) {
     const keys = new Set(mandatory.filter((rel) => rel.endsWith(".tex"))
       .flatMap((rel) => citedKeys(readFileSync(join(workspace, rel), "utf8"))));
@@ -374,6 +379,13 @@ during writing. Do not repeatedly demand synonyms for an already accurate proven
 Check image-provider/model attributions against controller plotting_results.json provenance, not
 model names guessed in the outline. Preserve qualifications when model_evidence is unverified.
 This is content/layout review, not universal scientific proof; report uncertainty honestly.
+The controller exports an actual provisional submission BEFORE review. Inspect submission-evidence.json
+for its validated file inventory, hashes and separate bibliography. review_pending is the correct status
+at this point; only after your approval and mechanical checks can the controller promote it to completed.
+Do not demand a completed status before review, or ask the writer to forge controller-owned delivery files.
+An inline bibliography is allowed when the required separate references.bib also exists in this package.
+The CLI output workspace defines the submission root; judge the required files there, not a different
+absolute path from a benchmark environment. Report real missing or invalid delivery evidence as a blocker.
 The author's brief and actual template guidelines define requirements. Outline interpretations are
 not independent venue rules: do not elevate scaffold suggestions or guessed declarations into a
 mandatory journal policy. Missing identities can be represented by an anonymous review manuscript;
@@ -499,6 +511,8 @@ ${last ? `Now synthesize findings from ALL ${count} pages and source evidence. $
 export function manuscriptReadiness(workspace: string): Check {
   const name = "manuscript_readiness";
   try {
+    const delivery = submissionArtifacts(workspace);
+    if (!delivery.passed) throw new Error(delivery.detail);
     const stored = readJson<ManuscriptReview & { findings: ReviewIssue[] }>(join(workspace, REVIEW));
     const review = ManuscriptReviewSchema.strict().parse(stored);
     if (!review.ready || stored.findings.some((finding) => finding.status !== "resolved" && finding.severity === "blocking")) {

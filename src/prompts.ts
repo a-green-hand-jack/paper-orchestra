@@ -250,9 +250,11 @@ export function buildStagePrompt(
     ...outputs.map((path) => `- \`${path}\``),
     ...(["section_writing", "refinement"].includes(stage) ? [
       "You may additionally write `.brain/manuscript/table_presentation.json` for presentation-only table corrections.",
-      "Shape: {\"table_id\": {\"caption\": \"...\", \"row_header\": \"Quantity\", \"columns\": [\"...\"], \"row_labels\": [\"...\"]}}.",
+      "Shape: {\"table_id\": {\"caption\": \"...\", \"row_header\": \"Quantity\", \"columns\": [\"...\"], \"row_labels\": [\"...\"], \"decimals\": 2}}.",
       "All fields are optional. Preserve the number/order of columns and rows; never add values, sources or calculations here.",
+      "decimals is 0..100 for all numeric cells, or a column-aligned array of integers/null. Null leaves that column unrounded. Rounding changes display only, not verified measurements.",
       "The controller regenerates tables with these labels/captions and the original verified values. Keep using the generated table inputs; do not replace them with handwritten tables.",
+      "Submission files and completion status are controller-owned: a real review_pending package is prepared before review and only promoted after all checks pass. Do not create or forge submission-status.json yourself.",
     ] : []),
     ...(citationKeys
       ? [

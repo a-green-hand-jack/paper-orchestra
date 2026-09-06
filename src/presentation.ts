@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ZodError } from "zod";
 import { OutlineSchema, TABLE_VERIFICATION_HELP, type ColumnVerification, type TableSpec } from "./artifacts.js";
@@ -292,17 +292,32 @@ function verifyTableNumbers(table: TableSpec, sourceFiles: Map<string, string>) 
 function safeFile(root: string, rel: string): string {
   if (isAbsolute(rel) || rel.includes("\\") || rel.split("/").includes("..")) throw new Error(`Unsafe path: ${rel}`);
   const abs = assertInside(root, rel);
+  assertNoSymlinks(abs);
   const base = realpathSync(root);
   const real = realpathSync(abs);
   if (base !== resolve(root) || !real.startsWith(base + sep) || !lstatSync(abs).isFile()) throw new Error(`Not a regular file inside ${root}: ${rel}`);
   return abs;
 }
 
+function assertNoSymlinks(path: string): void {
+  const abs = resolve(path);
+  if (dirname(abs) !== abs) assertNoSymlinks(dirname(abs));
+  const stat = lstatSync(abs, { throwIfNoEntry: false });
+  if (stat?.isSymbolicLink()) throw new Error(`Refusing symlink: ${abs}`);
+}
+
+// Keep offsets intact for surgical source replacement, including after an escaped backslash.
+function uncommentTex(source: string): string {
+  return source.replace(/(\\*)%[^\r\n]*/g, (match, slashes: string) =>
+    slashes.length % 2 ? match : slashes + " ".repeat(match.length - slashes.length));
+}
+
 function tableArtifacts(workspace: string) {
   const plan = OutlineSchema.parse(readJson(join(workspace, ARTIFACTS.outlineV1))).table_plan;
   const presentationPath = join(workspace, ".brain/manuscript/table_presentation.json");
   const presentations = z.record(z.object({ caption: z.string().optional(), columns: z.array(z.string()).optional(),
-    row_labels: z.array(z.string()).optional(), row_header: z.string().optional() }).strict())
+    row_labels: z.array(z.string()).optional(), row_header: z.string().optional(),
+    decimals: z.union([z.number().int().min(0).max(100), z.array(z.number().int().min(0).max(100).nullable())]).optional() }).strict())
     .parse(existsSync(presentationPath) ? readJson(presentationPath) : {});
   for (const id of Object.keys(presentations)) {
     if (!plan.some((table) => table.table_id === id)) throw new Error(`Unknown table presentation ID: ${id}`);
@@ -321,13 +336,14 @@ function tableArtifacts(workspace: string) {
     const numeric_verification = verifyTableNumbers(table, sourceFiles);
     const presentation = presentations[table.table_id] ?? {};
     if ((presentation.columns && presentation.columns.length !== table.columns.length) ||
-        (presentation.row_labels && presentation.row_labels.length !== table.rows.length)) {
+        (presentation.row_labels && presentation.row_labels.length !== table.rows.length) ||
+        (Array.isArray(presentation.decimals) && presentation.decimals.length !== table.columns.length)) {
       throw new Error(`Table ${table.table_id}: presentation must preserve row and column counts`);
     }
     const tex = tableTex({ ...table, caption: presentation.caption ?? table.caption,
       columns: presentation.columns ?? table.columns,
       rows: table.rows.map((row, index) => ({ ...row, label: presentation.row_labels?.[index] ?? row.label })) },
-    presentation.row_header);
+    presentation.row_header, presentation.decimals);
     return { table, tex, manifest: { version: 1, table_id: table.table_id,
       plan_sha256: digestValue(table), presentation, presentation_sha256: digestValue(presentation),
       source_hashes, numeric_verification,
@@ -345,7 +361,7 @@ function escapeTex(value: string | number | null): string {
   return String(value).replace(/[\\{}$&#%_~^]/g, (char) => escaped[char]!).replace(/[\r\n\t]+/g, " ");
 }
 
-function tableTex(table: TableSpec, rowHeader = "Item"): string {
+function tableTex(table: TableSpec, rowHeader = "Item", decimals?: number | (number | null)[]): string {
   const width = 1 / (table.columns.length + 1);
   const layout = `p{\\dimexpr${width.toFixed(5)}\\linewidth-2\\tabcolsep\\relax}`.repeat(table.columns.length + 1);
   const displayText = (value: string): string => value.split(/((?:alpha|beta|gamma|delta|theta|lambda|sigma|mu|nu|phi|psi|omega)_[A-Za-z0-9]+|\b[A-Za-z]\^[+-]?\d+\b)/g)
@@ -356,7 +372,16 @@ function tableTex(table: TableSpec, rowHeader = "Item"): string {
       return power ? `\\ensuremath{${power[1]}^{${power[2]}}}` : escapeTex(part.replaceAll("_", " "));
     }).join("");
   const displayValue = (value: string | number | null, decimals?: number): string => {
-    if (typeof value !== "number") return value === null ? "--" : displayText(value);
+    if (typeof value !== "number") {
+      if (value === null) return "--";
+      if (decimals === undefined) return displayText(value);
+      // Only the same numeric/range grammar accepted by provenance verification is formatted.
+      const shape = value.replace(NUMBER, "#").replace(/[()%]/g, "").trim();
+      if (!/^(?:#|#\s*(?:to|[-\u2013\u2014]|\+\/-|\u00b1)\s*#)$/.test(shape)) return displayText(value);
+      return value.split(new RegExp(`(${NUMBER.source})`, "g")).map((part) =>
+        numeric(part) === null ? displayText(part).replace(/\u2013|\u2014/g, "--").replace(/\u00b1/g, "\\ensuremath{\\pm}") :
+          displayValue(Number(part), decimals)).join("");
+    }
     const fixed = decimals === undefined ? String(value) : value.toFixed(decimals);
     const text = value !== 0 && Math.abs(value) < 1e-4 && (decimals === undefined || decimals > 4)
       ? Number(fixed).toExponential() : fixed;
@@ -368,7 +393,8 @@ function tableTex(table: TableSpec, rowHeader = "Item"): string {
     `\\label{tab:${table.table_id}}`, `\\begin{tabular}{${layout}}`, "\\hline",
     [rowHeader, ...table.columns].map(displayText).join(" & ") + " " + "\\".repeat(2), "\\hline",
     ...table.rows.map((row) => [displayText(row.label), ...row.values.map((value, index) =>
-      displayValue(value, (row.cell_verification?.[index] ?? table.column_verification?.[index])?.decimals))]
+      displayValue(value, decimals === undefined ? (row.cell_verification?.[index] ?? table.column_verification?.[index])?.decimals :
+        Array.isArray(decimals) ? decimals[index] ?? undefined : decimals))]
       .join(" & ") + " " + "\\".repeat(2)),
     "\\hline", "\\end{tabular}", "\\end{table}", ""].join("\n");
 }
@@ -406,6 +432,51 @@ export function tablePresentationMetadata(workspace: string) {
   return tableArtifacts(workspace).map(({ manifest }) => manifest);
 }
 
+/** Bind identities to controller-verified data, never to numbers supplied in the draft. */
+export function bindPlannedTables(workspace: string, source: string): string {
+  const artifacts = tableArtifacts(workspace);
+  const labels = new Map(artifacts.map(({ table }) => [`tab:${table.table_id}`, table.table_id]));
+  const text = uncommentTex(source);
+  const seen = new Set<string>();
+  const claim = (id: string) => {
+    if (seen.has(id)) throw new Error(`Duplicate planned table binding: ${id}`);
+    seen.add(id);
+  };
+  for (const match of text.matchAll(/(?<!\\)\\(?:input|include)\s*\{(?:\.\/)?tables\/([^{}/]+?)(?:\.tex)?\}/g)) {
+    if (artifacts.some(({ table }) => table.table_id === match[1])) claim(match[1]!);
+  }
+  const edits: Array<{ start: number; end: number; replacement: string }> = [];
+  let float: { start: number; environment: string } | undefined;
+  for (const match of text.matchAll(/(?<!\\)\\(begin|end)\s*\{(table\*?)\}/g)) {
+    if (match[1] === "begin") {
+      if (float) throw new Error("Nested table floats cannot be bound safely");
+      float = { start: match.index!, environment: match[2]! };
+      continue;
+    }
+    if (!float || float.environment !== match[2]) throw new Error("Unbalanced table float");
+    const end = match.index! + match[0].length;
+    const canonical = [...text.slice(float.start, end).matchAll(/(?<!\\)\\label\s*\{([^{}]+)\}/g)]
+      .map((label) => labels.get(label[1]!.trim())).filter((id): id is string => id !== undefined);
+    if (canonical.length > 1) throw new Error("Table float carries multiple canonical planned labels");
+    if (canonical.length === 1) {
+      const id = canonical[0]!;
+      claim(id);
+      edits.push({ start: float.start, end, replacement: `\\input{tables/${id}.tex}` });
+    }
+    float = undefined;
+  }
+  if (float) throw new Error("Unclosed table float");
+  for (const [label] of labels) {
+    const occurrences = [...text.matchAll(/(?<!\\)\\label\s*\{([^{}]+)\}/g)].filter((match) => match[1]!.trim() === label);
+    if (occurrences.length > 1) throw new Error(`Duplicate canonical planned label: ${label}`);
+    if (occurrences.some((match) => !edits.some((edit) => match.index! >= edit.start && match.index! < edit.end))) {
+      throw new Error(`Canonical planned label must be inside a table float: ${label}`);
+    }
+  }
+  for (const edit of edits.reverse()) source = source.slice(0, edit.start) + edit.replacement + source.slice(edit.end);
+  return source;
+}
+
 /** Follow ordinary input/include commands, rather than counting commented or unused files. */
 export function tableCoverage(workspace: string, sourceRel: string): Check {
   const name = "table_coverage";
@@ -418,7 +489,7 @@ export function tableCoverage(workspace: string, sourceRel: string): Check {
       safeFile(root, rel);
       if (included.has(rel)) return;
       included.add(rel);
-      const text = readFileSync(file, "utf8").replace(/(?<!\\)%[^\n]*/g, "");
+      const text = uncommentTex(readFileSync(file, "utf8"));
       for (const match of text.matchAll(/\\(?:input|include)\s*\{([^{}]+)\}/g)) {
         const ref = match[1]!;
         const candidate = ref.endsWith(".tex") ? ref : `${ref}.tex`;
@@ -440,23 +511,196 @@ export function tableCoverage(workspace: string, sourceRel: string): Check {
   }
 }
 
-/** Export only manuscript/build dependencies, never the imported research-paper tree. */
-export function exportSubmission(workspace: string): void {
+const SubmissionManifest = z.object({ version: z.literal(1), files: z.record(z.string().regex(/^[a-f0-9]{64}$/)) }).strict();
+const SubmissionStatus = z.object({ version: z.literal(1), status: z.enum(["review_pending", "completed"]),
+  content_sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+
+function writeSubmissionRecord(path: string, value: unknown): void {
+  assertNoSymlinks(path);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+  renameSync(temporary, path);
+}
+
+function contentManifest(contents: Map<string, Buffer>) {
+  return { version: 1 as const, files: Object.fromEntries([...contents].sort(([a], [b]) => a.localeCompare(b))
+    .map(([rel, content]) => [rel, createHash("sha256").update(content).digest("hex")])) };
+}
+
+function submissionContents(root: string): Map<string, Buffer> {
+  assertNoSymlinks(root);
+  if (!lstatSync(root).isDirectory()) throw new Error("Submission must be a directory");
+  const contents = new Map(walkFiles(root).map((rel) => [rel, readFileSync(safeFile(root, rel))]));
+  // Empty, user-created directories are extras too, not permission to overwrite them.
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const child = join(dir, entry.name);
+      if (![...contents.keys()].some((rel) => rel.startsWith(relative(root, child) + "/"))) {
+        throw new Error(`Unexpected empty submission directory: ${relative(root, child)}`);
+      }
+      visit(child);
+    }
+  };
+  visit(root);
+  return contents;
+}
+
+/** Static portable LaTeX dependencies only; macro-computed file paths are not guessed. */
+function packageDetails(contents: Map<string, Buffer>, validate = true) {
+  for (const rel of ["main.tex", "references.bib", "final.pdf", "final_paper.pdf", "README.md"]) {
+    if (!contents.get(rel)?.length) throw new Error(`Missing or empty submission file: ${rel}`);
+  }
+  if (!contents.get("final.pdf")!.equals(contents.get("final_paper.pdf")!) ||
+      !contents.get("final.pdf")!.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw new Error("Invalid or inconsistent submission PDF aliases");
+  const cited = new Set<string>();
+  const bibKeys = new Set([...contents.get("references.bib")!.toString("utf8")
+    .replace(/^\s*%.*$/gm, "").matchAll(/@(?!(?:comment|string|preamble)\b)[A-Za-z]+\s*[{(]\s*([^\s,{}()]+)\s*,/gi)].map((match) => match[1]!));
+  const visited = new Set<string>();
+  const graphics = [""];
+  let bibliography: "inline" | "bibtex" | "biber" = "inline";
+  const portable = (ref: string) => {
+    if (!ref || isAbsolute(ref) || /[\\#{}\x00-\x1f]/.test(ref) || ref.split("/").includes("..") ||
+        /(?:^|\/)(?:source|\.brain|\.po-run)(?:\/|$)/.test(ref) || /^[A-Za-z]:/.test(ref)) {
+      throw new Error(`Nonportable or unsafe submission dependency: ${ref}`);
+    }
+    return ref.replace(/^(?:\.\/)+/, "");
+  };
+  const visit = (rel: string) => {
+    if (visited.has(rel)) return;
+    visited.add(rel);
+    const text = uncommentTex(contents.get(rel)!.toString("utf8"));
+    for (const match of text.matchAll(/(?<!\\)\\graphicspath\s*\{((?:\s*\{[^{}]*\}\s*)+)\}/g)) {
+      for (const path of match[1]!.matchAll(/\{([^{}]*)\}/g)) graphics.push(portable(path[1]!));
+    }
+    for (const match of text.matchAll(/(?<!\\)\\(?:[Cc]ite[A-Za-z]*|[Pp]arencite|[Tt]extcite|[Aa]utocite|[Ff]ootcite|nocite)\*?\s*(?:\[[^\]]*\]\s*)*\{([^{}]+)\}/g)) {
+      match[1]!.split(",").map((key) => key.trim()).filter(Boolean).forEach((key) => cited.add(key));
+    }
+    for (const match of text.matchAll(/(?<!\\)\\(input|include|includegraphics|bibliography|addbibresource|bibliographystyle|usepackage|RequirePackage|documentclass|LoadClass)\b\*?\s*(?:\[[^\]]*\]\s*)?/g)) {
+      const command = match[1]!;
+      const rest = text.slice(match.index! + match[0].length);
+      const argument = /^\{([^{}]+)\}/.exec(rest)?.[1] ?? (command === "input" ? /^([^\s\\{}]+)/.exec(rest)?.[1] : undefined);
+      if (argument === undefined) {
+        if (/\.(sty|cls)$/.test(rel)) continue;
+        throw new Error(`Unsupported or dynamic submission dependency in ${rel}: ${command}`);
+      }
+      if (command === "bibliography" && bibliography !== "biber") bibliography = "bibtex";
+      if (command === "addbibresource") bibliography = "biber";
+      for (const raw of argument.split(",")) {
+        // Local style implementations can have parameterized internals; main/inputs cannot.
+        if (/\.(sty|cls)$/.test(rel) && /[\\#]/.test(raw)) continue;
+        const ref = portable(raw.trim());
+        const extensions = command === "includegraphics" ? ["", ".pdf", ".png", ".jpg", ".jpeg", ".eps"] :
+          command === "bibliography" || command === "addbibresource" ? ["", ".bib"] :
+            command === "bibliographystyle" ? ["", ".bst"] :
+              command === "usepackage" || command === "RequirePackage" ? ["", ".sty"] :
+                command === "documentclass" || command === "LoadClass" ? ["", ".cls"] : ["", ".tex"];
+        const candidates = (command === "includegraphics" ? graphics : [""])
+          .flatMap((prefix) => extensions.map((extension) => `${prefix}${ref}${extension}`));
+        const found = candidates.find((candidate) => contents.has(candidate));
+        if (!found) {
+          if (["bibliographystyle", "usepackage", "RequirePackage", "documentclass", "LoadClass"].includes(command) &&
+              /^[A-Za-z0-9_.-]+$/.test(ref)) continue; // Installed TeX-distribution dependency.
+          throw new Error(`Missing submission dependency in ${rel}: ${ref}`);
+        }
+        if (/\.(tex|sty|cls)$/.test(found)) visit(found);
+      }
+    }
+  };
+  visit("main.tex");
+  for (const key of cited) {
+    if (validate && key !== "*" && !bibKeys.has(key)) throw new Error(`Controller references.bib is missing cited key: ${key}`);
+  }
+  return { cited_keys: [...cited].sort(), available_bibkeys: [...bibKeys].sort(), bibliography };
+}
+
+/** Validate the package on disk, not a promise to export after independent review. */
+export function submissionArtifacts(workspace: string, requireComplete = false): Check {
+  try {
+    const p = paths(workspace);
+    const contents = submissionContents(join(workspace, "submission"));
+    const manifest = SubmissionManifest.parse(readJson(safeFile(p.runDir, "submission.json")));
+    if (digestValue(manifest) !== digestValue(contentManifest(contents))) throw new Error("Submission ownership/file hashes differ from submission.json");
+    const status = SubmissionStatus.parse(JSON.parse(contents.get("submission-status.json")?.toString("utf8") ?? "null"));
+    if (requireComplete && status.status !== "completed") throw new Error("Submission is review_pending, not completed");
+    contents.delete("submission-status.json");
+    const snapshot = SubmissionManifest.parse(readJson(safeFile(p.runDir, "submission-content.json")));
+    if (digestValue(snapshot) !== digestValue(contentManifest(contents)) || status.content_sha256 !== digestValue(snapshot)) {
+      throw new Error("Submission content snapshot/hash mismatch");
+    }
+    if (!contents.get("references.bib")!.equals(readFileSync(safeFile(p.brainRaw, "references.bib")))) {
+      throw new Error("Submission bibliography differs from controller references.bib");
+    }
+    const details = packageDetails(contents);
+    return { name: "submission_artifacts", passed: true, advisory: false,
+      detail: `${status.status}: ${contents.size} content files verified; ${details.cited_keys.length} cited keys; content ${status.content_sha256}` };
+  } catch (error) {
+    return { name: "submission_artifacts", passed: false, advisory: false, detail: String(error) };
+  }
+}
+
+export function submissionEvidence(workspace: string) {
+  const validation = submissionArtifacts(workspace);
+  const result: { directory: string; status: string | null; files: Record<string, string>; cited_keys: string[];
+    available_bibkeys: string[]; validation: Check } = {
+    directory: "submission", status: null, files: {}, cited_keys: [], available_bibkeys: [], validation,
+  };
+  try {
+    const contents = submissionContents(join(workspace, "submission"));
+    result.files = contentManifest(contents).files;
+    const status = SubmissionStatus.safeParse(JSON.parse(contents.get("submission-status.json")?.toString("utf8") ?? "null"));
+    result.status = status.success ? status.data.status : null;
+    const details = packageDetails(contents, false);
+    result.cited_keys = details.cited_keys;
+    result.available_bibkeys = details.available_bibkeys;
+  } catch { /* Validation already contains the failure; never follow unsafe paths for evidence. */ }
+  return result;
+}
+
+/** ready is a primary-controller assertion AFTER independent review, never inferred here. */
+export function exportSubmission(workspace: string, options: { sourceRel?: string; ready?: boolean } = {}): void {
   const p = paths(workspace);
   const output = join(workspace, "submission");
-  if (existsSync(output) && (lstatSync(output).isSymbolicLink() || realpathSync(output) !== resolve(output))) throw new Error("Refusing symlinked submission directory");
+  assertNoSymlinks(output);
+  assertNoSymlinks(p.runDir);
+  ensureDir(p.runDir);
+  const manifestPath = join(p.runDir, "submission.json");
+  const contentPath = join(p.runDir, "submission-content.json");
+  assertNoSymlinks(manifestPath);
+  assertNoSymlinks(contentPath);
+  let previous: ReturnType<typeof contentManifest> | undefined;
+  if (existsSync(output)) {
+    previous = SubmissionManifest.parse(readJson(safeFile(p.runDir, "submission.json")));
+    const existing = submissionContents(output);
+    if (digestValue(previous) !== digestValue(contentManifest(existing))) {
+      throw new Error("submission/ contains user-modified or extra files; refusing to overwrite");
+    }
+    if (existing.has("submission-status.json")) {
+      const status = SubmissionStatus.parse(JSON.parse(existing.get("submission-status.json")!.toString("utf8")));
+      existing.delete("submission-status.json");
+      const snapshot = SubmissionManifest.parse(readJson(safeFile(p.runDir, "submission-content.json")));
+      if (digestValue(snapshot) !== digestValue(contentManifest(existing)) || status.content_sha256 !== digestValue(snapshot)) {
+        throw new Error("Previous submission content snapshot/hash is inconsistent; refusing to replace it");
+      }
+    }
+  } else if (existsSync(manifestPath)) throw new Error("Controller submission directory is missing; refusing to discard its ownership record");
   const files = new Map<string, string>();
   const collect = (root: string, template = false) => {
+    assertNoSymlinks(root);
     for (const rel of walkFiles(root)) {
       if (!isLatexDependency(rel) || (template && rel === "template.tex")) continue;
+      if (["main.tex", "raw_draft.tex", "final_paper.tex", "raw_draft.pdf", "final.pdf", "final_paper.pdf"].includes(rel)) continue;
       files.set(rel, safeFile(root, rel));
     }
   };
   collect(p.template, true);
   collect(p.brainManuscript);
-  if (existsSync(join(workspace, ARTIFACTS.references))) files.set("references.bib", safeFile(p.brainRaw, "references.bib"));
-  files.set("main.tex", safeFile(p.brainManuscript, "final_paper.tex"));
+  files.set("references.bib", safeFile(p.brainRaw, "references.bib"));
+  const sourceRel = options.sourceRel ?? ARTIFACTS.finalTex;
+  if (sourceRel !== ARTIFACTS.finalTex && sourceRel !== ARTIFACTS.rawDraft) throw new Error("Submission sourceRel must be finalTex or rawDraft");
+  files.set("main.tex", safeFile(workspace, sourceRel));
   files.set("final.pdf", safeFile(p.brainManuscript, "final_paper.pdf"));
+  files.set("final_paper.pdf", safeFile(p.brainManuscript, "final_paper.pdf"));
   // Build staging resolves paths from manuscript root; preserve that layout. Rewrite only the
   // common generated-bibliography path, which otherwise escapes the portable export.
   const rewritten = new Map<string, string>();
@@ -468,7 +712,7 @@ export function exportSubmission(workspace: string): void {
         return ["../raw/references", "../raw/references.bib", ".brain/raw/references", ARTIFACTS.references].includes(value)
           ? `references${value.endsWith(".bib") ? ".bib" : ""}` : value;
       }).join(",") + after);
-    for (const match of text.replace(/(?<!\\)%[^\n]*/g, "").matchAll(/\\(?:input|include|includegraphics|bibliography|addbibresource|bibliographystyle)\*?(?:\[[^\]]*\])?\s*\{([^{}]+)\}/g)) {
+    for (const match of uncommentTex(text).matchAll(/\\(?:input|include|includegraphics|bibliography|addbibresource|bibliographystyle)\*?(?:\[[^\]]*\])?\s*\{([^{}]+)\}/g)) {
       for (const ref of match[1]!.split(",")) {
         if (isAbsolute(ref.trim()) || ref.includes("\\") || ref.split("/").includes("..") || /(?:^|\/)source\//.test(ref)) {
           throw new Error(`Nonportable or unsafe submission dependency in ${rel}: ${ref}`);
@@ -481,24 +725,55 @@ export function exportSubmission(workspace: string): void {
   for (const [rel, from] of files) {
     contents.set(rel, rewritten.has(rel) ? Buffer.from(rewritten.get(rel)!) : readFileSync(from));
   }
-  contents.set("README.md", Buffer.from("# Submission build\n\nRun from this directory with a TeX distribution and the venue's required packages:\n\n```sh\npdflatex -no-shell-escape -interaction=nonstopmode main.tex\nbibtex main\npdflatex -no-shell-escape -interaction=nonstopmode main.tex\npdflatex -no-shell-escape -interaction=nonstopmode main.tex\n```\n\nFor biblatex, use `biber main` instead of `bibtex main`. The supplied `final.pdf` is the controller-built manuscript; rebuilding produces `main.pdf`.\n"));
-  const manifest = { version: 1, files: Object.fromEntries([...contents].sort(([a], [b]) => a.localeCompare(b))
-    .map(([rel, content]) => [rel, createHash("sha256").update(content).digest("hex")])) };
-  const manifestPath = join(p.runDir, "submission.json");
-  const existing = walkFiles(output);
-  if (existing.length) {
-    const previous = existsSync(manifestPath) ? readJson(manifestPath) : null;
-    if (digestValue(previous) !== digestValue(manifest) || existing.length !== contents.size ||
-        existing.some((rel) => !contents.has(rel) || digestFile(safeFile(output, rel)) !== manifest.files[rel])) {
-      throw new Error("submission/ contains changed, stale or user-owned files; refusing to overwrite. An unchanged controller-owned export can be resumed");
+  contents.set("README.md", Buffer.from("Build instructions pending validation\n"));
+  const { bibliography } = packageDetails(contents);
+  const latex = "pdflatex -no-shell-escape -interaction=nonstopmode -halt-on-error main.tex";
+  contents.set("README.md", Buffer.from(`# Submission build\n\nRun from this directory with a TeX distribution and the venue's required packages:\n\n\`\`\`sh\n${latex}\n${bibliography === "inline" ? "" : `${bibliography === "biber" ? "biber" : "bibtex"} main\n`}${latex}\n${latex}\n\`\`\`\n\n${bibliography === "inline" ? "The bibliography is inline; do not run BibTeX or Biber. " : ""}references.bib is the complete controller bibliography, including all cited keys. The identical final.pdf and final_paper.pdf files are the controller-built manuscript; rebuilding produces main.pdf. See submission-status.json for review status. Build in a separate copy to preserve the reviewed package's ownership hashes.\n`));
+  const snapshot = contentManifest(contents);
+  if (options.ready) {
+    const check = submissionArtifacts(workspace);
+    if (!check.passed) throw new Error(`Cannot promote an unvalidated provisional submission: ${check.detail}`);
+    if (digestValue(snapshot) !== digestValue(readJson(safeFile(p.runDir, "submission-content.json")))) {
+      throw new Error("Submission content changed since review preparation; export review_pending and review again before promotion");
+    }
+  }
+  contents.set("submission-status.json", Buffer.from(`${JSON.stringify({ version: 1,
+    status: options.ready ? "completed" : "review_pending", content_sha256: digestValue(snapshot) }, null, 2)}\n`));
+  const manifest = contentManifest(contents);
+  if (previous && digestValue(previous) === digestValue(manifest)) {
+    if (!existsSync(contentPath) || digestValue(readJson(safeFile(p.runDir, "submission-content.json"))) !== digestValue(snapshot)) {
+      throw new Error("Existing submission content snapshot is missing or inconsistent");
     }
     return;
   }
-  ensureDir(output);
+  const stage = mkdtempSync(join(p.runDir, "submission-stage-"));
   for (const [rel, content] of contents) {
-    const to = assertInside(output, rel);
+    const to = assertInside(stage, rel);
     ensureDir(dirname(to));
     writeFileSync(to, content, { flag: "wx" });
   }
-  writeJsonAtomic(manifestPath, manifest);
+  // Preserve complete prior generations. Interrupted swaps fail closed rather than deleting output.
+  let archived: string | undefined;
+  if (previous) {
+    if (digestValue(previous) !== digestValue(contentManifest(submissionContents(output)))) throw new Error("Submission changed during export");
+    const history = join(p.runDir, "submission-history");
+    assertNoSymlinks(history);
+    ensureDir(history);
+    const generation = mkdtempSync(join(history, "generation-"));
+    writeFileSync(join(generation, "submission.json"), `${JSON.stringify(previous, null, 2)}\n`, { flag: "wx" });
+    if (existsSync(contentPath)) writeFileSync(join(generation, "submission-content.json"), readFileSync(safeFile(p.runDir, "submission-content.json")), { flag: "wx" });
+    archived = join(generation, "submission");
+    renameSync(output, archived);
+  }
+  try {
+    assertNoSymlinks(output);
+    if (existsSync(output)) throw new Error("Submission appeared during export");
+    renameSync(stage, output);
+  } catch (error) {
+    if (archived && !lstatSync(output, { throwIfNoEntry: false })) renameSync(archived, output);
+    throw error;
+  }
+  // Do not rewrite the review dependency during a status-only promotion.
+  if (!existsSync(contentPath) || digestValue(readJson(contentPath)) !== digestValue(snapshot)) writeSubmissionRecord(contentPath, snapshot);
+  writeSubmissionRecord(manifestPath, manifest);
 }
