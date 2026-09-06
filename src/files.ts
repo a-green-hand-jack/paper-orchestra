@@ -43,7 +43,126 @@ export function writeJsonAtomic(path: string, value: unknown): void {
 }
 
 export function readJson<T = unknown>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf8")) as T;
+  return parseJson<T>(readFileSync(path, "utf8"), path);
+}
+
+/** Native parsing on success; version-independent, bounded diagnostics on failure. */
+export function parseJson<T = unknown>(text: string, filename: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+
+  // V8 sometimes omits positions or embeds source in its error. Walk the grammar
+  // only after rejection, without building values or recursing on nested input.
+  type State = "value" | "arrayStart" | "key" | "objectStart" | "colon"
+    | "arrayNext" | "objectNext" | "end";
+  const pending: State[] = ["end", "value"];
+  let at = 0;
+  const invalid = (reason: string): never => {
+    let line = 1;
+    let lineStart = 0;
+    for (let i = 0; i < at; i++) {
+      if (text[i] === "\r" || text[i] === "\n") {
+        if (text[i] === "\r" && text[i + 1] === "\n" && i + 1 < at) i++;
+        line++;
+        lineStart = i + 1;
+      }
+    }
+    throw new UserFacingError(
+      `Invalid JSON in ${filename} at line ${line}, column ${at - lineStart + 1} (offset ${at}): ${reason}`,
+    );
+  };
+  const string = (): void => {
+    at++;
+    while (at < text.length) {
+      const char = text[at++];
+      if (char === '"') return;
+      if (char === "\\") {
+        if (at === text.length) invalid("unterminated string escape");
+        const escape = text[at];
+        if (escape === "u") {
+          at++;
+          for (let i = 0; i < 4; i++, at++) {
+            if (at === text.length || !/[0-9a-fA-F]/.test(text[at]!)) invalid("expected a hexadecimal escape digit");
+          }
+        } else {
+          if (!'"\\/bfnrt'.includes(escape!)) invalid("invalid string escape");
+          at++;
+        }
+      } else if (char!.charCodeAt(0) < 32) {
+        at--;
+        invalid("unescaped control character in string");
+      }
+    }
+    invalid("unterminated string");
+  };
+  while (pending.length) {
+    while (at < text.length && /[\x20\t\r\n]/.test(text[at]!)) at++;
+    const state = pending.pop()!;
+    const char = text[at];
+    if (state === "end") {
+      if (at !== text.length) invalid("unexpected content after JSON value");
+    } else if (state === "colon") {
+      if (char !== ":") invalid("expected ':' after object key");
+      at++;
+    } else if (state === "arrayNext" || state === "objectNext") {
+      const array = state === "arrayNext";
+      if (char === (array ? "]" : "}")) at++;
+      else if (char === ",") {
+        at++;
+        pending.push(state, array ? "value" : "key");
+      } else invalid(`expected ',' or '${array ? "]" : "}"}'`);
+    } else if (state === "key" || state === "objectStart") {
+      if (state === "objectStart" && char === "}") {
+        at++;
+        continue;
+      }
+      if (char !== '"') invalid("expected a quoted object key");
+      string();
+      if (state === "objectStart") pending.push("objectNext");
+      pending.push("value", "colon");
+    } else {
+      if (state === "arrayStart") {
+        if (char === "]") {
+          at++;
+          continue;
+        }
+        pending.push("arrayNext");
+      }
+      if (char === "{" || char === "[") {
+        at++;
+        pending.push(char === "{" ? "objectStart" : "arrayStart");
+      } else if (char === '"') string();
+      else if (char === "t" || char === "f" || char === "n") {
+        const literal = char === "t" ? "true" : char === "f" ? "false" : "null";
+        for (const expected of literal) {
+          if (text[at] !== expected) invalid(`expected '${literal}'`);
+          at++;
+        }
+      } else {
+        if (char === "-") at++;
+        if (text[at] === "0") at++;
+        else {
+          if (at === text.length || !/[1-9]/.test(text[at]!)) invalid("expected a JSON value");
+          while (at < text.length && /[0-9]/.test(text[at]!)) at++;
+        }
+        if (text[at] === ".") {
+          at++;
+          if (at === text.length || !/[0-9]/.test(text[at]!)) invalid("expected a digit after decimal point");
+          while (at < text.length && /[0-9]/.test(text[at]!)) at++;
+        }
+        if (text[at] === "e" || text[at] === "E") {
+          at++;
+          if (text[at] === "+" || text[at] === "-") at++;
+          if (at === text.length || !/[0-9]/.test(text[at]!)) invalid("expected an exponent digit");
+          while (at < text.length && /[0-9]/.test(text[at]!)) at++;
+        }
+      }
+    }
+  }
+  return invalid("invalid JSON");
 }
 
 export function readJsonIfExists<T = unknown>(path: string): T | null {

@@ -30,7 +30,7 @@ import {
   verifyLocks,
   writeSessionState,
 } from "./state/store.js";
-import { citationFloor, validateStage } from "./validation.js";
+import { citationFloor, validateStage, validators } from "./validation.js";
 import { CitationMapSchema, OutlineSchema } from "./artifacts.js";
 import { assertInside, digestFile, digestValue, readJson, writeJsonAtomic } from "./files.js";
 import { retrieveForLiterature, UnmetLiteratureError } from "./literature-controller.js";
@@ -390,7 +390,8 @@ async function runStage(
 
   const before = await sessionUsage(runtime, sessionId);
 
-  if (stage === "refinement") {
+  const planReady = () => validators.schemaValid(workspace, ARTIFACTS.outlineV1, OutlineSchema).passed;
+  if (stage === "refinement" && planReady()) {
     const reviewingFinal = existsSync(join(workspace, ARTIFACTS.finalTex));
     await buildIfManuscriptStage(options, reviewingFinal ? "refinement" : "section_writing");
     await reviewManuscript({ runtime, workspace, sourceRel: reviewingFinal ? ARTIFACTS.finalTex : ARTIFACTS.rawDraft,
@@ -422,10 +423,18 @@ async function runStage(
     );
   }
 
-  if (stage === "literature") {
+  const resolveLiteratureGaps = async () => {
+    if (stage !== "literature") return;
     // The literature writer can identify missing sources, but only the controller searches.
     for (let round = 0; round < 2; round += 1) {
-      const revised = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outlineV1)));
+      // Missing/malformed synthesis is a stage-output failure, not a fatal read
+      // before the normal validation/remediation loop gets a chance to repair it.
+      let revised;
+      try {
+        revised = OutlineSchema.safeParse(readJson(join(workspace, ARTIFACTS.outlineV1)));
+      } catch {
+        break;
+      }
       if (!revised.success || revised.data.citation_gaps.length === 0) break;
       let retrievalFeedback = "The controller retrieved your citation_gaps.";
       try {
@@ -447,10 +456,11 @@ async function runStage(
         "Do not change controller-owned bibliography files." });
       await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
     }
-  }
+  };
+  await resolveLiteratureGaps();
 
   await buildIfManuscriptStage(options, stage);
-  if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
+  if (stage === "refinement" && planReady() && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
     await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
       model, timeoutMs, signal, onProgress: (line) => say(options, line) });
     await repairReviewedFigures(runtime, options, sessions, signal, ARTIFACTS.finalTex);
@@ -467,12 +477,13 @@ async function runStage(
 
     await prompt(runtime, {
       sessionId,
-      text: buildRemediationPrompt(stage, failed) + "\nRead .brain/writer-continuation.json for structured repair assignments. Only independent review can resolve findings.",
+      text: buildRemediationPrompt(stage, failed, workspace) + "\nRead .brain/writer-continuation.json if present for structured repair assignments; it is not research evidence. Only independent review can resolve findings.",
       model,
     });
     await waitForIdleOrPermissionAsk(runtime, options, { sessionId, timeoutMs, signal });
+    await resolveLiteratureGaps();
     await buildIfManuscriptStage(options, stage);
-    if (stage === "refinement" && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
+    if (stage === "refinement" && planReady() && readJson<{ok: boolean}>(join(workspace, ARTIFACTS.buildReport))?.ok) {
       await reviewManuscript({ runtime, workspace, sourceRel: ARTIFACTS.finalTex,
         model, timeoutMs, signal, onProgress: (line) => say(options, line) });
       await repairReviewedFigures(runtime, options, sessions, signal, ARTIFACTS.finalTex);

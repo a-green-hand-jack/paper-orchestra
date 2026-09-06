@@ -9,8 +9,9 @@ import {
   OutlineSchema,
   PlottingResultsSchema,
   MaterialsMapSchema,
+  evidenceQuoteMatches,
 } from "./artifacts.js";
-import { assertInside, readJson, walkFiles } from "./files.js";
+import { assertInside, parseJson, readJson, walkFiles } from "./files.js";
 import {
   ANONYMITY_OPTIONS,
   bibKeys,
@@ -86,7 +87,7 @@ function parseArtifact<S extends z.ZodTypeAny>(
 
   let json: unknown;
   try {
-    json = JSON.parse(raw);
+    json = parseJson(raw, join(workspace, rel));
   } catch (error) {
     return {
       ok: false,
@@ -814,8 +815,9 @@ function materialsProvenance(workspace: string): Check {
 
   const roots = materialsReadableRoots(workspace);
   const cited = [
-    ...map.reading.map((entry) => entry.path),
+    ...map.reading.filter((entry) => entry.status !== "missing" && entry.status !== "excluded").map((entry) => entry.path),
     ...map.facts.map((fact) => fact.source_path),
+    ...map.facts.flatMap((fact) => (fact.provenance ?? []).map((ref) => ref.source_path)),
   ];
   const unresolved: string[] = [];
   for (const rel of [...new Set(cited)]) {
@@ -830,7 +832,7 @@ function materialsProvenance(workspace: string): Check {
       unresolved.push(`${rel} (does not exist)`);
       continue;
     }
-    if (!roots.some((root) => abs === root || abs.startsWith(`${root}/`))) {
+    if (rel !== ".brain/raw/data_analysis.json" && !roots.some((root) => abs === root || abs.startsWith(`${root}/`))) {
       unresolved.push(`${rel} (outside source/ and .brain/input/)`);
     }
   }
@@ -843,11 +845,6 @@ function materialsProvenance(workspace: string): Check {
     );
   }
   return pass(name, `${cited.length} cited path(s), all present`);
-}
-
-/** Whitespace-normalized, so a re-wrapped quote still matches its source. */
-function flatten(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -871,12 +868,15 @@ function materialsGrounding(workspace: string): Check {
   if (!parsed.ok) return parsed.check;
   const map = parsed.value;
 
-  if (map.facts.length === 0 && map.unresolved.length === 0) {
+  const hasMeasurements = map.experiments.some((experiment) => experiment.status === "read") ||
+    map.results.some((result) => result.kind === "measured" && result.status === "read");
+  const explainsNoMeasurements = !hasMeasurements && (Boolean(map.no_measurements_reason?.trim()) || map.unresolved.length > 0);
+  if (map.facts.length === 0 && !explainsNoMeasurements) {
     return fail(
       name,
       "expected materials.json to carry at least one fact quoting the material it came " +
         "from. If the materials genuinely record no measured result, say so in " +
-        "`unresolved` instead of leaving both lists empty.",
+        "`no_measurements_reason` or `unresolved` instead of inventing measurements.",
     );
   }
 
@@ -894,7 +894,7 @@ function materialsGrounding(workspace: string): Check {
       ungrounded.push(`${fact.source_path} (does not exist)`);
       continue;
     }
-    if (!flatten(body).includes(flatten(fact.quote))) {
+    if (!evidenceQuoteMatches(body, fact.quote)) {
       ungrounded.push(`quote ${JSON.stringify(fact.quote)} is not in ${fact.source_path}. ` +
         `For fact ${JSON.stringify(fact.statement)}, re-read that file and copy one contiguous exact span; ` +
         "do not normalize punctuation, insert ellipses, or concatenate nonadjacent lines");
@@ -1033,6 +1033,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "section_writing":
       return [
+        schemaValid(workspace, ARTIFACTS.outlineV1, OutlineSchema),
         validateResearch(workspace),
         tableCoverage(workspace, ARTIFACTS.rawDraft),
         artifactExists(workspace, ARTIFACTS.rawDraft, 512),
@@ -1050,6 +1051,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
 
     case "refinement":
       return [
+        schemaValid(workspace, ARTIFACTS.outlineV1, OutlineSchema),
         submissionArtifacts(workspace),
         validateResearch(workspace),
         tableCoverage(workspace, ARTIFACTS.finalTex),

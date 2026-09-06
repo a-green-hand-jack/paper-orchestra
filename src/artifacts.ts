@@ -17,6 +17,20 @@ export const FigureRouteSchema = z.enum(["auto", "code", "text_to_image"]);
 
 export const ResearchIdSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/);
 export const ResearchStatusSchema = z.enum(["read", "unread", "unreadable", "excluded", "computable", "missing"]);
+/** Formatting tolerance only: preserve punctuation, math, token boundaries and case. */
+export function evidenceQuoteMatches(sourceText: string, quote: string): boolean {
+  const normalize = (text: string) => text.replace(/[ \t\r\n\f\v]+/g, " ").trim();
+  const normalizedQuote = normalize(quote);
+  return normalizedQuote.length > 0 && normalize(sourceText).includes(normalizedQuote);
+}
+
+/**
+ * measured: recorded experiment; derived: supplied calculation; computed: recorded
+ * computational output (not merely executable code); reported: attributed prior
+ * result, not independently reproduced; conceptual: non-empirical statement;
+ * theorem/proof: supplied mathematical statement/argument, not machine certification.
+ */
+export const ResearchEvidenceKindSchema = z.enum(["measured", "derived", "computed", "reported", "conceptual", "theorem", "proof"]);
 export const ResearchProvenanceSchema = z.object({
   source_path: z.string().min(1),
   /** Exact field, line range, page, or code symbol; never a fabricated citation. */
@@ -464,7 +478,7 @@ export type BuildReport = z.infer<typeof BuildReportSchema>;
  *    with hundreds of files in front of it knows where to look. This is the
  *    part that makes a large input tractable, and it is the only reason a
  *    model runs here at all.
- *  * `facts` is the shared ledger of measured numbers, each carrying text
+ *  * `facts` is the shared ledger of source-grounded statements, each carrying text
  *    copied verbatim from the file it came from. It replaces the prose digest
  *    for the one job the digest genuinely did -- keeping five stages from each
  *    inventing their own account of the experiments -- and does it better,
@@ -490,7 +504,7 @@ export const MaterialEntrySchema = z
   .passthrough();
 
 /**
- * A measured claim, with text copied verbatim from its source.
+ * A source-grounded statement, with quoted text (whitespace may be normalized).
  *
  * The quote is what a byte floor can never buy. A model that invented a number
  * cannot produce a quote that is really in a file, and a substring test is a
@@ -500,6 +514,10 @@ export const MaterialFactSchema = z
   .object({
     id: ResearchIdSchema.optional(),
     result_ids: z.array(ResearchIdSchema).optional(),
+    /** Absent in persisted ledgers: unspecified, not implicitly measured. */
+    kind: ResearchEvidenceKindSchema.optional(),
+    /** Additional quoted sources for a fact that combines results across files. */
+    provenance: z.array(ResearchProvenanceSchema.extend({ quote: z.string().trim().min(1) })).optional(),
     statement: z.string().min(1),
     /** The file the statement came from, workspace-relative. */
     source_path: z.string().min(1),
@@ -524,11 +542,13 @@ export const ResearchExperimentSchema = z.object({
 }).passthrough();
 export const ResearchResultSchema = z.object({
   ...ResearchEntityFields,
-  kind: z.enum(["measured", "derived", "conceptual"]),
+  kind: ResearchEvidenceKindSchema,
   method_ids: z.array(ResearchIdSchema),
   experiment_ids: z.array(ResearchIdSchema),
   units: z.string().min(1),
   derivation: z.string().min(1).optional(),
+  /** Attribution/verification limits for reports, or assumptions and scope for theory. */
+  boundaries: z.array(z.string().trim().min(1)).min(1).optional(),
 }).passthrough();
 export type ResearchMethod = z.infer<typeof ResearchMethodSchema>;
 export type ResearchExperiment = z.infer<typeof ResearchExperimentSchema>;
@@ -541,7 +561,7 @@ export const MaterialsMapSchema = z
     experiments: z.array(ResearchExperimentSchema).default([]),
     results: z.array(ResearchResultSchema).default([]),
     /** Required by validation when there are no recorded measurements/experiments. */
-    no_measurements_reason: z.string().min(1).optional(),
+    no_measurements_reason: z.string().trim().min(1).optional(),
     /** How many files were looked at, so `reading` can be read as a selection. */
     materials_considered: z.number().int().nonnegative().default(0),
     /**

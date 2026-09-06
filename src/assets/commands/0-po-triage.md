@@ -74,18 +74,20 @@ writer whether this is the file they want.
 
 ### `facts`
 
-The measured numbers, each with text copied **verbatim** from the file it came
+The supported observations, each with text copied **verbatim** from the file it came
 from. A validator re-reads that file and looks for the quote; paraphrasing it
 will fail, and copying a short exact fragment — a number, a metric name, a
 table row — is what passes.
 
-This list is the paper's shared ledger. Five later stages will report numbers,
-and this is what stops them each inventing their own. Cover every headline
-result, every ablation delta, and every baseline the paper will claim to beat.
+This list is the paper's shared ledger. For empirical work, cover headline
+results, ablation deltas and baseline comparisons the paper actually supports.
+For mathematical or conceptual work, link observed statements to the appropriate
+theorem, proof, reported or conceptual result, preserving assumptions and scope.
 
-If the materials genuinely record no measured result — a position paper, a
-theory paper, a dataset description — leave `facts` empty and **say so in
-`unresolved`**. Do not manufacture a number to fill the list.
+If there are no suitable factual observations, `facts` may be empty. Explain
+the lack of measurements in `no_measurements_reason`; record actual missing
+evidence in `unresolved`. A nonempirical study is not intrinsically incomplete.
+Do not manufacture a number or a gap to fill a list.
 
 ### `summary`
 
@@ -152,8 +154,13 @@ Never use an array index as an identity that changes when entries are reordered.
 
 - Each `reading` entry also has `id` and `status`, matching its `coverage` status.
 - Each `requirements` entry also has `id`; preserve the actual user contract.
-- Each `facts` entry also has `id` and nonempty `result_ids`, pointing to recorded
-  numeric results from the same source. Keep the existing verbatim quote fields.
+- Each `facts` entry also has `id` and nonempty `result_ids`, pointing to supported
+  results. Keep `statement`, `source_path` and a contiguous original `quote`.
+  Optional `kind` uses the result kinds below and must match linked results.
+  For cross-file synthesis, add `provenance` entries with source_path, locator and
+  a nonempty original quote from every additional supporting source. Each linked
+  result must share a source with these quoted observations; an unrelated file
+  or bare path is not support. Do not treat theorem numbers as measured values.
 - Write `methods`, `experiments`, and `results` arrays, even when empty. Every
   entry has `id`, `description`, `status`, `reason`, and `provenance`.
 - `provenance` is an array of `{source_path, locator, quote?}`. `source_path`
@@ -163,11 +170,20 @@ Never use an array index as an identity that changes when entries are reordered.
   nonempty provenance and its paths indexed as `read` in `reading` and `coverage`.
 - Each experiment additionally has nonempty `method_ids`, `run_ids` (strings;
   empty if not recorded), and `settings` (object of recorded configuration only).
-- Each result additionally has `kind` (`measured`, `derived`, `conceptual`),
+- Each result additionally has `kind` (`measured`, `derived`, `computed`, `reported`,
+  `conceptual`, `theorem`, `proof`),
   `method_ids`, `experiment_ids`, and `units` (use `not applicable` for conceptual
   content or `dimensionless` when justified). Measured results link an actual
-  experiment; conceptual results may have empty `experiment_ids`. Derived
-  results also have `derivation`, identifying the supplied operation and operands.
+  experiment. Measured, derived and computed results require a method directly
+  or through an experiment. Derived/computed results have nonempty `derivation`,
+  identifying supplied operands and calculation/recorded computation; code alone
+  does not establish that it ran. `reported` describes an inherited result without
+  inventing its missing method. Reported/theorem/proof results require source
+  provenance and nonempty `boundaries` (an array of assumptions or limitations).
+  Theorem/proof also require `derivation` describing the actual supplied argument,
+  not a promise to prove it. A conceptual result may omit methods only with source
+  provenance and nonempty boundaries. Nonempirical results need no experiments.
+  `read` means inspected, not independently reproduced or scientifically verified.
 - Each claim additionally has `id`, `status`, `reason`, `method_ids`,
   `experiment_ids`, nonempty `evidence_ids`, and nonempty `provenance`.
   `evidence_ids` point to method or result IDs, not filenames or other claims.

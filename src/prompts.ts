@@ -5,6 +5,8 @@ import { ARTIFACTS, BRAIN_DIR, BRIEF_FILE, TEMPLATE_DIR } from "./paths.js";
 import { COMMANDS, type StageId } from "./stages.js";
 import type { Scope } from "./state/schema.js";
 import type { Check } from "./state/schema.js";
+import { readJson } from "./files.js";
+import { MaterialsMapSchema, OutlineSchema } from "./artifacts.js";
 
 /** Shared with controller-owned reviewer prompts; implementations live in operations.ts. */
 export const OPERATION_REQUEST_CONTRACT = `## Controller Operations
@@ -288,6 +290,17 @@ export function buildStagePrompt(
     "  A path or citation alone does not prove a claim; inspect its actual content and scope.",
     "  Original conceptual work need not have measurements. Record an explicit no_measurements_reason",
     "  instead of fabricating experiments or demanding exhaustive proof beyond the user's contract.",
+    "- Research inventory is NOT a list of every file you read to operate the pipeline.",
+    "  reading, coverage and materials_considered describe actual research materials from input-manifest.json",
+    "  under source/ or .brain/input/, plus actual controller data_analysis.json when used.",
+    "  The brief, input-manifest.json, materials.json, template files, requirements, operation results and",
+    "  writer-continuation.json are operational context, NOT research sources. Never place them in reading,",
+    "  coverage, scientific facts or provenance; extract author requirements into requirements instead.",
+    "  Never invent an internal filename or count absent controller files as missing research evidence.",
+    "  An admitted raw code/data file remains research even inside a directory named paper or submission.",
+    "- Quotes preserve contiguous source tokens, punctuation and math syntax. Rewrapping ASCII whitespace",
+    "  is allowed; replacing LaTeX with rendered symbols, omitting delimiters or joining separate spans is not.",
+    "  Record separate provenance entries for separate spans; put explanation in description/derivation.",
     "- A raw research folder and optional brief are sufficient inputs; author metadata is not assumed.",
     "  When author metadata is absent, produce an anonymous review manuscript. In generated TeX only,",
     "  replace placeholder author blocks with a template-compatible anonymous author block and remove",
@@ -324,15 +337,49 @@ export function buildStagePrompt(
  * validator detail is phrased as the expectation it wants met: the check
  * message is the repair instruction.
  */
-export function buildRemediationPrompt(stage: StageId, failed: readonly Check[]): string {
+export function buildRemediationPrompt(stage: StageId, failed: readonly Check[], workspace: string): string {
   const citationFailure = failed.some(
     (check) => check.name === "citation_integrity" || check.name === "citation_floor" || check.name === "latex_assembly",
   );
+  const context: string[] = [];
+  for (const rel of new Set([...STAGE_OUTPUTS[stage], ARTIFACTS.materialsMap, ARTIFACTS.outline, ARTIFACTS.outlineV1])) {
+    if (!rel.endsWith(".json")) continue;
+    if (!existsSync(join(workspace, rel))) {
+      if (STAGE_OUTPUTS[stage].includes(rel)) context.push(`Missing required stage output: ${rel}. Write it at this exact path.`);
+      else if (rel === ARTIFACTS.outlineV1 && ["section_writing", "refinement"].includes(stage)) {
+        context.push(`Missing required input: ${rel}. This belongs to the literature stage, not the current writer. Report that upstream restoration is required; do not invent replacement IDs, a substitute plan, or an unsupported controller operation.`);
+      }
+      continue;
+    }
+    try {
+      const value = readJson(join(workspace, rel));
+      if (rel === ARTIFACTS.materialsMap) {
+        const parsed = MaterialsMapSchema.safeParse(value);
+        if (parsed.success) context.push(`Existing research IDs (choose only genuinely supporting evidence): ${JSON.stringify({
+          methods: parsed.data.methods.map(({ id }) => id), results: parsed.data.results.map(({ id, kind }) => ({ id, kind })),
+          claims: parsed.data.research_claims.map(({ id }) => id),
+        })}`);
+      } else if (rel === ARTIFACTS.outline || rel === ARTIFACTS.outlineV1) {
+        const parsed = OutlineSchema.safeParse(value);
+        if (parsed.success) context.push(`Canonical plan in ${rel}: ${JSON.stringify({
+          sections: parsed.data.section_plan.map(({ section_id }) => section_id),
+          figures: parsed.data.plotting_plan.map(({ figure_id }) => figure_id),
+          tables: parsed.data.table_plan.map(({ table_id }) => table_id),
+        })}`);
+      }
+    } catch (error) {
+      context.push(String(error));
+    }
+  }
   return [
     `Stage \`${stage}\` failed controller validation.`,
     OPERATION_REQUEST_CONTRACT,
     "",
     ...failed.map((check) => `- **${check.name}**: ${check.detail}`),
+    ...context,
+    "Fix JSON syntax before semantic links. Preserve source evidence and IDs; do not delete valid records to make parsing succeed.",
+    "For figure/table link errors, repair claim_ids and evidence_ids using the actual research map, not data_source formatting.",
+    "Conceptual diagrams still identify the supported claim they explain; never invent numeric data or unnecessary figures.",
     ...(citationFailure
       ? [
           "",

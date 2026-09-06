@@ -1,21 +1,22 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { GeneratedMaterialsMapSchema, GeneratedResearchClaimSchema, MaterialEntrySchema, OutlineSchema, ResearchProvenanceSchema } from "./artifacts.js";
+import { evidenceQuoteMatches, GeneratedMaterialsMapSchema, GeneratedResearchClaimSchema, MaterialEntrySchema, OutlineSchema, ResearchProvenanceSchema } from "./artifacts.js";
 import { isManuscriptPath, safeSourcePath } from "./input-extraction.js";
 import { ARTIFACTS } from "./paths.js";
 import type { Check } from "./state/schema.js";
 import { z } from "zod";
+import { readJson } from "./files.js";
 
 /** Validate research links, including optional outline.reading supplements, without mutating triage. */
 export function validateResearch(workspace: string): Check {
   const issues: string[] = [];
   try {
-    const map = GeneratedMaterialsMapSchema.parse(JSON.parse(readFileSync(safeSourcePath(workspace, ARTIFACTS.materialsMap), "utf8")));
+    const map = GeneratedMaterialsMapSchema.parse(readJson(safeSourcePath(workspace, ARTIFACTS.materialsMap)));
     const manifestPath = ".brain/input-manifest.json";
     const manifest = existsSync(join(workspace, manifestPath)) ? z.array(z.object({
       source: z.string(), imported: z.string().optional(), normalized: z.string().optional(),
       role: z.string(), status: z.string(),
-    })).parse(JSON.parse(readFileSync(safeSourcePath(workspace, manifestPath), "utf8"))) : undefined;
+    })).parse(readJson(safeSourcePath(workspace, manifestPath))) : undefined;
     // Identity is established by admission metadata, never basename/suffix guessing.
     // A bounded summary shares an origin with its CSV, not its contents or quotes.
     const origins = new Map<string, string>();
@@ -92,7 +93,9 @@ export function validateResearch(workspace: string): Check {
       if (path.includes("\\") || path.includes("\0") || path.split("/").some((part) => !part || part === "." || part === "..")) {
         throw new Error(`unsafe research path: ${path}`);
       }
-      if (!inventory && isManuscriptPath(path)) throw new Error(`inherited manuscript is not research evidence: ${path}`);
+      // Admission already classifies content and permits raw code under manuscript
+      // directories. Only legacy workspaces without a manifest need the name guard.
+      if (!inventory && !manifest && isManuscriptPath(path)) throw new Error(`inherited manuscript is not research evidence: ${path}`);
       if (!inventory && manifest && path !== ".brain/raw/data_analysis.json" && !manifest.some((entry) =>
         ["research", "figure"].includes(entry.role) && entry.status !== "excluded" &&
         (path === `source/${entry.imported ?? entry.source}` || path === entry.normalized))) {
@@ -120,7 +123,7 @@ export function validateResearch(workspace: string): Check {
         const file = source(ref.source_path)!;
         if (supported && !isRead(ref.source_path)) issues.push(`${owner}: evidence source must be indexed as read: ${ref.source_path}`);
         // Do not test an original-file quote against its mirror or partial summary.
-        if (ref.quote && !readFileSync(file, "utf8").includes(ref.quote)) issues.push(`${owner}: quote not found in ${ref.source_path}`);
+        if (ref.quote && !evidenceQuoteMatches(readFileSync(file, "utf8"), ref.quote)) issues.push(`${owner}: quote not found in ${ref.source_path}`);
       }
     };
     for (const entry of map.coverage) source(entry.path, entry.status === "missing" || entry.status === "excluded", entry.status !== "read");
@@ -138,10 +141,13 @@ export function validateResearch(workspace: string): Check {
     for (const result of map.results) {
       links(result.id, result.method_ids, methods);
       links(result.id, result.experiment_ids, experiments);
-      if (closure({ evidence_ids: [result.id] }).methodIds.size === 0) issues.push(`${result.id}: result must identify its method directly or through an experiment`);
+      const hasMethod = closure({ evidence_ids: [result.id] }).methodIds.size > 0;
+      if (["measured", "derived", "computed"].includes(result.kind) && !hasMethod) issues.push(`${result.id}: ${result.kind} result must identify its method directly or through an experiment`);
+      if ((["reported", "theorem", "proof"].includes(result.kind) || (result.kind === "conceptual" && !hasMethod)) &&
+        (!result.boundaries?.length || !result.provenance.length)) issues.push(`${result.id}: ${result.kind} result requires source provenance and explicit boundaries; read status does not establish independent verification`);
       if (result.status === "read" && result.method_ids.some((id) => methods.get(id)?.status !== "read")) issues.push(`${result.id}: result depends on unread method evidence`);
       if (result.kind === "measured" && result.experiment_ids.length === 0) issues.push(`${result.id}: measured result requires a recorded experiment`);
-      if (result.kind === "derived" && !result.derivation) issues.push(`${result.id}: derived result requires the supplied calculation and operands`);
+      if (["derived", "computed", "theorem", "proof"].includes(result.kind) && !result.derivation?.trim()) issues.push(`${result.id}: ${result.kind} result requires the supplied calculation and operands, computation record, or proof argument in derivation`);
       for (const id of result.experiment_ids) {
         const experiment = experiments.get(id);
         if (experiment && result.method_ids.length && !experiment.method_ids.some((method) => result.method_ids.includes(method))) issues.push(`${result.id}: experiment ${id} has no linked result method`);
@@ -162,20 +168,22 @@ export function validateResearch(workspace: string): Check {
       for (const id of effective.experimentIds) if (claim.status === "read" && experiments.get(id)?.status !== "read") issues.push(`${claim.id}: experiment ${id} is not read`);
     }
     for (const fact of map.facts) {
-      provenance(fact.id, [{ source_path: fact.source_path, locator: "verbatim fact", quote: fact.quote }], true);
+      const refs = [{ source_path: fact.source_path, locator: "verbatim fact", quote: fact.quote }, ...(fact.provenance ?? [])];
+      provenance(fact.id, refs, true);
       links(fact.id, fact.result_ids, results);
       for (const id of fact.result_ids) {
         const result = results.get(id);
-        if (result && (result.status !== "read" || result.kind === "conceptual" || !hasSource(result.provenance.map((ref) => ref.source_path), fact.source_path))) issues.push(`${fact.id}: fact must link recorded numeric evidence from the same source`);
+        if (result && (result.status !== "read" || !refs.some((ref) => hasSource(result.provenance.map((entry) => entry.source_path), ref.source_path)))) issues.push(`${fact.id}: each linked result must be read and share actual source provenance with the fact; add quoted fact provenance for cross-source results`);
+        if (result && fact.kind && fact.kind !== result.kind) issues.push(`${fact.id}: explicit fact kind ${fact.kind} does not match result ${id} kind ${result.kind}`);
       }
     }
-    if ((!map.experiments.length || !map.results.some((entry) => entry.kind === "measured" && entry.status === "read")) && !map.no_measurements_reason) {
+    if ((!map.experiments.length || !map.results.some((entry) => entry.kind === "measured" && entry.status === "read")) && !map.no_measurements_reason?.trim()) {
       issues.push("no_measurements_reason is required without recorded experiments/measurements; conceptual research does not require fabricated experiments");
     }
     // Outlines do not exist during triage; once present, both versions must preserve the graph.
     for (const path of [ARTIFACTS.outline, ARTIFACTS.outlineV1]) {
       if (!existsSync(join(workspace, path))) continue;
-      const outline = OutlineSchema.parse(JSON.parse(readFileSync(safeSourcePath(workspace, path), "utf8")));
+      const outline = OutlineSchema.parse(readJson(safeSourcePath(workspace, path)));
       // A later reader can index new supporting files or explicitly read an old
       // unread source. These scoped records cannot rename triage source IDs.
       const outlineSources = new Map(indexedSources);
@@ -243,7 +251,9 @@ export function validateResearch(workspace: string): Check {
           const claim = outlineClaims.get(claimId);
           if (!claim) return false;
           const effective = closure(claim);
-          return effective.evidenceIds.has(id) && hasSource(effective.paths, sourcePath);
+          // A claim's explicit provenance can supplement its evidence, but an
+          // unrelated result or a bare evidence_paths entry cannot supply it.
+          return effective.evidenceIds.has(id) && hasSource(claim.provenance.map((ref) => ref.source_path), sourcePath);
         });
       };
       const planIds = new Set<string>();
