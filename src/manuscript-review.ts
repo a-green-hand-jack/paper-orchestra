@@ -474,7 +474,10 @@ ${last ? `Now synthesize findings from ALL ${count} pages and source evidence. $
       review.reviewed_pages += batch.length;
     }
     let parsed: ManuscriptReview | undefined;
-    for (let repair = 0; repair < 2; repair++) {
+    // Review JSON is model-authored, but its evidence grounds are checked by
+    // the controller.  Allow two bounded correction turns for formatting or
+    // quoting mistakes; never weaken the grounding checks themselves.
+    for (let repair = 0; repair < 3; repair++) {
       try {
         const raw = JSON.parse(replies.at(-1) ?? "") as { findings: unknown[] };
         if (Array.isArray(raw?.findings)) for (const [index, finding] of raw.findings.entries()) {
@@ -486,7 +489,45 @@ ${last ? `Now synthesize findings from ALL ${count} pages and source evidence. $
               : target_type === "source" && typeof target_id === "string" && sourceTargets.has(target_id);
           if (!legal) throw new Error(`Finding[${index}] has illegal target ${JSON.stringify({ target_type, target_id })}. ${targetContext}`);
         }
-        parsed = ManuscriptReviewSchema.strict().parse(raw);
+        // The controller, not the model, owns artifact identity.  Reviewers
+        // occasionally echo a placeholder or malformed hash even though their
+        // findings are valid.  Normalize those fields to the hashes captured
+        // immediately before review; the post-review build/hash check below
+        // still rejects any manuscript mutation or stale review.
+        const controllerBound = {
+          ...raw,
+          manuscript_sha256: current.manuscript_sha256,
+          pdf_sha256: current.pdf_sha256,
+        };
+        // A reviewer sometimes paraphrases a controller requirement while
+        // pointing at requirements.json.  That is not auditable evidence: a
+        // controller-ground must quote the actual included contract.  Treat
+        // only that unsupported policy assertion as advisory and retain any
+        // independent observation grounds; do not let it abort an otherwise
+        // valid review or turn a missing authority into a blocker.
+        const controllerRequirements = relative(workspace, join(attempt, "requirements.json"));
+        for (const finding of raw.findings) {
+          if (!finding || typeof finding !== "object") continue;
+          const candidate = finding as Partial<ReviewIssue> & { evidence?: unknown };
+          if (!Array.isArray(candidate.evidence)) continue;
+          const invalidControllerGrounds = candidate.evidence.filter((entry): entry is string => {
+            if (typeof entry !== "string" || !entry.startsWith("requirement-ground:")) return false;
+            try {
+              const ground = JSON.parse(entry.slice(entry.indexOf(":") + 1)) as Record<string, unknown>;
+              return ground.kind === "controller" && ground.source === controllerRequirements &&
+                (typeof ground.quote !== "string" || !evidenceTexts.has(controllerRequirements) ||
+                  !evidenceQuoteMatches(evidenceTexts.get(controllerRequirements)!, ground.quote));
+            } catch {
+              return false;
+            }
+          });
+          if (!invalidControllerGrounds.length) continue;
+          candidate.evidence = candidate.evidence.filter((entry) => !invalidControllerGrounds.includes(entry as string));
+          if (candidate.category === "requirement" || candidate.evidence.length === 0) {
+            candidate.severity = "advisory";
+          }
+        }
+        parsed = ManuscriptReviewSchema.strict().parse(controllerBound);
         for (const finding of raw.findings) GeneratedReviewFindingSchema.omit({ id: true }).parse(finding);
         const normalized = stableIssues(raw.findings, ledger.issues, workspace);
         if (new Set(normalized.map((issue) => issue.id)).size !== normalized.length) throw new Error("Each distinct finding must have a unique stable ID");
@@ -539,9 +580,13 @@ ${last ? `Now synthesize findings from ALL ${count} pages and source evidence. $
         rawFindings = raw.findings;
         break;
       } catch (error) {
-        if (repair === 1) throw new Error(`Reviewer returned invalid ManuscriptReview JSON after one repair: ${String(error)}`);
+        if (repair === 2) throw new Error(`Reviewer returned invalid ManuscriptReview JSON after two repairs: ${String(error)}`);
         await send(`Your final response failed review validation: ${error instanceof Error ? error.message : String(error)}
-Repair once using the supplied evidence and all reviewed pages. Correct illegal targets and invalid grounds.
+Repair this response using the supplied evidence and all reviewed pages. Correct illegal targets and invalid grounds.
+For every observation-ground with kind=text, copy a contiguous passage character-for-character from the
+included FILE content, including type annotations, punctuation and identifiers; do not summarize,
+abbreviate, or omit a return annotation. If the defect is visual, use kind=visual with an exact PDF page
+and visible observation instead of approximating source text.
 Preserve valid scientific and applicable requirement findings, with their stable IDs. Do not preserve an
 unsupported policy finding just to keep the list unchanged: ground it correctly, remove it, or make it
 advisory as warranted, and explain that correction in summary. Recompute ready. ${schema}`);
@@ -558,9 +603,15 @@ advisory as warranted, and explain that correction in summary. Recompute ready. 
         digestValue(dependencies) !== digestValue(reviewInputDependencies(workspace, sourceRel))) {
       throw new Error("Manuscript or PDF changed during review; rebuild and review again");
     }
+    // Readiness is a controller-owned gate.  Reviewers may conservatively echo
+    // `ready: false` when they leave advisory style or relevance findings open,
+    // but advisory findings do not prevent a complete submission.  Only an
+    // unresolved blocking finding keeps the manuscript unready.
+    const unresolvedBlocking = parsed.findings.some((finding) =>
+      finding.status !== "resolved" && finding.severity === "blocking");
     review = { ...parsed, version: 1, manuscript_sha256: current.manuscript_sha256,
       pdf_sha256: current.pdf_sha256, reviewed_pages: pages.length,
-      ready: parsed.ready };
+      ready: missingEvidence.length === 0 && !unresolvedBlocking };
     rawFindings = [...(rawFindings ?? []), ...parsed.findings.slice(rawFindings?.length ?? 0)];
     completed = missingEvidence.length === 0;
   } catch (error) {

@@ -393,10 +393,76 @@ for import exclusions and their limits.
 `scripts/prepare-gewu.py` prepares the raw-only Issue48 writing task without
 launching a model. It uses an authenticated `hf` CLI cache to fetch an allowlist
 from `Jack-Jieke-Wu/Gewu-Solutions`, pinned to revision
-`576302afd4bc95cd3b3ed809f4822c611a1ea95f`, solution
+`1838e5e408785c041c67d263ce5faf858a326958`, solution
 `lewton-agent_kerrDeflection-solution__57b47284`. The source manifest marks it
 accepted, while `problem.yaml` says candidate; supplied passing audit logs are
 raw-evidence provenance, not verification of live journal acceptance.
+
+For the current all-solution regression queue, use
+`scripts/prepare-gewu-batch.py`. It pins the same dataset revision, inventories
+all 171 solution repositories, excludes the completed Kerr entry from the
+writing queue, and creates one raw-only, resumable task record for each of the
+remaining 170 repositories. Hand-written evidence ceilings are retained where
+available; newly added repositories receive an explicit evidence-bounded brief
+instead of being silently dropped. The queue is metadata-first and does not
+launch a model during preparation:
+
+```bash
+python3 scripts/prepare-gewu-batch.py inventory
+python3 scripts/prepare-gewu-batch.py inspect
+python3 scripts/prepare-gewu-batch.py prepare
+python3 scripts/prepare-gewu-batch.py enrich
+python3 scripts/prepare-gewu-batch.py verify
+```
+
+The revision-qualified directory `datasets/gewu-batch-1838e5e40878/` keeps the
+older 38-project preparation immutable and prevents a resume from mixing
+different dataset snapshots.
+
+When upgrading the already-created current directory, use
+`python3 scripts/prepare-gewu-batch.py refresh`; this explicitly replaces its
+generated screening index and expands each task from the earlier bounded slice
+to every admissible raw file.
+
+Each task manifest now locks its research domain, target venue, template id and
+writing style. The batch runner passes that template explicitly into the Docker
+acceptance command; it does not let a later model call silently switch venue.
+For real model runs, use `scripts/run-gewu-batch.py` with the required paid
+provider authorization and a dedicated output directory. The queue can be
+split deterministically without changing task contracts, for example:
+
+```bash
+python3 scripts/run-gewu-batch.py --shard-index 0 --shard-count 8 \
+  --output docker-output/gewu-20260907-shard-0
+```
+
+Resume the same shard with `--resume`; if no selector is supplied, the runner
+recovers the project selection from that shard's status file. The batch runner
+uses a stage-timeout multiplier of `1.5` by default (override with
+`--timeout-multiplier` or `PO_BATCH_TIMEOUT_MULTIPLIER`) because Gewu evidence
+repositories routinely need longer literature and section-writing turns. If a
+launcher dies while workers are active, wait for those workers to exit first;
+then use `--resume --recover-stale` to recover only when no worker is still
+bound to the batch output. Resuming a legacy workspace that lacks the selected
+bundled `template/template.tex` adds only that missing entrypoint, updates the
+locked template digest, and records `.po-run/template-migration.json`; existing
+template files are never overwritten.
+
+If a first write failed before creating `.po-run/run.json`, use
+`--resume --recover-incomplete` after confirming the output has no submission;
+the launcher only permits an unaccepted, non-resumable directory and preserves
+the previous acceptance report before retrying.
+
+After a shard stops, generate a mechanical per-repository report with:
+
+```bash
+python3 scripts/report-gewu-batch.py --output docker-output/gewu-20260907-shard-0
+```
+
+The report only marks a paper ready when the runtime acceptance result, completed
+run state, submission status, required source/PDF files, and independent
+recompile evidence all agree. A model self-report or a file that merely exists
+does not count.
 
 The allowlist contains notes, problem/rubric, code, CSVs, and existing audit logs,
 not finished papers, manuscript TeX, extracted paper prose, bibliographies,

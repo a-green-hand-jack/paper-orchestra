@@ -20,7 +20,10 @@ retrieve, render, revise, build, or review. Reuse target IDs from the research,
 figure/table/section plan or review finding; do not guess missing IDs or files.
 read/extract/analyze are native evidence operations. retrieve/render/build/review
 are registered controller operations; revise is dispatched to the responsible
-writer. Requests do not grant network, execution, budget or write permissions.
+writer. A revise request targeting 'manuscript' with admitted '.brain/input/code/'
+or 'source/code/' inputs is a controller-owned evidence-packaging action; use it
+when review requires checker/source files in the standalone submission. Requests
+do not grant network, execution, budget or write permissions.
 After writing requests.json, STOP THE TURN. Do not also submit a plotting script,
 continue writing dependent content, or claim the operations succeeded. The controller
 returns .brain/operation-results.json; on continuation, read its actual outcomes
@@ -278,6 +281,7 @@ export function buildStagePrompt(
     "",
     "Rules:",
     `- Locked template: ${scope.template_id ?? scope.venue}; selection: ${scope.template_selection ?? "explicit"}.`,
+    ...(scope.research_domain ? [`- Research field: ${scope.research_domain}. Target venue: ${scope.target_venue ?? "not specified"}. Writing style: ${scope.writing_style ?? "follow the selected venue instructions"}.`] : []),
     `- Automatic figure generation: ${scope.use_plotting ? "enabled" : "disabled; use supplied figures only"}.`,
     `- Bibliography mode: ${scope.bibliography_mode ?? "seed"}. Only the controller retrieves or changes bibliography records.`,
     ...(scope.target_citations === undefined ? [] : [`- Explicit CLI citation target: ${scope.target_citations}. Record this requirement; never pad unsupported citations.`]),

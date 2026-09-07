@@ -15,15 +15,19 @@ function run(name, args) {
 }
 let exit = run('doctor', ['doctor', '--model', process.env.PO_MODEL]).code;
 if (!exit) {
+  const templateArgs = process.env.PO_TEMPLATE ? ['--template', process.env.PO_TEMPLATE] : [];
   const args = process.env.PO_RESUME === '1'
     ? ['resume', '/output/workspace', '--headless', '--json', '--allow-lkm-spend']
-    : ['write', '/materials', '--brief', '/run/brief.md', '--output', '/output/workspace', '--headless', '--json', '--mode', 'autonomous', '--allow-lkm-spend', '--model', process.env.PO_MODEL, '--max-lkm-calls', process.env.PO_MAX_LKM_CALLS, '--target-citations', process.env.PO_TARGET_CITATIONS, '--research-cutoff', process.env.PO_RESEARCH_CUTOFF, '--timeout-multiplier', process.env.PO_TIMEOUT_MULTIPLIER];
+    : ['write', '/materials', '--brief', '/run/brief.md', '--output', '/output/workspace', '--headless', '--json', '--mode', 'autonomous', '--allow-lkm-spend', '--model', process.env.PO_MODEL, '--max-lkm-calls', process.env.PO_MAX_LKM_CALLS, '--target-citations', process.env.PO_TARGET_CITATIONS, '--research-cutoff', process.env.PO_RESEARCH_CUTOFF, '--timeout-multiplier', process.env.PO_TIMEOUT_MULTIPLIER, ...templateArgs];
   if (process.env.PO_RESUME !== '1') {
     for (const [env, flag] of [['PO_MAX_TOTAL_TOKENS', '--max-total-tokens'], ['PO_MAX_TOTAL_COST', '--max-total-cost'], ['PO_MAX_MODEL_CALLS', '--max-model-calls'], ['PO_MAX_IMAGE_CALLS', '--max-image-calls'], ['PO_MAX_OPERATION_CALLS', '--max-operation-calls'], ['PO_MAX_RUN_MINUTES', '--max-run-minutes']]) {
       if (process.env[env]) args.push(flag, process.env[env]);
     }
   } else if (process.env.PO_RESUME_MAX_TOTAL_TOKENS) {
     args.push('--max-total-tokens', process.env.PO_RESUME_MAX_TOTAL_TOKENS);
+  }
+  if (process.env.PO_RESUME === '1' && process.env.PO_RESUME_TIMEOUT_MULTIPLIER) {
+    args.push('--timeout-multiplier', process.env.PO_RESUME_TIMEOUT_MULTIPLIER);
   }
   const writing = run(process.env.PO_RESUME === '1' ? 'resume' : 'write', args);
   exit = writing.code;

@@ -14,7 +14,7 @@ import subprocess
 import tarfile
 
 REPO = "Jack-Jieke-Wu/Gewu-Solutions"
-REVISION = "576302afd4bc95cd3b3ed809f4822c611a1ea95f"
+REVISION = "1838e5e408785c041c67d263ce5faf858a326958"
 SOLUTION = "lewton-agent_kerrDeflection-solution__57b47284"
 ROOT = Path(__file__).resolve().parent.parent
 DEST = ROOT / "datasets/gewu-issue48"

@@ -39,8 +39,23 @@ export type FigureRoute = "code" | "text_to_image";
 export function resolveFigureRoute(spec: {
   plot_type: "plot" | "diagram";
   render_route?: "auto" | FigureRoute;
+  title?: string;
+  objective?: string;
+  generation_prompt?: string;
 }): FigureRoute {
   if (spec.plot_type === "plot") return "code";
+  // Text-to-image is useful for qualitative illustrations, but it is not a
+  // reliable renderer for exact scientific geometry.  A diagram that names
+  // angles, vectors, axes, certificates, equations, or thresholds must be
+  // generated as executable plotting code so the controller can render and
+  // inspect the actual geometry.  Keep an explicit text-to-image route for
+  // genuinely qualitative artwork whose brief contains none of these
+  // verifiable quantities.
+  const scientificGeometry = [spec.title, spec.objective, spec.generation_prompt]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .match(/\b(angle|angles|radian|radians|pi|vector|vectors|axis|axes|coordinate|coordinates|certificate|certificates|equation|equations|threshold|antipodal|sign[- ]string|geometry|direction|directions)\b/i);
+  if (spec.render_route === "text_to_image" && scientificGeometry) return "code";
   if (spec.render_route === "code" || spec.render_route === "text_to_image") {
     return spec.render_route;
   }

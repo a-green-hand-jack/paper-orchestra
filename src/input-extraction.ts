@@ -155,13 +155,16 @@ export function inspectPdf(root: string, rel: string): PdfInspection {
 
 export const EXTRACTABLE = new Set([
   ".ipynb", ".sqlite", ".sqlite3", ".db", ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".npy", ".npz",
+  ".xlsx", ".h5", ".hdf5",
 ]);
 
 // Shipped as a string so tsc includes the controller-owned extractor in dist.
-// No project imports, notebook execution, pickle loading, shell or SQL supplied
+// No project imports, notebook execution, pickle loading, spreadsheet macros,
+// external-link fetching, shell or SQL supplied
 // by the input. Limits apply independently of the model's instructions.
 const PYTHON = String.raw`
 import sys, os, json, csv, sqlite3, math, zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 try:
     import resource
@@ -218,6 +221,51 @@ if ext in ('.sqlite', '.sqlite3', '.db'):
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
         result['tables'].append({'name': name, 'columns': columns, **rows_summary(rows)})
     db.close()
+elif ext in ('.xlsx',):
+    # XLSX is a ZIP of XML. Read bounded cell metadata without extraction,
+    # spreadsheet execution, formula evaluation, or macro loading.
+    with zipfile.ZipFile(p) as z:
+        infos = z.infolist()
+        if len(infos) > 200 or sum(i.file_size for i in infos) > 64*1024*1024:
+            raise ValueError('spreadsheet archive exceeds expansion limit')
+        names = {i.filename for i in infos}
+        strings = []
+        if 'xl/sharedStrings.xml' in names:
+            root = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            ns = {'x': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            for item in root.findall('x:si', ns)[:10000]:
+                strings.append(''.join(t.text or '' for t in item.iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t'))[:1000])
+        sheets = []
+        for name in sorted(n for n in names if n.startswith('xl/worksheets/sheet') and n.endswith('.xml'))[:20]:
+            root = ET.fromstring(z.read(name))
+            ns = {'x': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            rows = []
+            for row in root.findall('.//x:sheetData/x:row', ns)[:200]:
+                cells = []
+                for cell in row.findall('x:c', ns)[:200]:
+                    value = cell.find('x:v', ns)
+                    text = '' if value is None else (value.text or '')
+                    if cell.get('t') == 's' and text.isdigit() and int(text) < len(strings): text = strings[int(text)]
+                    cells.append({'ref': cell.get('r'), 'value': text, 'formula': (cell.findtext('x:f', default='', namespaces=ns) or '')[:1000]})
+                rows.append(cells)
+            sheets.append({'sheet': name, 'rows': rows})
+        result = {'sheets': sheets, 'note': 'Bounded XML preview; formulas were not evaluated and macros were not executed.'}
+elif ext in ('.h5', '.hdf5'):
+    import h5py
+    import numpy as np
+    with h5py.File(p, 'r', libver='latest', swmr=False) as h5:
+        datasets = []
+        def visit(name, obj):
+            if len(datasets) >= 200: return
+            if isinstance(obj, h5py.Dataset):
+                item = {'path': name, 'shape': list(obj.shape), 'dtype': str(obj.dtype), 'size': int(obj.size)}
+                if obj.size and obj.size <= 10000 and np.issubdtype(obj.dtype, np.number):
+                    sample = np.asarray(obj[...]).reshape(-1)[:10000]
+                    finite = sample[np.isfinite(sample)] if np.issubdtype(sample.dtype, np.floating) else sample
+                    if finite.size: item.update(min=float(np.min(finite)), max=float(np.max(finite)), mean=float(np.mean(finite)))
+                datasets.append(item)
+        h5.visititems(visit)
+        result = {'datasets': datasets, 'note': 'Read-only bounded HDF5 metadata; no code or external links were followed.'}
 elif ext in ('.npy', '.npz'):
     import numpy as np
     if ext == '.npz':

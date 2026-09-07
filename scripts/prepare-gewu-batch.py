@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Curate the 38 remaining pinned Gewu solutions, without running models.
+"""Curate every current Gewu solution as a raw-only writing task.
 
 inventory -> inspect -> prepare -> verify. Only individually selected raw files
 are downloaded; excluded publications are never opened, including from cache.
@@ -9,12 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
-DEST = ROOT / "datasets/gewu-batch"
+DEST = ROOT / "datasets/gewu-batch-1838e5e40878"
+LOCAL_DATASET = Path(os.environ.get(
+    "GEWU_DATASET_DIR", "/home/user/Projects/Datasets/data/Gewu-Solutions"))
 spec = importlib.util.spec_from_file_location("prepare_gewu", ROOT / "scripts/prepare-gewu.py")
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
@@ -26,7 +29,8 @@ NOTE_NAMES = {"proof.md", "certificate.md", "schema.md", "contract.md",
               "problem.md", "scope-notice.md", "r17-scope-notice.md",
               "claim-scope.md", "canonical-resolution-r17.md", "author-proof.txt",
               "primitive-rectangle-mod8-candidate.txt"}
-RAW_EXTENSIONS = {".py", ".json", ".csv", ".tsv"}
+RAW_EXTENSIONS = {".py", ".json", ".csv", ".tsv", ".txt", ".npy", ".npz",
+                  ".xlsx", ".xls", ".h5", ".hdf5", ".yaml", ".yml"}
 PUBLICATION_DIRS = {"paper", "papers", "arxiv-submission", "reviewed-package", "publication"}
 # Exact pinned paths whose raw code/certificates were reviewed during curation.
 # No extension-based exceptions inside publication packages.
@@ -223,6 +227,14 @@ routes or a page-count target. Use quantitative charts only when warranted by
 actual supplied numeric evidence, with code/data provenance and no invented points,
 error bars or measurements. Generate any needed figures anew and review readability.
 An explanatory diagram must be identified as conceptual, not empirical evidence.
+
+Locked field-to-submission policy: mathematics uses the Annals of Mathematics
+style contract; physics uses the Physical Review Letters style contract; biology,
+chemistry, earth science and other natural sciences use the Nature Portfolio
+community contract; AI/ML uses the ICLR contract. The selected template is also
+the writing-style and target-venue contract. If the field is ambiguous, state the
+uncertainty and choose the closest policy from the raw evidence rather than
+silently mixing styles.
 """
 
 
@@ -230,11 +242,151 @@ def encode(value):
     return json.dumps(value, indent=2, ensure_ascii=True) + "\n"
 
 
+FIELD_POLICIES = {
+    "journal-mathematics-a": {
+        "research_domain": "mathematics",
+        "target_venue": "Annals of Mathematics",
+        "template_id": "annals-mathematics",
+        "writing_style": "formal theorem/lemma/proof style with explicit hypotheses, claims, and proof-status boundaries",
+    },
+    "journal-physics-a": {
+        "research_domain": "physics",
+        "target_venue": "Physical Review Letters",
+        "template_id": "physical-review-letters",
+        "writing_style": "physics letter style: compact motivation, model/conventions, quantitative results, uncertainty, and limitations",
+    },
+    "journal-natural-science-a": {
+        "research_domain": "natural-sciences",
+        "target_venue": "Nature Portfolio (journal selected in the brief)",
+        "template_id": "nature-portfolio",
+        "writing_style": "Nature community style: accessible significance, concise results, methods, data/code availability, and explicit limitations",
+    },
+    "journal-biology-a": {
+        "research_domain": "natural-sciences",
+        "target_venue": "Nature Portfolio (journal selected in the brief)",
+        "template_id": "nature-portfolio",
+        "writing_style": "Nature community style: accessible significance, concise results, methods, data/code availability, and explicit limitations",
+    },
+    "journal-chemistry-a": {
+        "research_domain": "natural-sciences",
+        "target_venue": "Nature Portfolio (journal selected in the brief)",
+        "template_id": "nature-portfolio",
+        "writing_style": "Nature community style: accessible significance, concise results, methods, data/code availability, and explicit limitations",
+    },
+    "journal-ai-ml-a": {
+        "research_domain": "ai-ml",
+        "target_venue": "International Conference on Learning Representations (ICLR)",
+        "template_id": "iclr2026",
+        "writing_style": "ICLR style: precise problem statement, method, reproducible experiments, ablations, limitations, and responsible-use discussion",
+    },
+    "journal-computer-science-a": {
+        "research_domain": "ai-ml",
+        "target_venue": "International Conference on Learning Representations (ICLR)",
+        "template_id": "iclr2026",
+        "writing_style": "ICLR style: precise problem statement, method, reproducible experiments, ablations, limitations, and responsible-use discussion",
+    },
+}
+
+
+def dataset_catalog():
+    """Map the short commit suffix in a solution id to its dataset metadata."""
+    path = LOCAL_DATASET / "MANIFEST.md"
+    if not path.is_file() or path.is_symlink():
+        return {}
+    catalog = {}
+    pattern = re.compile(r"^- (.+?) \| ([^|]+) \| .*? @ ([0-9a-f]{8})$")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            title, journal, commit = match.groups()
+            catalog[commit] = {"catalog_title": title, "journal": journal.strip()}
+    return catalog
+
+
+def field_policy(project_id, catalog):
+    commit = project_id.rsplit("__", 1)[-1]
+    row = catalog.get(commit, {})
+    journal = row.get("journal", "journal-mathematics-a")
+    policy = FIELD_POLICIES.get(journal)
+    if policy is None:
+        raise ValueError(f"no field-to-template policy for {project_id} ({journal})")
+    return {**policy, "classification_source": "Gewu MANIFEST.md" if row else "fallback"}, row
+
+
+def write_generated(path, data):
+    """Atomically update only generated batch files; never follow symlinks."""
+    if not path.is_absolute() or not path.is_relative_to(DEST) or path.is_symlink():
+        raise ValueError(f"refusing generated output path: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.exists() or temporary.is_symlink():
+        temporary.unlink()
+    temporary.write_bytes(data.encode() if isinstance(data, str) else data)
+    temporary.replace(path)
+
+
+def enrich_existing_batch():
+    """Attach the locked field/template policy to an already prepared batch."""
+    root_path = DEST / "manifest.json"
+    root = json.loads(read_local(root_path))
+    catalog = dataset_catalog()
+    for project in root["projects"]:
+        policy, catalog_row = field_policy(project["id"], catalog)
+        project.update({"field_policy": policy, **({"catalog_title": catalog_row["catalog_title"]} if catalog_row else {})})
+        brief_path = Path(project["brief"])
+        brief = read_local(brief_path).decode("utf-8")
+        marker = "## Locked Field and Submission Contract"
+        if marker not in brief:
+            brief += (f"\n{marker}\n\n"
+                      f"Research domain: **{policy['research_domain']}**\n\n"
+                      f"Target submission: **{policy['target_venue']}**\n\n"
+                      f"Required template: `{policy['template_id']}`\n\n"
+                      f"Writing style: {policy['writing_style']}\n\n"
+                      "The template, venue and writing style are one locked contract. "
+                      "Do not mix a different field's structure or claim acceptance.\n")
+            write_generated(brief_path, brief)
+        for row in project["files"]:
+            if row.get("decision") == "generated" and row.get("role") == "brief":
+                row.update(bytes=len(brief.encode()), sha256=digest(brief.encode()))
+        write_generated(Path(project["brief"]).with_name("manifest.json"), encode(project))
+    root["field_policy"] = {
+        "version": 1,
+        "source": str(LOCAL_DATASET / "MANIFEST.md"),
+        "mapping": FIELD_POLICIES,
+    }
+    root_bytes = encode(root).encode()
+    write_generated(root_path, root_bytes)
+    write_generated(DEST / "manifest.sha256", digest(root_bytes) + "  manifest.json\n")
+    print(encode({"enriched": len(root["projects"]), "manifest": str(root_path), "policies": FIELD_POLICIES}))
+
+
+def enrich():
+    enrich_existing_batch()
+
+
 def hf(*args):
     # Same credential-safe JSON interface as prepare-gewu.py, with a hard timeout.
     result = subprocess.run(["hf", *args, "--format", "json"], check=True,
                             text=True, capture_output=True, timeout=90)
     return json.loads(result.stdout)
+
+
+def local_tree():
+    """Build the same metadata shape from the user's local dataset mirror."""
+    if not LOCAL_DATASET.is_dir() or LOCAL_DATASET.is_symlink():
+        return None
+    rows = []
+    for project in sorted(LOCAL_DATASET.iterdir()):
+        if not project.is_dir() or project.is_symlink() or project.name.startswith("."):
+            continue
+        for path in sorted(project.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            remote = path.relative_to(LOCAL_DATASET).as_posix()
+            data = path.read_bytes()
+            blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            rows.append({"path": remote, "size": len(data), "blob_id": blob})
+    return rows
 
 
 def selection(remote):
@@ -267,7 +419,9 @@ def selection(remote):
         return None
     if name in NOTE_NAMES or ("notes" in parts or "proof" in parts) and path.suffix.lower() == ".md":
         return None
-    if name == "readme.md" and (len(parts) == 1 or parts[0] == "problem"):
+    if name == "readme.md" and (len(parts) == 1 or parts[0] in {"problem", "research", "notes", "artifacts"}):
+        return None
+    if path.suffix.lower() == ".md" and any(part in {"problem", "research", "notes", "proof", "artifacts", "data"} for part in parts):
         return None
     if name == "problem.yaml" or name in {"exhaustive_results.txt", "3_manifolds_all.txt",
                                          "3_manifolds_all_type.txt", "validation_output.txt"}:
@@ -317,15 +471,22 @@ def cache_blob(cached, entry):
 
 
 def inventory():
-    tree = hf("datasets", "list", REPO, "--recursive", "--revision", REVISION)
+    tree = local_tree()
+    source = "local"
+    if tree is None:
+        tree = hf("datasets", "list", REPO, "--recursive", "--revision", REVISION)
+        source = "huggingface"
     ids = sorted({r["path"].split("/")[0] for r in tree if "/" in r["path"]})
-    if len(ids) != 39 or KERR not in ids:
-        raise ValueError(f"expected 39 solutions including Kerr, got {len(ids)}")
+    if len(ids) < 2 or KERR not in ids:
+        raise ValueError(f"expected at least two solutions including Kerr, got {len(ids)}")
     put(DEST / "tree.json", encode(tree))
-    candidates = [r for r in tree if "size" in r and selection(r["path"]) is None]
-    if any(r["size"] > 1_000_000 for r in candidates) or sum(r["size"] for r in candidates) > 20_000_000:
-        raise ValueError("raw candidates exceed bounded download budget; review metadata")
-    print(encode({"projects": ids, "tree_entries": len(tree), "candidates": len(candidates),
+    candidates = selected_candidates(tree)
+    # The expanded snapshot contains 170 new solution repositories. Keep the
+    # preflight bounded while allowing the complete raw-only queue (the largest
+    # individual raw artifact is still below the per-file ceiling).
+    if any(r["size"] > 10_000_000 for r in candidates) or sum(r["size"] for r in candidates) > 80_000_000:
+        raise ValueError("raw candidates exceed the 80 MiB bounded download budget; review metadata")
+    print(encode({"source": source, "projects": ids, "tree_entries": len(tree), "candidates": len(candidates),
                   "candidate_bytes": sum(r["size"] for r in candidates)}))
 
 
@@ -339,9 +500,42 @@ def content_rejection(text):
     return None
 
 
-def inspect():
+def selected_candidates(tree):
+    """Return every admissible raw file, deterministically ordered.
+
+    The local mirror is already available, so the writing task must not be
+    starved of evidence by an arbitrary per-repository sample. The bounded
+    80-MiB preflight still excludes publication products and credential-like
+    paths, while preserving all admissible raw files for on-demand inspection.
+    """
+    grouped = {}
+    for row in tree:
+        remote = row.get("path", "")
+        if "size" not in row or selection(remote) is not None:
+            continue
+        project = remote.split("/", 1)[0]
+        grouped.setdefault(project, []).append(row)
+
+    def rank(row):
+        path = PurePosixPath(row["path"])
+        name = path.name.lower()
+        if name == "readme.md" and len(path.parts) == 2:
+            return (0, row["size"], row["path"])
+        if name in NOTE_NAMES or path.parts[-2:-1] == ("problem",):
+            return (1, row["size"], row["path"])
+        if path.suffix.lower() in {".py", ".json", ".csv", ".tsv", ".txt", ".yaml", ".yml"}:
+            return (2, row["size"], row["path"])
+        return (3, row["size"], row["path"])
+
+    selected = []
+    for project in sorted(grouped):
+        selected.extend(sorted(grouped[project], key=rank))
+    return selected
+
+
+def inspect(refresh=False):
     tree = json.loads(read_local(DEST / "tree.json"))
-    candidates = [r for r in tree if "size" in r and selection(r["path"]) is None]
+    candidates = selected_candidates(tree)
 
     def download(entry):
         remote = entry["path"]
@@ -349,6 +543,11 @@ def inspect():
         no_symlinks(local)
         if local.exists():
             data = read_local(local)
+        elif LOCAL_DATASET.is_dir() and (LOCAL_DATASET / remote).is_file():
+            source = LOCAL_DATASET / remote
+            if source.is_symlink() or not source.resolve().is_relative_to(LOCAL_DATASET.resolve()):
+                raise ValueError(f"unsafe local dataset path: {remote}")
+            data = source.read_bytes()
         else:
             no_symlinks(DEST / "hf-cache")
             cached = Path(hf("download", REPO, remote, "--type", "dataset", "--revision", REVISION,
@@ -359,7 +558,7 @@ def inspect():
         lfs = entry.get("lfs")
         if len(data) != entry["size"] or (lfs and sha != lfs["sha256"]) or (not lfs and blob != entry["blob_id"]):
             raise ValueError(f"pinned remote hash mismatch: {remote}")
-        text = data.decode("utf-8")
+        text = data.decode("utf-8", errors="replace")
         rejection = content_rejection(text)
         # Rejected candidate bytes stay only in hf's cache, never in materials.
         if not rejection:
@@ -368,9 +567,66 @@ def inspect():
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         records = list(pool.map(download, candidates))
-    put(DEST / "screening.json", encode(records))
+    if refresh:
+        write_generated(DEST / "screening.json", encode(records))
+    else:
+        put(DEST / "screening.json", encode(records))
     print(encode({"screened": len(records), "rejected": [r for r in records if r["rejection"]],
                   "candidate_root": str(DEST / "candidates")}))
+
+
+def expand_existing_batch():
+    """Promote newly admitted raw files into an existing generated batch."""
+    root = json.loads(read_local(DEST / "manifest.json"))
+    tree = json.loads(read_local(DEST / "tree.json"))
+    screened = {r["remote"]: r for r in json.loads(read_local(DEST / "screening.json"))}
+    selected = {r["path"] for r in selected_candidates(tree)}
+    by_id = {p["id"]: p for p in root["projects"]}
+    for project_id, project in by_id.items():
+        directory = DEST / project_id
+        materials = directory / "materials"
+        existing = {r["remote"]: r for r in project["files"] if "remote" in r}
+        for entry in tree:
+            remote = entry["path"]
+            if not remote.startswith(project_id + "/") or remote not in selected:
+                continue
+            row = screened.get(remote)
+            record = existing.get(remote)
+            if not row or row["rejection"] or not record or record.get("decision") != "exclude":
+                continue
+            candidate = DEST / "candidates" / remote
+            data = read_local(candidate)
+            local = materials / remote.split("/", 1)[1]
+            put(local, data)
+            record.update(decision="include", local=str(local), sha256=digest(data),
+                          reason="reviewed raw research/context; no finished manuscript",
+                          role="negative-control" if "mutated" in remote else "raw-material")
+            record.pop("hash_note", None)
+            record["content_read"] = True
+        brief_path = Path(project["brief"])
+        brief = read_local(brief_path).decode("utf-8")
+        marker = "## Expanded raw evidence"
+        if marker not in brief:
+            brief += f"\n{marker}\n\nAll admissible raw files in this task's locked manifest are available under `materials/`; publication products and sensitive paths remain excluded.\n"
+            write_generated(brief_path, brief)
+        for record in project["files"]:
+            if record.get("decision") == "generated" and record.get("role") == "brief":
+                record.update(bytes=len(brief.encode()), sha256=digest(brief.encode()))
+        write_generated(directory / "manifest.json", encode(project))
+    root["provenance"] = [
+        {"path": str(DEST / name), "sha256": digest(read_local(DEST / name))}
+        for name in ("tree.json", "screening.json")
+    ]
+    root_bytes = encode(root).encode()
+    write_generated(DEST / "manifest.json", root_bytes)
+    write_generated(DEST / "manifest.sha256", digest(root_bytes) + "  manifest.json\n")
+    verify()
+    print(encode({"expanded": len(by_id), "manifest": str(DEST / "manifest.json")}))
+
+
+def refresh():
+    inspect(refresh=True)
+    expand_existing_batch()
 
 
 def review():
@@ -402,17 +658,27 @@ def prepare():
     if (DEST / "manifest.json").exists():
         # Preserve published inputs and their historical decision records. A new
         # policy must validate them, not silently rewrite a scheduler's manifest.
+        if not all("field_policy" in project for project in json.loads(read_local(DEST / "manifest.json"))["projects"]):
+            enrich_existing_batch()
         verify()
         return
     tree = json.loads(read_local(DEST / "tree.json"))
     screened = {r["remote"]: r for r in json.loads(read_local(DEST / "screening.json"))}
+    selected = {r["path"] for r in selected_candidates(tree)}
+    catalog = dataset_catalog()
     ids = sorted({r["path"].split("/")[0] for r in tree if "/" in r["path"]} - {KERR})
-    if len(ids) != 38 or {i.split("__")[0] for i in ids} != SCOPES.keys():
-        raise ValueError("reviewed project coverage differs from pinned tree")
+    if KERR in ids:
+        raise ValueError("completed Kerr must be excluded from the writing queue")
     projects = []
     for project_id in ids:
         key = project_id.split("__")[0]
-        title, scope = SCOPES[key]
+        policy, catalog_row = field_policy(project_id, catalog)
+        title, scope = SCOPES.get(key, (
+            f"Evidence-bounded research paper for {project_id}",
+            "The current dataset has no hand-written scope note for this solution. "
+            "Inspect only the included raw files, reconstruct definitions and claims from those files, "
+            "and state every unsupported or unresolved claim explicitly. Do not retrieve or quote a "
+            "finished manuscript, bibliography, prebuilt figure, or publication package."))
         directory = DEST / project_id
         materials = directory / "materials"
         files = []
@@ -424,8 +690,12 @@ def prepare():
             row = screened.get(remote)
             if reason is None:
                 if row is None:
-                    raise ValueError(f"unscreened candidate: {remote}")
-                reason = row["rejection"]
+                    if remote not in selected:
+                        reason = "raw candidate outside the current admissible evidence set; inspect on demand"
+                    else:
+                        raise ValueError(f"unscreened candidate: {remote}")
+                else:
+                    reason = row["rejection"]
             # Operational receipts have no scientific content and expose host paths.
             if PurePosixPath(remote).name.lower() in {
                 "science_start.json", "run_metadata.json", "validation_output.txt"}:
@@ -443,7 +713,7 @@ def prepare():
                 local = materials / remote.split("/", 1)[1]
                 candidate = DEST / "candidates" / remote
                 data = read_local(candidate)
-                if digest(data) != row["sha256"] or content_rejection(data.decode()):
+                if digest(data) != row["sha256"] or content_rejection(data.decode("utf-8", errors="replace")):
                     raise ValueError(f"candidate changed after screening: {remote}")
                 put(local, data)
                 record.update(decision="include", local=str(local), sha256=digest(data),
@@ -453,7 +723,7 @@ def prepare():
         status = "blocked" if key in BLOCKED else "ready"
         reason = BLOCKED.get(key, "Raw proof notes, explicit certificate, code or data available for the evidence-bounded scope in the brief; scientific review remains required.")
         if status == "ready" and not any(r["decision"] == "include" and
-                PurePosixPath(r["remote"]).suffix in RAW_EXTENSIONS | {".txt"} for r in files):
+                PurePosixPath(r["remote"]).suffix in RAW_EXTENSIONS | {".txt", ".md"} for r in files):
             raise ValueError(f"ready project has no concrete evidence: {project_id}")
         brief = directory / "brief.md"
         brief_text = (f"# {title}\n\nProject: `{project_id}`\n\n"
@@ -463,7 +733,15 @@ def prepare():
             brief_text += ("**DO NOT SCHEDULE A WRITING RUN.** Preserve this entry as blocked. "
                            "The writing contract below applies only after a separately authorized "
                            "raw-evidence update and review; do not retrieve source papers to unblock it.\n\n")
-        brief_text += BRIEF + "\n## Input Provenance\n\n"
+        brief_text += BRIEF
+        brief_text += ("\n## Locked Field and Submission Contract\n\n"
+                       f"Research domain: **{policy['research_domain']}**\n\n"
+                       f"Target submission: **{policy['target_venue']}**\n\n"
+                       f"Required template: `{policy['template_id']}`\n\n"
+                       f"Writing style: {policy['writing_style']}\n\n"
+                       "The template, venue and writing style are one locked contract. "
+                       "Do not mix a different field's structure or claim acceptance.\n\n")
+        brief_text += "## Input Provenance\n\n"
         brief_text += f"Dataset: `{REPO}`\n\nRevision: `{REVISION}`\n\n"
         brief_text += f"Materials directory: `{materials}`\n\n"
         brief_text += "The following original raw files supply the context above; preserve their boundaries:\n\n"
@@ -473,7 +751,10 @@ def prepare():
         files.append({"local": str(brief), "decision": "generated", "role": "brief",
                       "bytes": len(brief_text.encode()), "sha256": digest(brief_text.encode())})
         project = {"id": project_id, "title": title, "materials": str(materials),
-                   "brief": str(brief), "status": status, "reason": reason, "files": files}
+                   "brief": str(brief), "status": status, "reason": reason,
+                   "field_policy": policy,
+                   **({"catalog_title": catalog_row["catalog_title"]} if catalog_row else {}),
+                   "files": files}
         put(directory / "manifest.json", encode(project))
         projects.append(project)
     manifest = {"dataset": REPO, "revision": REVISION,
@@ -501,8 +782,16 @@ def verify(manifest=None):
     indexed = {r["path"]: r for r in tree if "size" in r}
     ids = {r["path"].split("/")[0] for r in tree if "/" in r["path"]} - {KERR}
     projects = manifest["projects"]
-    if len(projects) != 38 or {p["id"] for p in projects} != ids or manifest["completed"]["id"] != KERR:
-        raise ValueError("expected exactly 38 unique remaining solutions and separate completed Kerr")
+    if len(projects) != len(ids) or {p["id"] for p in projects} != ids or manifest["completed"]["id"] != KERR:
+        raise ValueError("manifest does not cover every current solution except completed Kerr")
+    for project in projects:
+        policy = project.get("field_policy")
+        if (not isinstance(policy, dict)
+                or policy.get("research_domain") not in {"mathematics", "physics"}
+                or policy.get("template_id") not in {"annals-mathematics", "physical-review-letters"}
+                or not policy.get("target_venue") or not policy.get("writing_style")
+                or policy.get("classification_source") not in {"Gewu MANIFEST.md", "fallback"}):
+            raise ValueError(f"missing or invalid field policy: {project.get('id')}")
     hashes = 0
     affected = {r["remote"]: selection(r["remote"]) for p in projects for r in p["files"]
                 if r["decision"] == "include" and selection(r["remote"])}
@@ -572,7 +861,7 @@ def verify(manifest=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="all",
-                        choices=["all", "inventory", "inspect", "review", "prepare", "verify"])
+                        choices=["all", "inventory", "inspect", "refresh", "review", "prepare", "enrich", "verify"])
     args = parser.parse_args()
     if subprocess.run(["git", "check-ignore", "-q", str(DEST / "manifest.json")], cwd=ROOT).returncode:
         raise ValueError("batch destination must be gitignored")

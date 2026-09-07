@@ -6,7 +6,7 @@ const report = { schema_version: 1, kind: mode, ok: false, started_at: new Date(
 const destination = `/output/${mode}-acceptance.json`;
 const save = () => writeFileSync(destination, JSON.stringify(report, null, 2) + '\n');
 const dataset = 'Jack-Jieke-Wu/Gewu-Solutions';
-const revision = '576302afd4bc95cd3b3ed809f4822c611a1ea95f';
+const revision = '1838e5e408785c041c67d263ce5faf858a326958';
 const commands = mode === 'services' ? [
   ['bohr-identity', 'bohr', ['auth', 'whoami', '--no-interactive', '-o', 'json']],
   ['bohr-account-read', 'bohr', ['billing', 'balance', '--no-interactive', '-o', 'json']],

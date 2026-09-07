@@ -134,6 +134,8 @@ const USENIX = "https://www.usenix.org/conferences/author-resources/paper-templa
 const LNCS = "https://www.springer.com/gp/computer-science/lncs/conference-proceedings-guidelines";
 const SIAM = "https://www.siam.org/publications/proceedings/";
 const SIGPLAN = "https://www.sigplan.org/Resources/Author/";
+const ANNALS = "https://annals.math.princeton.edu/for-authors";
+const APS_PRL = "https://journals.aps.org/prl/authors";
 
 function ccf(
   key: CcfAVenueKey,
@@ -326,6 +328,40 @@ export const TEMPLATE_ADAPTERS: readonly TemplateAdapter[] = [
       ethics: "varies",
       artifacts: "varies",
       notes: ["Select a target Nature Portfolio journal and review its own author instructions before submission."],
+    },
+  },
+  {
+    id: "annals-mathematics",
+    venueKey: null,
+    title: "Annals of Mathematics style scaffold",
+    year: null,
+    category: "Mathematics",
+    authorInstructionsUrl: ANNALS,
+    verifiedAt: "2026-09-07",
+    licenseStatus: "project-authored",
+    provenance: "Project-authored scaffold informed by the Annals author guidance; it is not an official Annals class or kit.",
+    source: { kind: "bundled", directory: "annals-mathematics" },
+    build: { engine: "pdflatex", bibliography: "bibtex" },
+    constraints: {
+      anonymity: "varies", mainTextPages: null, referencesCountTowardLimit: null, appendix: "varies",
+      ethics: "varies", artifacts: "optional", notes: ["Confirm the current journal instructions before submission."],
+    },
+  },
+  {
+    id: "physical-review-letters",
+    venueKey: null,
+    title: "Physical Review Letters style scaffold",
+    year: null,
+    category: "Physics",
+    authorInstructionsUrl: APS_PRL,
+    verifiedAt: "2026-09-07",
+    licenseStatus: "project-authored",
+    provenance: "Project-authored scaffold using the official TeX Live revtex4-2 class; it is not a redistribution of the complete APS kit.",
+    source: { kind: "bundled", directory: "physical-review-letters" },
+    build: { engine: "pdflatex", bibliography: "bibtex" },
+    constraints: {
+      anonymity: "open", mainTextPages: null, referencesCountTowardLimit: null, appendix: "supplement",
+      ethics: "varies", artifacts: "optional", notes: ["Use the official APS REVTeX kit for an actual submission."],
     },
   },
   {

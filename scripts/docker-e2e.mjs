@@ -39,13 +39,29 @@ const protectedPaths = [
 for (const path of protectedPaths) {
   if (inside(resolve(path), output) || inside(output, resolve(path))) throw new Error('Output overlaps an input, provider, or credential mount');
 }
-if (existsSync(output) && !['resume', 'exec'].includes(mode)) throw new Error('Output already exists; choose a new PO_OUTPUT_DIR or explicit resume/exec');
+const allowIncompleteRestart = mode === 'run' && process.env.PO_ALLOW_INCOMPLETE_RESTART === '1';
+if (existsSync(output) && !['resume', 'exec'].includes(mode) && !allowIncompleteRestart) {
+  throw new Error('Output already exists; choose a new PO_OUTPUT_DIR or explicit resume/exec');
+}
 if (existsSync(output) && (lstatSync(output).isSymbolicLink() || realpathSync(output) !== output)) throw new Error('Output must not be symlinked');
 mkdirSync(output, { recursive: true, mode: 0o700 });
 if (realpathSync(output) !== output) throw new Error('Output ancestors must not be symlinked');
+if (allowIncompleteRestart) {
+  const prior = join(output, 'acceptance.json');
+  const priorWorkspace = join(output, 'workspace');
+  let safe = false;
+  if (existsSync(prior) && !existsSync(join(priorWorkspace, '.po-run', 'run.json'))
+      && !existsSync(join(priorWorkspace, 'submission'))) {
+    try {
+      const previous = JSON.parse(readFileSync(prior, 'utf8'));
+      safe = previous.manuscript_accepted !== true && previous.ok !== true;
+    } catch { safe = false; }
+  }
+  if (!safe) throw new Error('Incomplete restart requires an unaccepted output with no resumable run or submission');
+}
 const report = { schema_version: 1, kind: 'docker-real-cli-acceptance', mode, image, output, started_at: new Date().toISOString(), ok: false, steps: [] };
 const save = () => writeFileSync(join(output, 'acceptance.json'), JSON.stringify(report, null, 2) + '\n');
-if (['resume', 'exec'].includes(mode) && existsSync(join(output, 'acceptance.json'))) {
+if (['run', 'resume', 'exec'].includes(mode) && existsSync(join(output, 'acceptance.json'))) {
   // Retain previous attempt evidence; no previous manuscript/artifact is removed.
   writeFileSync(join(output, `acceptance-${stamp}.json`), readFileSync(join(output, 'acceptance.json')));
 }

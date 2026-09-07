@@ -9,7 +9,7 @@ import { UserFacingError, ValidationFailedError } from "./errors.js";
 import { formatModelRef, parseModelRef, parseStageModels } from "./model.js";
 import { compactStamp } from "./timestamp.js";
 import { PAPER_ORCHESTRA_VERSION } from "./version.js";
-import { readRunState, resumeStage, verifyLocks } from "./state/store.js";
+import { readRunState, resumeStage, updateRunState, verifyLocks } from "./state/store.js";
 import { validateRun, validateStage } from "./validation.js";
 import { isStageId, STAGES, type StageId } from "./stages.js";
 import { bundledVenues, templateAdapters } from "./venues.js";
@@ -28,6 +28,7 @@ import { readFileSync } from "node:fs";
 import { runResult } from "./automation.js";
 import { DEFAULT_BUDGET_LIMITS, readBudget } from "./budget.js";
 import { BudgetLimitsSchema } from "./state/schema.js";
+import { repairBundledTemplateEntrypoint } from "./template-migration.js";
 
 let jsonErrors = false;
 let activeWorkspace: string | null = null;
@@ -337,6 +338,9 @@ program
           id: state.scope.template_id ?? state.scope.venue,
           selection: state.scope.template_selection ?? "explicit",
           rationale: state.scope.template_rationale ?? "",
+          domain: state.scope.research_domain ?? null,
+          target_venue: state.scope.target_venue ?? null,
+          writing_style: state.scope.writing_style ?? null,
         },
         checkpoint: result.checkpointSha,
       });
@@ -344,6 +348,9 @@ program
       process.stdout.write(`prepared ${state.run_id} in ${workspace}\n`);
       process.stdout.write(`  branch    ${state.run_branch}\n`);
       process.stdout.write(`  venue     ${state.scope.venue}\n`);
+      if (state.scope.research_domain) {
+        process.stdout.write(`  field     ${state.scope.research_domain} -> ${state.scope.target_venue ?? "unspecified"}\n`);
+      }
       process.stdout.write(
         `  selection ${state.scope.template_selection ?? "explicit"} (${state.scope.template_rationale ?? "user-selected"})\n`,
       );
@@ -440,16 +447,31 @@ program
     false,
   )
   .option("--headless", "resume without attaching the OpenCode TUI", false)
+  .option("--timeout-multiplier <n>", "update the persisted stage-timeout multiplier before resuming")
   .option("--max-total-tokens <n>", "explicitly increase this run's effective token limit without resetting usage")
   .option("--json", "newline-delimited machine-readable events and result", false)
   .action(async (
     workspace: string,
-    options: { allowLkmSpend: boolean; headless: boolean; json: boolean; maxTotalTokens?: string },
+    options: {
+      allowLkmSpend: boolean;
+      headless: boolean;
+      json: boolean;
+      timeoutMultiplier?: string;
+      maxTotalTokens?: string;
+    },
   ) => {
     jsonErrors = options.json;
     activeWorkspace = resolve(workspace);
-    const state = readRunState(workspace);
+    let state = readRunState(workspace);
+    if (resumeStage(state)) state = repairBundledTemplateEntrypoint(workspace, state);
     verifyLocks(workspace, state);
+    if (options.timeoutMultiplier !== undefined) {
+      const multiplier = Number(options.timeoutMultiplier);
+      if (!Number.isFinite(multiplier) || multiplier <= 0) {
+        fail(`--timeout-multiplier must be a positive number, got "${options.timeoutMultiplier}"`);
+      }
+      state = updateRunState(workspace, (current) => ({ ...current, timeout_multiplier: multiplier }));
+    }
     const next = resumeStage(state);
     if (!next && state.status === "completed") {
       if (options.json) jsonLine(runResult(workspace, state));

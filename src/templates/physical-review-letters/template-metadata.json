@@ -1,0 +1,10 @@
+{
+  "id": "physical-review-letters",
+  "source_kind": "project-authored",
+  "official": false,
+  "author_instructions_url": "https://journals.aps.org/prl/authors",
+  "verified_at": "2026-09-07",
+  "license_status": "project-authored",
+  "entrypoint": "template.tex",
+  "build": { "engine": "pdflatex", "bibliography": "bibtex" }
+}

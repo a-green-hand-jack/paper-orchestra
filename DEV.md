@@ -168,7 +168,7 @@ command's `ok` result.
 ```bash
 npm run test:docker -- services
 npm run test:docker -- exec -- hf download Jack-Jieke-Wu/Gewu-Solutions README.md \
-  --type dataset --revision 576302afd4bc95cd3b3ed809f4822c611a1ea95f \
+  --type dataset --revision 1838e5e408785c041c67d263ce5faf858a326958 \
   --local-dir /output/hf-download
 ```
 
@@ -186,7 +186,7 @@ bohr auth whoami --no-interactive -o json
 bohr billing balance --no-interactive -o json
 hf auth whoami --format json
 hf datasets info Jack-Jieke-Wu/Gewu-Solutions \
-  --revision 576302afd4bc95cd3b3ed809f4822c611a1ea95f \
+  --revision 1838e5e408785c041c67d263ce5faf858a326958 \
   --expand sha --format json
 ```
 
@@ -275,6 +275,24 @@ scientific/visual review.
 | `PO_TARGET_CITATIONS` | 5 | `--target-citations` |
 | `PO_RESEARCH_CUTOFF` | 2026-09 | `--research-cutoff` |
 | `PO_TIMEOUT_MULTIPLIER` | 1 | `--timeout-multiplier` |
+
+The Gewu batch launcher intentionally defaults its per-stage multiplier to
+`1.5` (independent of the single-run default above). A stopped launcher must
+not be resumed while its Docker workers are active; after they exit, use
+`scripts/run-gewu-batch.py --resume --recover-stale` to archive the stale
+status and continue without resetting project budgets. Legacy workspaces from
+before bundled template entrypoints were imported are repaired narrowly during
+resume; the old/new template digests are recorded in
+`.po-run/template-migration.json`.
+
+For a failed first write that left only acceptance/runtime reports and no
+`.po-run/run.json`, add `--recover-incomplete`. This is deliberately narrow:
+the Docker harness requires an unaccepted output with neither a resumable run
+nor a submission, and archives the prior acceptance report before retrying.
+
+Run locks also verify the recorded controller command line, not only its PID;
+this prevents a PID reused in a fresh Docker namespace from masquerading as a
+live controller during resume.
 
 All six whole-run budgets are passed explicitly on fresh acceptance writes.
 Resume preserves locked scope and consumed budgets. An explicitly supplied

@@ -16,6 +16,7 @@ import {
 import { installOfficialVenue, type InstalledVenue } from "./venue-install.js";
 import { looksLikeTemplatePath, resolveTemplate } from "./venues.js";
 import { materialSurvey } from "./input.js";
+import { researchPolicyForTemplate } from "./research-policy.js";
 
 export const AUTO_TEMPLATE = "auto";
 
@@ -23,18 +24,18 @@ const MAX_MATERIAL_CHARS = 24_000;
 const SELECTION_TIMEOUT_MS = 120_000;
 
 export interface AutomaticTemplateCandidate {
-  readonly id: "cvpr2026" | "iclr2026" | "nature-portfolio";
+  readonly id: "iclr2026" | "nature-portfolio" | "annals-mathematics" | "physical-review-letters";
   readonly title: string;
   readonly guidance: string;
   /**
    * The bundled edition to use when the newest one cannot be fetched.
    *
-   * Two of the three candidates are `official-archive` adapters, which means a
+   * The ICLR candidate is an `official-archive` adapter, which means a
    * checksum-pinned download. Offering only those made the bundled templates
    * unreachable from `--template auto`: an input with no template of its own,
    * on a machine with no network, could not get a vision or machine-learning
-   * template at all -- it downloaded or it failed, even though a perfectly good
-   * `cvpr2025` sits inside the package.
+   * template at all -- it downloaded or it failed, even though a bundled
+   * fallback sits inside the package.
    *
    * A different year of the same venue is a small, stateable difference. Being
    * unable to write the paper is not.
@@ -45,15 +46,22 @@ export interface AutomaticTemplateCandidate {
 /**
  * The automatic chooser is deliberately limited to templates that can be
  * reproduced without asking the model to invent or download a publisher kit.
- * CCF-A, Science, and mathematics adapters become selectable once the user
- * supplies the exact official kit as an explicit template directory.
+ * CCF-A, Science, and legacy venue adapters remain explicit-only. Automatic
+ * selection follows the field contract: mathematics, physics, Nature-family
+ * natural science, or ICLR for AI/ML.
  */
 export const AUTOMATIC_TEMPLATE_CANDIDATES: readonly AutomaticTemplateCandidate[] = [
   {
-    id: "cvpr2026",
-    title: "CVPR 2026",
-    guidance: "Computer vision, images, video, visual perception, and vision-language work whose primary contribution is visual understanding.",
-    bundledFallback: "cvpr2025",
+    id: "annals-mathematics",
+    title: "Annals of Mathematics style scaffold",
+    guidance: "Pure mathematics, mathematical proofs, exact certificates, combinatorics, geometry, topology, algebra, and analysis.",
+    bundledFallback: "annals-mathematics",
+  },
+  {
+    id: "physical-review-letters",
+    title: "Physical Review Letters style scaffold",
+    guidance: "Physics, including theoretical, computational, and experimental physics. Use explicit conventions, uncertainty, and scope.",
+    bundledFallback: "physical-review-letters",
   },
   {
     id: "iclr2026",
@@ -64,7 +72,7 @@ export const AUTOMATIC_TEMPLATE_CANDIDATES: readonly AutomaticTemplateCandidate[
   {
     id: "nature-portfolio",
     title: "Nature Portfolio authoring scaffold",
-    guidance: "Physics, chemistry, biology, earth science, medicine, and other natural-science research. This is a project-authored scaffold, not an official Nature journal kit.",
+    guidance: "Chemistry, biology, earth science, medicine, and other natural-science research outside physics. This is a project-authored scaffold, not an official Nature journal kit.",
     bundledFallback: "nature-portfolio",
   },
 ];
@@ -364,7 +372,7 @@ export async function resolveTemplateSelection(
     requested: options.requested,
     mode: "automatic",
     templateId: resolved.fellBackTo ?? decision.templateId,
-    rationale,
+    rationale: `${rationale} Policy: ${researchPolicyForTemplate(resolved.fellBackTo ?? decision.templateId)?.targetVenue ?? "explicit venue"}; ${researchPolicyForTemplate(resolved.fellBackTo ?? decision.templateId)?.writingStyle ?? "follow the selected venue instructions"}.`.slice(0, 500),
     directory: resolved.directory,
   };
 }

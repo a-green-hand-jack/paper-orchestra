@@ -527,6 +527,37 @@ function contentManifest(contents: Map<string, Buffer>) {
     .map(([rel, content]) => [rel, createHash("sha256").update(content).digest("hex")])) };
 }
 
+/**
+ * LaTeX's filecontents environment is a real build dependency, not merely a
+ * comment.  Agents sometimes use it for a venue-specific bibliography (for
+ * example, an identifier-rendering .bib beside the controller bibliography).
+ * Preserve that generated file in the portable submission package so the
+ * package validator and an independent rebuild see the same dependency.
+ */
+function addEmbeddedFilecontents(contents: Map<string, Buffer>): void {
+  const block = /\\begin\{filecontents\*?\}\s*\{([^{}]+)\}([\s\S]*?)\\end\{filecontents\*?\}/g;
+  for (const [owner, bytes] of [...contents]) {
+    if (!/\.tex$/i.test(owner)) continue;
+    const text = bytes.toString("utf8");
+    for (const match of text.matchAll(block)) {
+      const rel = match[1]!.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(rel) || /\.(?:tex|sty|cls)$/i.test(rel)) {
+        throw new Error(`Unsafe embedded filecontents dependency in ${owner}: ${rel}`);
+      }
+      const content = Buffer.from(match[2]!.replace(/^\r?\n/, ""));
+      const existing = contents.get(rel);
+      // references.bib is controller-owned and is deliberately copied from
+      // .brain/raw.  An agent may embed a convenience copy in filecontents;
+      // the portable package must keep the controller copy authoritative.
+      if (rel === "references.bib" && existing) continue;
+      if (existing && !existing.equals(content)) {
+        throw new Error(`Embedded filecontents conflicts with packaged file: ${rel}`);
+      }
+      if (!existing) contents.set(rel, content);
+    }
+  }
+}
+
 function submissionContents(root: string): Map<string, Buffer> {
   assertNoSymlinks(root);
   if (!lstatSync(root).isDirectory()) throw new Error("Submission must be a directory");
@@ -695,6 +726,19 @@ export function exportSubmission(workspace: string, options: { sourceRel?: strin
   };
   collect(p.template, true);
   collect(p.brainManuscript);
+  // A manuscript may identify source-level checkers as evidence-bearing
+  // provenance.  Keep the small, digest-locked source/code bundle in the
+  // standalone package under a portable path; otherwise the paper can be
+  // readable yet its claimed audit trail disappears at export time.
+  const evidenceCode = join(p.source, "code");
+  if (existsSync(evidenceCode)) {
+    assertNoSymlinks(evidenceCode);
+    for (const rel of walkFiles(evidenceCode)) {
+      const target = join("code", rel);
+      if (files.has(target)) throw new Error(`Evidence source collides with submission file: ${target}`);
+      files.set(target, safeFile(evidenceCode, rel));
+    }
+  }
   files.set("references.bib", safeFile(p.brainRaw, "references.bib"));
   const sourceRel = options.sourceRel ?? ARTIFACTS.finalTex;
   if (sourceRel !== ARTIFACTS.finalTex && sourceRel !== ARTIFACTS.rawDraft) throw new Error("Submission sourceRel must be finalTex or rawDraft");
@@ -706,7 +750,9 @@ export function exportSubmission(workspace: string, options: { sourceRel?: strin
   const rewritten = new Map<string, string>();
   for (const [rel, from] of files) {
     if (extname(rel) !== ".tex") continue;
-    const text = readFileSync(from, "utf8").replace(/(\\(?:bibliography|addbibresource)(?:\[[^\]]*\])?\s*\{)([^{}]+)(\})/g,
+    const text = readFileSync(from, "utf8")
+      .replace(/\.brain\/input\/code\//g, "code/")
+      .replace(/(\\(?:bibliography|addbibresource)(?:\[[^\]]*\])?\s*\{)([^{}]+)(\})/g,
       (_all, before: string, refs: string, after: string) => before + refs.split(",").map((ref) => {
         const value = ref.trim();
         return ["../raw/references", "../raw/references.bib", ".brain/raw/references", ARTIFACTS.references].includes(value)
@@ -726,6 +772,7 @@ export function exportSubmission(workspace: string, options: { sourceRel?: strin
     contents.set(rel, rewritten.has(rel) ? Buffer.from(rewritten.get(rel)!) : readFileSync(from));
   }
   contents.set("README.md", Buffer.from("Build instructions pending validation\n"));
+  addEmbeddedFilecontents(contents);
   const { bibliography } = packageDetails(contents);
   const latex = "pdflatex -no-shell-escape -interaction=nonstopmode -halt-on-error main.tex";
   contents.set("README.md", Buffer.from(`# Submission build\n\nRun from this directory with a TeX distribution and the venue's required packages:\n\n\`\`\`sh\n${latex}\n${bibliography === "inline" ? "" : `${bibliography === "biber" ? "biber" : "bibtex"} main\n`}${latex}\n${latex}\n\`\`\`\n\n${bibliography === "inline" ? "The bibliography is inline; do not run BibTeX or Biber. " : ""}references.bib is the complete controller bibliography, including all cited keys. The identical final.pdf and final_paper.pdf files are the controller-built manuscript; rebuilding produces main.pdf. See submission-status.json for review status. Build in a separate copy to preserve the reviewed package's ownership hashes.\n`));

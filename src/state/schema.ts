@@ -131,6 +131,12 @@ export const ScopeSchema = z.object({
   template_selection: z.enum(["automatic", "explicit", "discovered"]).optional(),
   /** Short, locked explanation of the template decision. */
   template_rationale: z.string().min(1).max(500).optional(),
+  /** Structured field contract derived from the selected template. */
+  research_domain: z.enum(["mathematics", "physics", "natural-sciences", "ai-ml"]).optional(),
+  /** Concrete submission target selected by the template policy. */
+  target_venue: z.string().min(1).optional(),
+  /** Writing style contract consumed by the planning and drafting prompts. */
+  writing_style: z.string().min(1).max(500).optional(),
   network_policy: z.enum(["online", "offline"]),
   /** New runs explicitly store seed; optional preserves the digest of shipped run scopes. */
   bibliography_mode: z.enum(["seed", "closed"]).optional(),

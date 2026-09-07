@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the authorized Gewu queue with four workers and no automatic relaunches."""
+"""Run the authorized all-solution Gewu queue with four workers and no automatic relaunches."""
 import argparse
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
@@ -19,10 +19,33 @@ LIMITS = {
     "PO_MAX_LKM_CALLS": "10", "PO_TARGET_CITATIONS": "5",
     "PO_TIMEOUT_SECONDS": "7500",
 }
+DEFAULT_TIMEOUT_MULTIPLIER = "1.5"
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def active_worker_outputs():
+    """Return output directories currently mounted by acceptance workers."""
+    result = subprocess.run(
+        ["docker", "ps", "--filter", "name=po-acceptance-", "--format", "{{.ID}}"],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    if result.returncode:
+        raise RuntimeError("cannot inspect active Docker workers before stale recovery")
+    outputs = {}
+    for container_id in result.stdout.splitlines():
+        inspect = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Mounts}}", container_id],
+            cwd=ROOT, check=False, capture_output=True, text=True,
+        )
+        if inspect.returncode:
+            raise RuntimeError(f"cannot inspect active Docker worker {container_id}")
+        for mount in json.loads(inspect.stdout):
+            if mount.get("Destination") == "/output" and mount.get("Source"):
+                outputs[Path(mount["Source"]).resolve()] = container_id
+    return outputs
 
 
 def main():
@@ -30,7 +53,32 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resume", action="store_true",
                         help="resume a stopped existing batch in place, preserving cumulative budgets")
+    parser.add_argument(
+        "--recover-stale", action="store_true",
+        help=("with --resume, recover state left running by a dead launcher; "
+              "refuses while any worker bound to this batch is active"),
+    )
+    parser.add_argument(
+        "--recover-incomplete", action="store_true",
+        help="with --resume, restart paused outputs that have no resumable run or submission",
+    )
+    parser.add_argument("--project", action="append", dest="project_ids",
+                        help="run one project id; repeat to create a bounded queue")
+    parser.add_argument("--shard-index", type=int, help="zero-based shard number")
+    parser.add_argument("--shard-count", type=int, help="total number of deterministic shards")
+    parser.add_argument(
+        "--timeout-multiplier", default=os.environ.get("PO_BATCH_TIMEOUT_MULTIPLIER", DEFAULT_TIMEOUT_MULTIPLIER),
+        help="scale every stage timeout; resumes update the persisted multiplier without resetting usage",
+    )
     args = parser.parse_args()
+    if args.recover_stale and not args.resume:
+        parser.error("--recover-stale requires --resume")
+    try:
+        timeout_multiplier = float(args.timeout_multiplier)
+    except (TypeError, ValueError):
+        parser.error("--timeout-multiplier must be a positive number")
+    if not timeout_multiplier > 0:
+        parser.error("--timeout-multiplier must be a positive number")
     output = args.output.absolute()
     if os.getuid() == 0:
         parser.error("run as a non-root user with Docker access")
@@ -48,15 +96,38 @@ def main():
         if not os.environ.get(name):
             parser.error(f"missing {name}")
     subprocess.run(["python3", "scripts/prepare-gewu-batch.py", "verify"], cwd=ROOT, check=True)
-    manifest_path = ROOT / "datasets/gewu-batch/manifest.json"
+    manifest_path = ROOT / "datasets/gewu-batch-1838e5e40878/manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    projects = manifest["projects"]
-    if len(projects) != 38 or len({p["id"] for p in projects}) != 38:
-        raise ValueError("Expected 38 unique remaining projects")
-    for project in projects:
+    all_projects = manifest["projects"]
+    if len(all_projects) < 1 or len({p["id"] for p in all_projects}) != len(all_projects):
+        raise ValueError("Expected a non-empty unique current-solution queue")
+    for project in all_projects:
+        policy = project.get("field_policy")
         if (Path(project["id"]).name != project["id"] or project["id"] in {".", ".."}
-                or project["status"] not in {"ready", "blocked"}):
+                or project["status"] not in {"ready", "blocked"}
+                or not isinstance(policy, dict)
+                or policy.get("research_domain") not in {"mathematics", "physics", "natural-sciences", "ai-ml"}
+                or policy.get("template_id") not in {"annals-mathematics", "physical-review-letters", "nature-portfolio", "iclr2026"}):
             raise ValueError("Invalid project identity/status")
+    if args.project_ids and (args.shard_index is not None or args.shard_count is not None):
+        parser.error("use --project or --shard-index/--shard-count, not both")
+    if (args.shard_index is None) != (args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be supplied together")
+    if args.shard_count is not None and (args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count):
+        parser.error("shard index must be in [0, shard-count)")
+    requested_ids = set(args.project_ids or [])
+    if args.shard_count is not None:
+        requested_ids = {p["id"] for n, p in enumerate(all_projects) if n % args.shard_count == args.shard_index}
+    elif args.resume and not requested_ids:
+        prior = output / "batch-status.json"
+        if prior.is_file() and not prior.is_symlink():
+            requested_ids = {p["id"] for p in json.loads(prior.read_text()).get("projects", [])}
+    unknown = requested_ids - {p["id"] for p in all_projects}
+    if unknown:
+        parser.error("unknown project id(s): " + ", ".join(sorted(unknown)))
+    projects = [p for p in all_projects if not requested_ids or p["id"] in requested_ids]
+    if not projects:
+        parser.error("selected queue is empty")
     protected = [Path(p[key]).resolve() for p in projects for key in ("materials", "brief")]
     protected += [Path(os.environ[key]).resolve() for key in (
         "PO_MATERIALS_DIR", "PO_BRIEF_FILE", "PO_TEXT_CONFIG_FILE", "PO_MODEL_KEY_FILE",
@@ -80,10 +151,16 @@ def main():
         "started_at": now(), "status": "building", "concurrency": 4,
         "dataset": manifest["dataset"], "revision": manifest["revision"],
         "completed_prior": manifest["completed"], "limits_per_project": LIMITS,
+        "timeout_multiplier": timeout_multiplier,
         "model": os.environ["PO_MODEL"], "automatic_project_relaunches": 0,
         "internal_revision_policy": "Standard pipeline revisions/retries within the same cumulative budget.",
         "cost_note": "Known-cost ceiling only; unreported provider charges are not zero.",
+        "selection": {"project_ids": [p["id"] for p in projects],
+                      "shard_index": args.shard_index, "shard_count": args.shard_count},
         "projects": [{"id": p["id"], "title": p["title"],
+                      "research_domain": p["field_policy"]["research_domain"],
+                      "target_venue": p["field_policy"]["target_venue"],
+                      "template_id": p["field_policy"]["template_id"],
                       "status": "queued" if p["status"] == "ready" else "blocked",
                       "reason": p["reason"], "output": str(output / p["id"])} for p in projects],
     }
@@ -93,8 +170,10 @@ def main():
             parser.error("batch status must not be symlinked")
         prior_status = status_path.read_bytes()
         state = json.loads(prior_status)
-        if state.get("status") in {"running", "building"} or any(
-                p.get("status") == "running" for p in state["projects"]):
+        stale_candidate = state.get("status") in {"running", "building"} or any(
+            p.get("status") == "running" for p in state["projects"]
+        )
+        if stale_candidate and not args.recover_stale:
             parser.error("original batch is running/building; stop it gracefully and wait first")
         if (state.get("dataset") != manifest["dataset"]
                 or state.get("revision") != manifest["revision"]
@@ -110,13 +189,42 @@ def main():
             directory = output / project["id"]
             if (record.get("output") != str(directory) or directory.resolve() != directory
                     or record.get("title") != project["title"]
+                    or record.get("research_domain") != project["field_policy"]["research_domain"]
+                    or record.get("target_venue") != project["field_policy"]["target_venue"]
+                    or record.get("template_id") != project["field_policy"]["template_id"]
                     or record.get("reason") != project["reason"]
-                    or record.get("status") not in {"queued", "paused", "completed", "blocked"}
+                    or record.get("status") not in ({"queued", "paused", "completed", "blocked", "running"}
+                                                        if args.recover_stale else
+                                                       {"queued", "paused", "completed", "blocked"})
                     or (record["status"] == "blocked") != (project["status"] == "blocked")):
                 parser.error(f"original project/output binding mismatch: {project['id']}")
+        if stale_candidate:
+            active = active_worker_outputs()
+            collisions = [
+                (record["id"], active[Path(record["output"]).resolve()])
+                for record in state["projects"]
+                if Path(record["output"]).resolve() in active
+            ]
+            if collisions:
+                details = ", ".join(f"{project_id} ({container_id})"
+                                    for project_id, container_id in collisions)
+                parser.error("cannot recover stale batch while bound workers are active: " + details)
+            for record in state["projects"]:
+                if record["status"] == "running":
+                    record.update(
+                        status="paused",
+                        error_type="StaleBatchRecovery",
+                        error="previous launcher exited before recording the worker result",
+                        finished_at=now(),
+                    )
+            state.update(
+                status="stale_recovered",
+                stale_recovered_at=now(),
+                stale_recovery_policy="no launcher lock and no active worker bound to this batch",
+            )
         with (output / f"batch-status-before-{stamp}.json").open("xb") as archive:
             archive.write(prior_status)
-        state.update(status="building", resumed_at=now())
+        state.update(status="building", resumed_at=now(), timeout_multiplier=timeout_multiplier)
         state.pop("finished_at", None)
     state.update(manifest_sha256=manifest_hash, output=str(output))
     lock = threading.Lock()
@@ -129,6 +237,7 @@ def main():
     save()
     build_dir = output / f"image-build-{stamp}"
     env = {**os.environ, **LIMITS, "PO_OUTPUT_DIR": str(build_dir)}
+    env["PO_TIMEOUT_MULTIPLIER"] = str(timeout_multiplier)
     env.pop("PO_DOCKER_SKIP_BUILD", None)
     env["PO_DOCKER_IMAGE"] = "paper-orchestra:gewu-batch-" + stamp.lower()
     with (output / f"build-{stamp}.log").open("x") as log:
@@ -148,7 +257,10 @@ def main():
         if project["status"] == "blocked":
             return
         worker_env = {**env, "PO_OUTPUT_DIR": record["output"],
-                      "PO_MATERIALS_DIR": project["materials"], "PO_BRIEF_FILE": project["brief"]}
+                      "PO_MATERIALS_DIR": project["materials"], "PO_BRIEF_FILE": project["brief"],
+                      "PO_TEMPLATE": project["field_policy"]["template_id"]}
+        if args.resume:
+            worker_env["PO_RESUME_TIMEOUT_MULTIPLIER"] = str(timeout_multiplier)
         try:
             directory = Path(record["output"])
             acceptance = directory / "acceptance.json"
@@ -211,7 +323,9 @@ def main():
                     # Absence of this knob makes the harness use only persisted scope.
                     worker_env.pop("PO_MAX_TOTAL_TOKENS", None)
                 elif directory.exists() or record["status"] != "queued":
-                    raise ValueError("no resumable run; refusing to reset existing/incomplete output")
+                    if not args.recover_incomplete:
+                        raise ValueError("no resumable run; refusing to reset existing/incomplete output")
+                    worker_env["PO_ALLOW_INCOMPLETE_RESTART"] = "1"
             with lock:
                 for key in ("finished_at", "exit_code", "error", "error_type"):
                     record.pop(key, None)
@@ -237,6 +351,15 @@ def main():
         list(pool.map(work, zip(projects, state["projects"])))
     state.update(status="finished_with_blockers" if any(p["status"] != "completed" for p in state["projects"])
                  else "completed", finished_at=now())
+    save()
+    report_result = subprocess.run(
+        ["python3", "scripts/report-gewu-batch.py", "--output", str(output)],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    state["report"] = {
+        "path": str(output / "batch-report.json"),
+        "generated": report_result.returncode == 0,
+    }
     save()
     print(json.dumps({"status": state["status"], "output": str(output)}), flush=True)
 

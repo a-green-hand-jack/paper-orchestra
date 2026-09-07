@@ -32,15 +32,27 @@ function lockPath(workspace: string): string {
   return join(paths(workspace).runDir, "run.lock");
 }
 
-/** Whether a process is still alive. Signal 0 tests without delivering. */
-function isAlive(pid: number): boolean {
+/** Whether the recorded controller is still alive in this PID namespace. */
+function isAlive(record: LockRecord): boolean {
+  const { pid } = record;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     // EPERM means it exists but belongs to another user, which still counts.
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+  // Acceptance resumes cross container PID namespaces. A legacy lock can
+  // name a live but unrelated PID in the new container, so require the
+  // command line to still identify the recorded controller before refusing.
+  if (record.argv) {
+    try {
+      const command = readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+      if (command && !command.includes(record.argv)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function readLock(workspace: string): LockRecord | null {
@@ -84,7 +96,7 @@ export function acquireRunLock(workspace: string): RunLock {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 
     const existing = readLock(workspace);
-    if (existing && isAlive(existing.pid)) {
+    if (existing && isAlive(existing)) {
       throw new UserFacingError(
         `workspace ${workspace} is already being driven by pid ${existing.pid} ` +
           `(since ${existing.acquired_at}). Two controllers on one workspace interleave ` +
@@ -115,5 +127,5 @@ export function acquireRunLock(workspace: string): RunLock {
 export function lockHolder(workspace: string): { pid: number; alive: boolean } | null {
   const record = readLock(workspace);
   if (!record) return null;
-  return { pid: record.pid, alive: isAlive(record.pid) };
+  return { pid: record.pid, alive: isAlive(record) };
 }

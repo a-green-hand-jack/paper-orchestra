@@ -36,6 +36,10 @@ experiments or invent evaluations against literature-only baselines.
 
 Reuse the materials' stable claim `id`, `status`, `reason`, `method_ids`,
 `experiment_ids`, `evidence_ids`, and `provenance`, not only claim text and paths.
+If `evidence_paths` adds a source that was not already attached to the materials
+claim, add a matching `provenance` entry for that exact path (with a concrete
+locator and, where applicable, a verbatim quote); naming an indexed file alone
+does not establish the claim's provenance.
 Do not mint replacement claim IDs or imply that naming a source establishes a
 claim. Every section has a stable `section_id` and references the relevant
 `claim_ids`. Those claim IDs already imply their evidence; add `evidence_ids`
@@ -100,9 +104,13 @@ Populate `plotting_plan` with figure objects retaining these fields:
 Use unique filename-safe IDs such as `fig_method`. `plot_type` is `plot` or
 `diagram`; `render_route` is `code`, `text_to_image` or `auto`. Numeric charts must
 use `code` and actual result file paths in `data_source`. GPT text-to-image is
-for conceptual method/architecture diagrams, never numerical charts or simulated
-experimental images. Its `generation_prompt` must specify only supported modules,
-connections, labels and visual hierarchy. Use a W:H aspect ratio such as `16:9`.
+for qualitative method/architecture diagrams, never numerical charts or simulated
+experimental images. A diagram that makes exact scientific geometry visible
+(angles, vectors, axes, coordinates, certificates, equations, thresholds, or
+antipodal directions) must also use `code`, so the controller can inspect the
+generated geometry instead of trusting pixels from a text-to-image model. Its
+`generation_prompt` must specify only supported modules, connections, labels and
+visual hierarchy. Use a W:H aspect ratio such as `16:9`.
 If automatic plotting is disabled, leave `plotting_plan` empty and plan around
 supplied figures. Missing figure inputs must not turn into invented evidence.
 

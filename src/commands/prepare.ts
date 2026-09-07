@@ -24,6 +24,7 @@ import {
   writeRunState,
   type CreateRunInput,
 } from "../state/store.js";
+import { researchPolicyForTemplate } from "../research-policy.js";
 
 export interface PrepareOptions {
   readonly workspace: string;
@@ -171,8 +172,8 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
 
   const source = importDirectory(raw, p.source, { exclude: claimed });
   const template = discovered
-    ? importTemplateFiles(raw, p.template, templateLayout(discovered))
-    : importDirectory(resolve(options.templateDir as string), p.template);
+    ? importTemplateFiles(raw, p.template, templateLayout(discovered), { allowTemplateEntrypoint: true })
+    : importDirectory(resolve(options.templateDir as string), p.template, { allowTemplateEntrypoint: true });
 
   // Before `computeLockDigests`, so the brief is inside the lock. After the
   // imports, so it cannot be shadowed by a file of the same name in the input
@@ -202,6 +203,16 @@ export async function prepareWorkspace(options: PrepareOptions): Promise<Prepare
             options.templateRationale ??
             `Found ${(discovered as TemplateDiscovery).main} in the supplied input.`,
         }
+      : {}),
+    ...(researchPolicyForTemplate(options.templateId ?? (discovered ? "nature-portfolio" : ""))
+      ? (() => {
+          const policy = researchPolicyForTemplate(options.templateId ?? (discovered ? "nature-portfolio" : ""))!;
+          return {
+            research_domain: policy.domain,
+            target_venue: policy.targetVenue,
+            writing_style: policy.writingStyle,
+          };
+        })()
       : {}),
     network_policy: options.networkPolicy,
     max_lkm_calls: options.maxLkmCalls,

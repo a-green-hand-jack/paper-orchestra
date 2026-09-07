@@ -1308,6 +1308,16 @@ async function continueOperations(runtime: Runtime, options: ControllerOptions,
       return { outputs: [ARTIFACTS.plottingResults, ARTIFACTS.figuresInfo], detail: `Rendered ${request.target_id}; independent manuscript review still required` };
     },
     revise: async ({ request }) => {
+      // A review may identify admitted checker/source files as part of the
+      // manuscript's evidence trail. Treat a manuscript-targeted revise as a
+      // controller-owned packaging action, not as a writer section edit.
+      if (request.target_id === "manuscript" && request.inputs.length > 0 &&
+          request.inputs.every((input) => input.startsWith(".brain/input/code/") || input.startsWith("source/code/"))) {
+        const selected = manuscriptStage();
+        exportSubmission(workspace, { sourceRel: MANUSCRIPT_SOURCE[selected]!, ready: false });
+        return { outputs: ["submission/main.tex", "submission/README.md"],
+          detail: "Packaged admitted source/code evidence with the provisional standalone submission; review must revalidate it." };
+      }
       const selected = manuscriptStage();
       const outline = OutlineSchema.parse(readJson(join(workspace, ARTIFACTS.outlineV1)));
       const table = outline.table_plan.find((entry) => entry.table_id === request.target_id);

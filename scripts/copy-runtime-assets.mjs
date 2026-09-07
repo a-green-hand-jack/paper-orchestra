@@ -3,7 +3,7 @@
  * Copy the hand-written runtime files into the build output.
  *
  * `assets/` and `templates/` live under `src/` because they are source: the
- * six stage prompts and the three bundled LaTeX templates are hand-edited and
+ * six stage prompts and the bundled LaTeX templates are hand-edited and
  * have no generator. But `tsc` compiles `.ts` and copies nothing else, so
  * without this step `dist/` holds code that cannot find its own prompts, and
  * the published package ships none of them.

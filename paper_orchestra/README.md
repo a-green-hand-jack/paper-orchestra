@@ -102,7 +102,7 @@ python3 scripts/prepare-gewu.py
 ```
 
 This downloads only an explicit raw-file allowlist at revision
-`576302afd4bc95cd3b3ed809f4822c611a1ea95f`, approximately 78 KB including the
+`1838e5e408785c041c67d263ce5faf858a326958`, approximately 250 MiB including the
 dataset card and manifest. Assets live durably under the already ignored
 `datasets/gewu-issue48/`. Rerunning verifies pinned content and refuses to
 overwrite changed assets. No archive is needed: all archives are excluded,

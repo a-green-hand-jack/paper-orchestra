@@ -286,6 +286,10 @@ export interface ImportOptions {
    * materials would impersonate the author's own.
    */
   readonly exclude?: ReadonlySet<string>;
+  /** Allow the selected template directory's conventional entrypoint through
+   * even when its illustrative sections look like a manuscript to the raw
+   * material classifier. Never enabled for source-material imports. */
+  readonly allowTemplateEntrypoint?: boolean;
 }
 
 export function importDirectory(
@@ -357,7 +361,10 @@ export function importDirectory(
         if (!figure && !inspected.preview) { note(rel, `${inspected.role}: ${inspected.reason}`); continue; }
         entry.imported = figure ? rel : allocateInputPath(`${rel}.text.md`, reserved);
         if (inspected.preview) pdfPreviews.set(rel, inspected.preview);
-      } else if (role === "manuscript" || role === "sensitive" || role === "unknown" || (role === "template" && basename(to) !== "template")) {
+      } else if ((role === "manuscript" && !(options.allowTemplateEntrypoint &&
+                   basename(to) === "template" && rel === "template.tex")) ||
+                 role === "sensitive" || role === "unknown" ||
+                 (role === "template" && basename(to) !== "template")) {
         if (role === "unknown") hasUnknownDocument = true;
         note(rel, role);
         continue;
@@ -458,13 +465,15 @@ export function importTemplateFiles(
   from: string,
   to: string,
   layout: ReadonlyMap<string, string>,
+  options: { readonly allowTemplateEntrypoint?: boolean } = {},
 ): ImportResult {
   const root = resolve(from);
   const taken = new Map<string, string>();
   for (const [rel, destination] of layout) {
     safeSourcePath(root, rel);
     const role = roleOfFile(root, rel);
-    if (role === "sensitive" || role === "manuscript" || role === "unknown") {
+    if (role === "sensitive" || role === "unknown" ||
+        (role === "manuscript" && !(options.allowTemplateEntrypoint && destination === "template.tex"))) {
       throw new UnsafePathError(`refusing ${role} as template: ${rel}`);
     }
     const owner = taken.get(destination);
