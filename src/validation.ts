@@ -22,6 +22,7 @@ import {
   packageOptions,
   unresolvedMarkers,
   usedPackages,
+  wordCount,
 } from "./latex.js";
 import { suppliedBibliography } from "./bibliography.js";
 import { ARTIFACTS, BRAIN_DIR, paths } from "./paths.js";
@@ -31,6 +32,7 @@ import type { Outline } from "./artifacts.js";
 import type { StageId } from "./stages.js";
 import type { Check, Scope } from "./state/schema.js";
 import { validateResearch } from "./research.js";
+import { researchPolicyForTemplate } from "./research-policy.js";
 
 /**
  * Validators return data, never throw.
@@ -610,7 +612,93 @@ function templateCompatibility(workspace: string, manuscriptRel: string): Check 
         `template, found \\documentclass{${actualClass}}`,
     );
   }
+  const metadataRaw = readIfExists(join(p.template, "template-metadata.json"));
+  let metadataId: string | undefined;
+  if (metadataRaw !== null) {
+    try { metadataId = (JSON.parse(metadataRaw) as { id?: unknown }).id as string | undefined; } catch { /* reported below */ }
+  }
+  const inferredTemplateId = metadataId
+    ?? (actualClass === "aomart" ? "annals-mathematics" : actualClass === "revtex4-2" ? "physical-review-letters" : workspaceVenue(workspace));
+  const policy = researchPolicyForTemplate(inferredTemplateId);
+  if (policy && policy.source !== "journal-specific-required") {
+    if (metadataRaw === null) {
+      return fail(name, `expected template-metadata.json to record official template provenance`);
+    }
+    try {
+      const metadata = JSON.parse(metadataRaw) as { official?: unknown; source_kind?: unknown };
+      const expectedKinds = policy.source === "official-kit"
+        ? ["official-kit", "official-system-package"]
+        : ["official-system-package"];
+      if (metadata.official !== true || !expectedKinds.includes(String(metadata.source_kind))) {
+        return fail(
+          name,
+          `expected ${metadataId ?? "selected template"} to use an official template source, found ` +
+            `official=${String(metadata.official)} source_kind=${String(metadata.source_kind)}`,
+        );
+      }
+    } catch {
+      return fail(name, `expected template-metadata.json to be valid JSON`);
+    }
+  }
+  if (policy?.source === "journal-specific-required") {
+    return fail(
+      name,
+      "expected a concrete journal and article-type template for natural-sciences work; " +
+        "the generic Nature Portfolio scaffold is not a submission template",
+    );
+  }
   return pass(name, `${support.length} support file(s), documentclass ${actualClass ?? "unset"}`);
+}
+
+/** Enforce the production manuscript contract, not merely successful TeX compilation. */
+function manuscriptContract(workspace: string, scope: Scope): Check {
+  const name = "manuscript_contract";
+  const policy = researchPolicyForTemplate(scope.template_id ?? workspaceVenue(workspace));
+  if (!policy) return pass(name, "no PaperOrchestra production policy applies to this explicit template");
+  if (policy.source === "journal-specific-required") {
+    return fail(name, `${policy.productionTarget.note} Select a concrete journal and official article-type kit before writing.`);
+  }
+  const tex = readIfExists(join(workspace, ARTIFACTS.finalTex));
+  if (tex === null) return fail(name, `expected ${ARTIFACTS.finalTex} to exist`);
+  const reportRaw = readIfExists(join(workspace, ARTIFACTS.buildReport));
+  if (reportRaw === null) return fail(name, `expected ${ARTIFACTS.buildReport} to exist`);
+  let report: z.infer<typeof BuildReportSchema>;
+  try {
+    report = BuildReportSchema.parse(JSON.parse(reportRaw));
+  } catch {
+    return fail(name, `expected ${ARTIFACTS.buildReport} to be valid before checking production length`);
+  }
+  const pages = report.pages ?? 0;
+  const words = wordCount(tex);
+  const headings = [...tex.matchAll(/\\section\*?\s*\{([^}]*)\}/g)].map((match) =>
+    (match[1] ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(),
+  );
+  const hasHeading = (required: string): boolean => {
+    const normalized = required.toLowerCase();
+    return headings.some((heading) => {
+      if (normalized === "main results") return /main result|result/.test(heading);
+      if (normalized === "proofs") return /proof/.test(heading);
+      if (normalized === "examples") return /example/.test(heading);
+      if (normalized === "limitations") return /limitation/.test(heading);
+      if (normalized === "data availability") return /data availability|data and code/.test(heading);
+      if (normalized === "code availability") return /code availability|data and code/.test(heading);
+      if (normalized === "methods") return /method/.test(heading);
+      return heading === normalized || heading.includes(normalized);
+    });
+  };
+  const missing = policy.productionTarget.requiredSections.filter((section) => !hasHeading(section));
+  const problems: string[] = [];
+  if (pages < policy.productionTarget.minimumPages) problems.push(`${pages} pages < ${policy.productionTarget.minimumPages} minimum`);
+  if (words < policy.productionTarget.minimumBodyWords) problems.push(`${words} body words < ${policy.productionTarget.minimumBodyWords} minimum`);
+  if (missing.length > 0) problems.push(`missing required sections: ${missing.join(", ")}`);
+  if (problems.length > 0) {
+    return fail(
+      name,
+      `expected a substantive ${policy.targetVenue} manuscript (${policy.productionTarget.note}); ` +
+        `${problems.join("; ")}. Do not pad unsupported claims: record an evidence blocker instead.`,
+    );
+  }
+  return pass(name, `${pages} pages, ${words} body words, and all ${policy.productionTarget.requiredSections.length} required sections present`);
 }
 
 /**
@@ -1059,6 +1147,7 @@ export function validateStage(workspace: string, stage: StageId, scope: Scope): 
         artifactExists(workspace, ARTIFACTS.finalTex, 512),
         artifactExists(workspace, ARTIFACTS.finalPdf, 1024),
         latexAssembly(workspace),
+        manuscriptContract(workspace, scope),
         columnOverflow(workspace),
         citationIntegrity(workspace, ARTIFACTS.finalTex),
         citationFloorCheck(workspace, ARTIFACTS.finalTex, scope),
@@ -1092,6 +1181,7 @@ export const validators = {
   figureCoverage,
   figureRender,
   templateCompatibility,
+  manuscriptContract,
   anonymityPreserved,
   materialsProvenance,
   materialsGrounding,

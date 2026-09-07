@@ -1,6 +1,9 @@
-# Annals of Mathematics style scaffold
+# Annals of Mathematics authoring contract
 
-This is a project-authored scaffold, not the official Annals template. It
-selects a theorem/lemma/proof writing contract for mathematical papers. Check
-the current [author guidance](https://annals.math.princeton.edu/for-authors)
-and use its required files and limits before submission.
+The manuscript uses the official `aomart` class supplied by TeX Live and CTAN.
+The Annals submission guidelines state that submissions are PDF files, that
+LaTeX is encouraged, and that `aomart` is available for final source files.
+Check the current [submission guidelines](https://annals.math.princeton.edu/submission-guidelines)
+before submission. The journal does not impose a fixed minimum page count; the
+PaperOrchestra production floor is an internal substantive-paper gate, not a
+claim about journal policy.

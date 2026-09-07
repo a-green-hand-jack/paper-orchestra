@@ -9,6 +9,7 @@ completion signal.
 import argparse
 import json
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,52 @@ def load_json(path):
         return None
 
 
+def production_check(project, workspace):
+    policy = project.get("field_policy", {})
+    target = policy.get("production_target")
+    if not isinstance(target, dict):
+        return False, "production target missing from the task manifest"
+    if policy.get("template_id") == "nature-portfolio":
+        return False, "generic Nature Portfolio scaffold is not a concrete journal/article-type template"
+    metadata = load_json(workspace / "template" / "template-metadata.json")
+    expected = {"official-system-package"}
+    if policy.get("template_id") in {"iclr2026", "iclr2025"}:
+        expected.add("official-kit")
+    if not isinstance(metadata, dict) or metadata.get("official") is not True \
+            or metadata.get("source_kind") not in expected:
+        return False, "selected template lacks accepted official provenance"
+    build = load_json(workspace / ".brain" / "raw" / "build.json")
+    pages = build.get("pages") if isinstance(build, dict) else None
+    tex_path = workspace / "submission" / "main.tex"
+    if not isinstance(pages, int) or not tex_path.is_file():
+        return False, "controller page count or final TeX is missing"
+    tex = tex_path.read_text(encoding="utf-8", errors="replace")
+    without_comments = re.sub(r"(^|[^\\])%.*$", r"\1", tex, flags=re.MULTILINE)
+    prose = re.sub(r"\\[A-Za-z@]+\s*(\[[^]]*\])?(\{[^}]*\})?", " ", without_comments)
+    words = sum(bool(re.search(r"[A-Za-z]", token)) for token in prose.split())
+    headings = [re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+                for value in re.findall(r"\\section\*?\s*\{([^}]*)\}", tex)]
+
+    def has_heading(required):
+        required = required.lower()
+        aliases = {
+            "main results": r"main result|result", "proofs": r"proof",
+            "examples": r"example", "limitations": r"limitation",
+            "methods": r"method", "data availability": r"data availability|data and code",
+            "code availability": r"code availability|data and code",
+        }
+        return any((re.search(aliases[required], heading) if required in aliases
+                    else heading == required or required in heading) for heading in headings)
+
+    missing = [section for section in target.get("required_sections", []) if not has_heading(section)]
+    problems = []
+    if pages < target.get("minimum_pages", 0):
+        problems.append(f"{pages} pages < {target['minimum_pages']}")
+    if words < target.get("minimum_body_words", 0):
+        problems.append(f"{words} body words < {target['minimum_body_words']}")
+    if missing:
+        problems.append("missing sections: " + ", ".join(missing))
+    return not problems, "; ".join(problems) if problems else f"{pages} pages, {words} body words, official template"
 def status_for(project, record, output):
     if project["status"] == "blocked":
         return "blocked", project["reason"]
@@ -36,13 +83,16 @@ def status_for(project, record, output):
     submission = load_json(workspace / "submission" / "submission-status.json")
     required = all((workspace / "submission" / name).is_file() for name in (
         "main.tex", "references.bib", "final.pdf", "final_paper.pdf", "README.md"))
+    production_ok, production_detail = production_check(project, workspace)
     if (record.get("status") == "completed" and isinstance(acceptance, dict)
             and acceptance.get("manuscript_accepted") is True
             and isinstance(runtime, dict) and runtime.get("submission_ready") is True
             and isinstance(run, dict) and run.get("status") == "completed"
             and isinstance(submission, dict) and submission.get("status") == "completed"
-            and required):
-        return "paper-ready", "mechanical submission and independent recompile evidence present"
+            and required and production_ok):
+        return "paper-ready", "mechanical submission, official-template, production-length and independent recompile evidence present"
+    if record.get("status") == "completed" and not production_ok:
+        return "needs-resume", "production contract failed: " + production_detail
     if record.get("status") in {"paused", "failed"}:
         return "needs-resume", (record.get("error") or "batch attempt did not reach paper-ready")[:500]
     return "running-or-incomplete", "output exists but the complete acceptance evidence is not present"

@@ -99,6 +99,8 @@ export function adaptVenueKit(options: AdaptVenueOptions): InstalledVenue {
     `${JSON.stringify(
       {
         id: options.id,
+        official: true,
+        source_kind: "official-kit",
         venue_key: options.venueKey,
         year: options.year,
         adapted_at: new Date().toISOString(),

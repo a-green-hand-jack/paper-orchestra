@@ -53,13 +53,13 @@ export interface AutomaticTemplateCandidate {
 export const AUTOMATIC_TEMPLATE_CANDIDATES: readonly AutomaticTemplateCandidate[] = [
   {
     id: "annals-mathematics",
-    title: "Annals of Mathematics style scaffold",
+    title: "Annals of Mathematics (official aomart system class)",
     guidance: "Pure mathematics, mathematical proofs, exact certificates, combinatorics, geometry, topology, algebra, and analysis.",
     bundledFallback: "annals-mathematics",
   },
   {
     id: "physical-review-letters",
-    title: "Physical Review Letters style scaffold",
+    title: "Physical Review Letters (official APS REVTeX system class)",
     guidance: "Physics, including theoretical, computational, and experimental physics. Use explicit conventions, uncertainty, and scope.",
     bundledFallback: "physical-review-letters",
   },
@@ -71,8 +71,8 @@ export const AUTOMATIC_TEMPLATE_CANDIDATES: readonly AutomaticTemplateCandidate[
   },
   {
     id: "nature-portfolio",
-    title: "Nature Portfolio authoring scaffold",
-    guidance: "Chemistry, biology, earth science, medicine, and other natural-science research outside physics. This is a project-authored scaffold, not an official Nature journal kit.",
+    title: "Nature Portfolio (concrete journal kit required)",
+    guidance: "Chemistry, biology, earth science, medicine, and other natural-science research outside physics. A concrete Nature Portfolio journal and article type must be selected; the generic adapter cannot produce a submission manuscript.",
     bundledFallback: "nature-portfolio",
   },
 ];

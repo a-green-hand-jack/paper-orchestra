@@ -221,9 +221,13 @@ or datum is missing, explicitly report the gap; never fill it from a source pape
 Do not claim new experiments or broaden a finite result to satisfy a paper template.
 
 Choose a suitable discipline-specific structure and venue style without implying
-acceptance. Mathematical work may use definitions, lemmas, proofs, counterexamples
-and limitations; do NOT force experimental sections, two plots, image-generation
-routes or a page-count target. Use quantitative charts only when warranted by
+acceptance. The locked field policy below includes a substantive production floor
+for pages, body words and required sections. Meet that floor with supported
+analysis; do not pad unsupported claims. If the supplied evidence cannot support
+the floor, mark the task blocked/not-ready rather than emitting a short note.
+Mathematical work may use definitions, lemmas, proofs, counterexamples
+and limitations; do NOT force experimental sections, two plots or image-generation
+routes. Use quantitative charts only when warranted by
 actual supplied numeric evidence, with code/data provenance and no invented points,
 error bars or measurements. Generate any needed figures anew and review readability.
 An explanatory diagram must be identified as conceptual, not empirical evidence.
@@ -287,6 +291,19 @@ FIELD_POLICIES = {
     },
 }
 
+PRODUCTION_TARGETS = {
+    "mathematics": {"minimum_pages": 8, "minimum_body_words": 3500, "required_sections": ["Introduction", "Background", "Main Results", "Proofs", "Examples", "Limitations", "Conclusion"]},
+    "physics": {"minimum_pages": 4, "minimum_body_words": 2500, "required_sections": ["Introduction", "Model", "Methods", "Results", "Discussion", "Limitations", "Conclusion"]},
+    "natural-sciences": {"minimum_pages": 6, "minimum_body_words": 2500, "required_sections": ["Introduction", "Results", "Discussion", "Methods", "Data Availability", "Code Availability", "Limitations", "Conclusion"]},
+    "ai-ml": {"minimum_pages": 8, "minimum_body_words": 3000, "required_sections": ["Introduction", "Related Work", "Method", "Experiments", "Limitations", "Conclusion"]},
+}
+
+
+def production_target(domain):
+    target = PRODUCTION_TARGETS[domain]
+    return (f"at least {target['minimum_pages']} PDF pages, {target['minimum_body_words']} body words; "
+            + ", ".join(target["required_sections"]))
+
 
 def dataset_catalog():
     """Map the short commit suffix in a solution id to its dataset metadata."""
@@ -310,7 +327,11 @@ def field_policy(project_id, catalog):
     policy = FIELD_POLICIES.get(journal)
     if policy is None:
         raise ValueError(f"no field-to-template policy for {project_id} ({journal})")
-    return {**policy, "classification_source": "Gewu MANIFEST.md" if row else "fallback"}, row
+    return {
+        **policy,
+        "production_target": PRODUCTION_TARGETS[policy["research_domain"]],
+        "classification_source": "Gewu MANIFEST.md" if row else "fallback",
+    }, row
 
 
 def write_generated(path, data):
@@ -336,15 +357,15 @@ def enrich_existing_batch():
         brief_path = Path(project["brief"])
         brief = read_local(brief_path).decode("utf-8")
         marker = "## Locked Field and Submission Contract"
-        if marker not in brief:
-            brief += (f"\n{marker}\n\n"
-                      f"Research domain: **{policy['research_domain']}**\n\n"
-                      f"Target submission: **{policy['target_venue']}**\n\n"
-                      f"Required template: `{policy['template_id']}`\n\n"
-                      f"Writing style: {policy['writing_style']}\n\n"
-                      "The template, venue and writing style are one locked contract. "
-                      "Do not mix a different field's structure or claim acceptance.\n")
-            write_generated(brief_path, brief)
+        brief = brief.partition(marker)[0].rstrip() + (f"\n\n{marker}\n\n"
+                  f"Research domain: **{policy['research_domain']}**\n\n"
+                  f"Target submission: **{policy['target_venue']}**\n\n"
+                  f"Required template: `{policy['template_id']}`\n\n"
+                  f"Production floor: `{production_target(policy['research_domain'])}`\n\n"
+                  f"Writing style: {policy['writing_style']}\n\n"
+                  "The template, venue and writing style are one locked contract. "
+                  "Do not mix a different field's structure or claim acceptance.\n")
+        write_generated(brief_path, brief)
         for row in project["files"]:
             if row.get("decision") == "generated" and row.get("role") == "brief":
                 row.update(bytes=len(brief.encode()), sha256=digest(brief.encode()))

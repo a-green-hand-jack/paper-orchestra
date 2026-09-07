@@ -7,6 +7,7 @@ import type { Scope } from "./state/schema.js";
 import type { Check } from "./state/schema.js";
 import { readJson } from "./files.js";
 import { MaterialsMapSchema, OutlineSchema } from "./artifacts.js";
+import { researchPolicyForTemplate } from "./research-policy.js";
 
 /** Shared with controller-owned reviewer prompts; implementations live in operations.ts. */
 export const OPERATION_REQUEST_CONTRACT = `## Controller Operations
@@ -282,6 +283,10 @@ export function buildStagePrompt(
     "Rules:",
     `- Locked template: ${scope.template_id ?? scope.venue}; selection: ${scope.template_selection ?? "explicit"}.`,
     ...(scope.research_domain ? [`- Research field: ${scope.research_domain}. Target venue: ${scope.target_venue ?? "not specified"}. Writing style: ${scope.writing_style ?? "follow the selected venue instructions"}.`] : []),
+    ...(researchPolicyForTemplate(scope.template_id ?? "") ? (() => {
+      const policy = researchPolicyForTemplate(scope.template_id ?? "")!;
+      return [`- Locked production contract: at least ${policy.productionTarget.minimumPages} PDF pages, ${policy.productionTarget.minimumBodyWords} body words, and these sections: ${policy.productionTarget.requiredSections.join(", ")}. This is PaperOrchestra's substantive floor, not a claim about the venue's own limit. Never pad unsupported claims; if evidence cannot support it, report a blocker.`];
+    })() : []),
     `- Automatic figure generation: ${scope.use_plotting ? "enabled" : "disabled; use supplied figures only"}.`,
     `- Bibliography mode: ${scope.bibliography_mode ?? "seed"}. Only the controller retrieves or changes bibliography records.`,
     ...(scope.target_citations === undefined ? [] : [`- Explicit CLI citation target: ${scope.target_citations}. Record this requirement; never pad unsupported citations.`]),
